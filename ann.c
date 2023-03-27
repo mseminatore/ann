@@ -16,7 +16,7 @@ static real sigmoid(real x)
 //------------------------------
 static real relu(real x)
 {
-	return max(0.0, x);
+	return fmax(0.0, x);
 }
 
 //[]---------------------------------------------

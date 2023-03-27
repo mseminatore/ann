@@ -60,5 +60,7 @@ int add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_t
 PNetwork make_network(void);
 void set_learning_rate(PNetwork pnet, real rate);
 void free_network(PNetwork pnet);
+real test_network(PNetwork pnet);
+real train_network(PNetwork pnet);
 
 #endif

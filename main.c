@@ -14,6 +14,10 @@ int main(int argc, char *argv[])
 
 	set_learning_rate(pnet, 0.5);
 
+	train_network(pnet);
+	
+	test_network(pnet);
+
 	free_network(pnet);
 	return 0;
 }

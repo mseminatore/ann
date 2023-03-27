@@ -41,10 +41,17 @@ int add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_t
 			return E_FAIL;
 	}
 
-	pnet->layers[pnet->layer_count - 1].layer_type = layer_type;
-	pnet->layers[pnet->layer_count - 1].activation = activation_type;
+	int cur_layer = pnet->layer_count - 1;
+	pnet->layers[cur_layer].layer_type = layer_type;
+	pnet->layers[cur_layer].activation = activation_type;
 
 	// allocate the nodes
+	PNode new_nodes = malloc(node_count * sizeof(Node));
+	if (NULL == new_nodes)
+		return E_FAIL;
+
+	pnet->layers[cur_layer].nodes = new_nodes;
+	pnet->layers[cur_layer].node_count = node_count;
 
 	return E_OK;
 }
@@ -64,6 +71,22 @@ PNetwork make_network(void)
 	pnet->learning_rate = 0.1;	// pick a better default?
 
 	return pnet;
+}
+
+//------------------------------
+//
+//------------------------------
+real train_network(PNetwork pnet)
+{
+	return 0.0;
+}
+
+//------------------------------
+//
+//------------------------------
+real test_network(PNetwork pnet)
+{
+	return 0.0;
 }
 
 //------------------------------

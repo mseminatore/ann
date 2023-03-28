@@ -8,7 +8,7 @@
 #define E_OK 0
 
 //------------------------------
-// Note: change to double if needed
+// Note: change to float if desired
 //------------------------------
 typedef double real;
 
@@ -17,8 +17,8 @@ typedef double real;
 //------------------------------
 typedef struct
 {
-	real w;
-	real value;
+	real *w;		// array of node weights
+	real value;		// node value
 } Node, *PNode;
 
 //
@@ -45,6 +45,7 @@ typedef struct
 	PLayer layers;			// array of layers
 	real learning_rate;		// learning rate of network
 	int size;				// number of layers allocated
+	int weights_set;		// have the weights been initialized?
 } Network, *PNetwork;
 
 //------------------------------
@@ -60,7 +61,8 @@ int add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_t
 PNetwork make_network(void);
 void set_learning_rate(PNetwork pnet, real rate);
 void free_network(PNetwork pnet);
-real test_network(PNetwork pnet);
-real train_network(PNetwork pnet);
+real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outputs);
+real test_network(PNetwork pnet, real *inputs, real *outputs);
+void init_weights(PNetwork pnet);
 
 #endif

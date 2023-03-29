@@ -59,6 +59,13 @@ int add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_t
 	pnet->layers[cur_layer].nodes		= new_nodes;
 	pnet->layers[cur_layer].node_count	= node_count;
 	
+	// init the nodes
+	pnet->layers[cur_layer].nodes[0].value = 1.0;
+	for (int i = 1; i < node_count; i++)
+	{
+		pnet->layers[cur_layer].nodes[i].value = 0.0;
+	}
+
 	// get node count from previous layer
 	if (pnet->layer_count > 1)
 	{
@@ -66,7 +73,7 @@ int add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_t
 
 		// allocate array of weights for every node in the current layer
 		for (int i = 0; i < node_count; i++)
-			pnet->layers[cur_layer].nodes[i].w = malloc(node_weights * sizeof(real));
+			pnet->layers[cur_layer].nodes[i].weights = malloc(node_weights * sizeof(real));
 	}
 
 	return E_OK;
@@ -112,7 +119,7 @@ void init_weights(PNetwork pnet)
 			for (int weight = 0; weight < weight_count; weight++)
 			{
 				// initialize weights to random values
-				pnet->layers[layer].nodes[node].w[weight] = (2.0 * (real)rand() / (real)RAND_MAX) - 1.0;
+				pnet->layers[layer].nodes[node].weights[weight] = (2.0 * (real)rand() / (real)RAND_MAX) - 1.0;
 			}
 		}
 	}
@@ -140,7 +147,7 @@ real eval_network(PNetwork pnet)
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 			{
 				// accumulate sum of prev nodes value times this nodes weight for that value
-				sum += pnet->layers[layer - 1].nodes[prev_node].value * pnet->layers[layer].nodes[node].w[prev_node];
+				sum += pnet->layers[layer - 1].nodes[prev_node].value * pnet->layers[layer].nodes[node].weights[prev_node];
 			}
 
 			// update the nodes final value, using the correct activation function
@@ -152,8 +159,109 @@ real eval_network(PNetwork pnet)
 }
 
 //------------------------------
+// print the network
+//------------------------------
+static void print_network(PNetwork pnet)
+{
+	if (!pnet)
+		return;
+
+	// print each layer
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		printf(	"\nLayer %d\n"
+				"--------\n", layer);
+
+		// print nodes in the layer
+		for (int node = 0; node < pnet->layers[layer].node_count; node++)
+		{
+			printf("(%3.2g), ", pnet->layers[layer].nodes[node].value);
+		}
+
+		puts("");
+	}
+}
+
+//--------------------------------
+// compute the mean squared error
+//--------------------------------
+real compute_error(PNetwork pnet, real *outputs)
+{
+	// get the output layer
+	PLayer pLayer = &pnet->layers[pnet->layer_count - 1];
+	
+	assert(pLayer->layer_type == LAYER_OUTPUT);
+
+	real mse = 0.0, diff;
+
+	for (int i = 1; i < pLayer->node_count; i++)
+	{
+		diff = pLayer->nodes[i].value - outputs[i - 1];
+		mse += diff * diff;
+	}
+
+	mse *= 0.5;
+
+	return mse;
+}
+
+//------------------------------
 // train the network
 //------------------------------
+real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
+{
+	if (!pnet)
+		return 0.0;
+
+//	print_network(pnet);
+
+	assert(pnet->layers[0].layer_type == LAYER_INPUT);
+
+	// node 0 is a bias node in every layer
+	pnet->layers[0].nodes[0].value = 1.0;
+
+	// set the input values
+	int node_count = pnet->layers[0].node_count;
+	for (int node = 1; node < node_count; node++)
+	{
+		pnet->layers[0].nodes[node].value = *inputs++;
+	}
+
+	// forward evaluate the network
+	eval_network(pnet);
+
+	print_network(pnet);
+	printf("Err: %5.2g\n", compute_error(pnet, outputs));
+
+	//
+	// back propagate and adjust weights
+	//
+
+	// for each node in the output layer
+	for (int node = 0; node < pnet->layers[pnet->layer_count - 1].node_count; node++)
+	{
+		real sum = 0.0;
+
+		// for each incoming input for this node, 
+		//for (int prev_node = 0; prev_node < pnet->layers[pnet->layer_count - 2].node_count; prev_node++)
+		//{
+		//	sum += (*outputs - pnet->layers[pnet->layer_count - 1].) * 
+		//}
+
+		//pLayer->nodes[node].weights += pnet->learning_rate * sum;
+	}
+
+	//for (int layer = pnet->layer_count - 1; layer > 0; layer--)
+	//{
+
+	//}
+
+	return 0.0;
+}
+
+//-----------------------------------------------
+// Train the network for a set of inputs/outputs
+//-----------------------------------------------
 real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outputs)
 {
 	if (!pnet)
@@ -162,26 +270,12 @@ real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outpu
 	// initialize weights to random values if not already initialized
 	init_weights(pnet);
 
-	assert(pnet->layers[0].layer_type == LAYER_INPUT);
-
 	// iterate over all sets of inputs
 	for (int i = 0; i < input_set_count; i++)
 	{
-		// node 0 is a bias node in every layer
-		pnet->layers[0].nodes[0].value = 1.0;
-
-		// set the input values
-		int node_count = pnet->layers[0].node_count;
-		for (int node = 1; node < node_count; node++)
-		{
-			pnet->layers[0].nodes[node].value = *inputs++;
-		}
-
-		// evaluate the network
-		eval_network(pnet);
-
-		// back propagate
-
+		train_pass_network(pnet, inputs, outputs);
+		inputs += (pnet->layers[0].node_count - 1);
+		outputs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
 	}
 
 	return 0.0;
@@ -221,7 +315,7 @@ void free_network(PNetwork pnet)
 		for (int node = 0; node < pnet->layers[layer].node_count; node++)
 		{
 			if (pnet->layers[layer].layer_type != LAYER_INPUT)
-				free(pnet->layers[layer].nodes[node].w);
+				free(pnet->layers[layer].nodes[node].weights);
 		}
 
 		free(pnet->layers[layer].nodes);

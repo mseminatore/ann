@@ -17,8 +17,8 @@ typedef double real;
 //------------------------------
 typedef struct
 {
-	real *w;		// array of node weights
-	real value;		// node value
+	real *weights;		// array of node weights
+	real value;			// node value
 } Node, *PNode;
 
 //
@@ -61,6 +61,7 @@ int add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_t
 PNetwork make_network(void);
 void set_learning_rate(PNetwork pnet, real rate);
 void free_network(PNetwork pnet);
+real train_pass_network(PNetwork pnet, real *inputs, real *outputs);
 real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outputs);
 real test_network(PNetwork pnet, real *inputs, real *outputs);
 void init_weights(PNetwork pnet);

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "ann.h"
 
+// AND function
 real inputs[] = {
 	0.0, 0.0, 
 	0.0, 1.0,

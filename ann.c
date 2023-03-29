@@ -237,18 +237,18 @@ real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// back propagate and adjust weights
 	//
 
-	// for each node in the output layer
+	// for each node in the output layer, including bias nodes
 	for (int node = 0; node < pnet->layers[pnet->layer_count - 1].node_count; node++)
 	{
-		real sum = 0.0;
+		real delta_w = 0.0;
 
 		// for each incoming input for this node, 
 		//for (int prev_node = 0; prev_node < pnet->layers[pnet->layer_count - 2].node_count; prev_node++)
 		//{
-		//	sum += (*outputs - pnet->layers[pnet->layer_count - 1].) * 
+		//	delta_w += (*outputs - pnet->layers[pnet->layer_count - 1].) * 
 		//}
 
-		//pLayer->nodes[node].weights += pnet->learning_rate * sum;
+		//pLayer->nodes[node].weights += pnet->learning_rate * delta_w;
 	}
 
 	//for (int layer = pnet->layer_count - 1; layer > 0; layer--)

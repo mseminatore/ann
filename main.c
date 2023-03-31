@@ -2,21 +2,6 @@
 #include "ann.h"
 
 // AND function
-//real inputs[] = {
-//	0.0, 0.0, 
-//	0.0, 1.0,
-//	1.0, 0.0,
-//	1.0, 1.0
-//};
-//
-//real outputs[] = {
-//	0.0,
-//	0.0,
-//	0.0,
-//	1.0
-//};
-
-// OR function
 real inputs[] = {
 	0.0, 0.0, 
 	0.0, 1.0,
@@ -26,10 +11,25 @@ real inputs[] = {
 
 real outputs[] = {
 	0.0,
-	1.0,
-	1.0,
+	0.0,
+	0.0,
 	1.0
 };
+
+// OR function
+// real inputs[] = {
+// 	0.0, 0.0, 
+// 	0.0, 1.0,
+// 	1.0, 0.0,
+// 	1.0, 1.0
+// };
+
+// real outputs[] = {
+// 	0.0,
+// 	1.0,
+// 	1.0,
+// 	1.0
+// };
 
 // XOR function
 //real inputs[] = {

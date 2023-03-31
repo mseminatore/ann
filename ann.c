@@ -150,8 +150,23 @@ real eval_network(PNetwork pnet)
 				sum += pnet->layers[layer - 1].nodes[prev_node].value * pnet->layers[layer].nodes[node].weights[prev_node];
 			}
 
+			// TODO - switch to function pointers for perf??
 			// update the nodes final value, using the correct activation function
-			pnet->layers[layer].nodes[node].value = sigmoid(sum);
+			switch (pnet->layers[layer].activation)
+			{
+			case ACTIVATION_SIGMOID:
+				pnet->layers[layer].nodes[node].value = sigmoid(sum);
+				break;
+
+			case ACTIVATION_RELU:
+				pnet->layers[layer].nodes[node].value = relu(sum);
+				break;
+
+			default:
+			case ACTIVATION_SOFTMAX:
+				assert(0);
+				break;
+			}
 		}
 	}
 
@@ -237,20 +252,26 @@ real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// back propagate and adjust weights
 	//
 
-	// for each node in the output layer, including bias nodes
-	for (int node = 0; node < pnet->layers[pnet->layer_count - 1].node_count; node++)
+	// for each node in the output layer, excluding bias nodes
+	for (int node = 1; node < pnet->layers[pnet->layer_count - 1].node_count; node++)
 	{
 		real delta_w = 0.0;
 
-		// for each incoming input for this node, 
-		//for (int prev_node = 0; prev_node < pnet->layers[pnet->layer_count - 2].node_count; prev_node++)
-		//{
-		//	delta_w += (*outputs - pnet->layers[pnet->layer_count - 1].) * 
-		//}
+		// for each incoming input for this node, calculate the change in weight for that node
+		for (int prev_node = 0; prev_node < pnet->layers[pnet->layer_count - 2].node_count; prev_node++)
+		{
+			real x = pnet->layers[pnet->layer_count - 2].nodes[prev_node].value;
+			real result = *outputs;
+			real y = pnet->layers[pnet->layer_count - 1].nodes[node].value;
 
-		//pLayer->nodes[node].weights += pnet->learning_rate * delta_w;
+			delta_w = pnet->learning_rate * (result - y) * x;
+			pnet->layers[pnet->layer_count - 1].nodes[node].weights[prev_node] += delta_w;
+		}
+
+		outputs++;
 	}
 
+	// hidden layers
 	//for (int layer = pnet->layer_count - 1; layer > 0; layer--)
 	//{
 
@@ -270,12 +291,20 @@ real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outpu
 	// initialize weights to random values if not already initialized
 	init_weights(pnet);
 
-	// iterate over all sets of inputs
-	for (int i = 0; i < input_set_count; i++)
+	int converged = 0;
+
+//	while (!converged)
 	{
-		train_pass_network(pnet, inputs, outputs);
-		inputs += (pnet->layers[0].node_count - 1);
-		outputs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
+		// iterate over all sets of inputs
+		for (int i = 0; i < input_set_count; i++)
+		{
+			train_pass_network(pnet, inputs, outputs);
+			inputs += (pnet->layers[0].node_count - 1);
+			outputs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
+		}
+
+//		if ()
+//			converged = 1;
 	}
 
 	return 0.0;

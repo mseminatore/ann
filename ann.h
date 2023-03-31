@@ -23,7 +23,7 @@ typedef struct
 
 //
 typedef enum { LAYER_INPUT, LAYER_HIDDEN, LAYER_OUTPUT } Layer_type;
-typedef enum { ACTIVATION_NULL, ACTIVATION_SIGMOID, ACTIVATION_RELU } Activation_type;
+typedef enum { ACTIVATION_NULL, ACTIVATION_SIGMOID, ACTIVATION_RELU, ACTIVATION_SOFTMAX } Activation_type;
 
 //------------------------------
 // Defines a layer in a network
@@ -52,7 +52,7 @@ typedef struct
 //
 //------------------------------
 #define DEFAULT_LAYERS	4
-#define DEFAULT_NODES	8
+//#define DEFAULT_NODES	8
 
 //------------------------------
 //

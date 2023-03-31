@@ -108,8 +108,10 @@ PNetwork make_network(void)
 	return pnet;
 }
 
+//------------------------------
 //
-real get_rand(real min, real max)
+//------------------------------
+static real get_rand(real min, real max)
 {
 	real r = (real)rand() / (real)RAND_MAX;
 	real scale = max - min;
@@ -122,7 +124,7 @@ real get_rand(real min, real max)
 //------------------------------
 // initialize the weights
 //------------------------------
-void init_weights(PNetwork pnet)
+static void init_weights(PNetwork pnet)
 {
 	if (!pnet || pnet->weights_set)
 		return;
@@ -307,12 +309,13 @@ real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// compute the Mean Squared Error
 	real err = compute_error(pnet, outputs);
 //	printf("Err: %5.2g\n", err);
+//	print_network(pnet);
 
 	return err;
 }
 
 //-----------------------------------------------
-//
+// shuffle the indices
 //-----------------------------------------------
 void shuffle_indices(int *input_indices, int count)
 {
@@ -351,7 +354,7 @@ real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outpu
 		// iterate over all sets of inputs
 		for (int i = 0; i < input_set_count; i++)
 		{
-			mse += train_pass_network(pnet, inputs, outputs);
+			mse += train_pass_network(pnet, ins, outs);
 			ins += (pnet->layers[0].node_count - 1);
 			outs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
 		}
@@ -385,6 +388,16 @@ void set_learning_rate(PNetwork pnet, real rate)
 	pnet->learning_rate = rate;
 }
 
+//------------------------------
+//
+//------------------------------
+void set_convergence(PNetwork pnet, real limit)
+{
+	if (!pnet)
+		return;
+
+	pnet->convergence_epsilon = limit;
+}
 //------------------------------
 // free a network
 //------------------------------

@@ -69,7 +69,7 @@ typedef struct
 //
 //------------------------------
 #define DEFAULT_LAYERS	4
-#define DEFAULT_CONVERGENCE 0.1
+#define DEFAULT_CONVERGENCE 0.01
 
 //------------------------------
 //
@@ -81,6 +81,7 @@ void free_network(PNetwork pnet);
 real train_pass_network(PNetwork pnet, real *inputs, real *outputs);
 real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outputs);
 real test_network(PNetwork pnet, real *inputs, real *outputs);
-void init_weights(PNetwork pnet);
+//void init_weights(PNetwork pnet);
+void set_convergence(PNetwork pnet, real limit);
 
 #endif

@@ -1,6 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <malloc.h>
+
+#ifdef _WIN32
+#	include <malloc.h>
+#else
+#	include <alloca.h>
+#endif
+
 #include <math.h>
 #include <assert.h>
 #include "ann.h"

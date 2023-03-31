@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include <math.h>
 #include <assert.h>
 #include "ann.h"
@@ -18,6 +19,15 @@ static real sigmoid(real x)
 static real relu(real x)
 {
 	return fmax(0.0, x);
+}
+
+
+//------------------------------
+// compute the leaky ReLU activation
+//------------------------------
+static real leaky_relu(real x)
+{
+	return fmax(0.01 * x, x);
 }
 
 //[]---------------------------------------------
@@ -162,6 +172,10 @@ real eval_network(PNetwork pnet)
 				pnet->layers[layer].nodes[node].value = relu(sum);
 				break;
 
+			case ACTIVATION_LEAKY_RELU:
+				pnet->layers[layer].nodes[node].value = leaky_relu(sum);
+				break;
+
 			default:
 			case ACTIVATION_SOFTMAX:
 				assert(0);
@@ -278,10 +292,19 @@ real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 
 	//}
 
+	// compute the Mean Squared Error
 	real err = compute_error(pnet, outputs);
 	printf("Err: %5.2g\n", err);
 
 	return err;
+}
+
+//-----------------------------------------------
+//
+//-----------------------------------------------
+void shuffle_indices(int *input_indices, int count)
+{
+
 }
 
 //-----------------------------------------------
@@ -296,13 +319,23 @@ real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outpu
 	init_weights(pnet);
 
 	int converged = 0;
-	real mse;
+	real mse = 0.0;
+
+	// shuffle the inputs and outputs
+	int *input_indices = alloca(input_set_count * sizeof(int));
+	for (int i = 0; i < input_set_count; i++)
+	{
+		input_indices[i] = i;
+	}
+
+	shuffle_indices(input_indices, input_set_count);
+
 //	while (!converged)
 	{
 		// iterate over all sets of inputs
 		for (int i = 0; i < input_set_count; i++)
 		{
-			mse = train_pass_network(pnet, inputs, outputs);
+			mse += train_pass_network(pnet, inputs, outputs);
 			inputs += (pnet->layers[0].node_count - 1);
 			outputs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
 		}
@@ -311,7 +344,7 @@ real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outpu
 //			converged = 1;
 	}
 
-	return 0.0;
+	return mse / (real)input_set_count;
 }
 
 //------------------------------

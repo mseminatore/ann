@@ -57,18 +57,19 @@ typedef struct
 //------------------------------
 typedef struct
 {
-	int layer_count;		// number of layers in network
-	PLayer layers;			// array of layers
-	real learning_rate;		// learning rate of network
-	int size;				// number of layers allocated
-	int weights_set;		// have the weights been initialized?
+	int layer_count;			// number of layers in network
+	PLayer layers;				// array of layers
+	real learning_rate;			// learning rate of network
+	int size;					// number of layers allocated
+	int weights_set;			// have the weights been initialized?
+	real convergence_epsilon;	// threshold for convergence
 } Network, *PNetwork;
 
 //------------------------------
 //
 //------------------------------
 #define DEFAULT_LAYERS	4
-//#define DEFAULT_NODES	8
+#define DEFAULT_CONVERGENCE 0.1
 
 //------------------------------
 //

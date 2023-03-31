@@ -103,8 +103,20 @@ PNetwork make_network(void)
 	pnet->layer_count	= 0;
 	pnet->learning_rate = 0.15;	// pick a better default?
 	pnet->weights_set	= 0;
+	pnet->convergence_epsilon = DEFAULT_CONVERGENCE;
 
 	return pnet;
+}
+
+//
+real get_rand(real min, real max)
+{
+	real r = (real)rand() / (real)RAND_MAX;
+	real scale = max - min;
+
+	r *= scale;
+	r += min;
+	return r;
 }
 
 //------------------------------
@@ -129,7 +141,7 @@ void init_weights(PNetwork pnet)
 			for (int weight = 0; weight < weight_count; weight++)
 			{
 				// initialize weights to random values
-				pnet->layers[layer].nodes[node].weights[weight] = (2.0 * (real)rand() / (real)RAND_MAX) - 1.0;
+				pnet->layers[layer].nodes[node].weights[weight] = get_rand(-0.01, 0.01);	// (2.0 * (real)rand() / (real)RAND_MAX) - 1.0;
 			}
 		}
 	}
@@ -294,7 +306,7 @@ real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 
 	// compute the Mean Squared Error
 	real err = compute_error(pnet, outputs);
-	printf("Err: %5.2g\n", err);
+//	printf("Err: %5.2g\n", err);
 
 	return err;
 }
@@ -320,6 +332,7 @@ real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outpu
 
 	int converged = 0;
 	real mse = 0.0;
+	int epoch = 0;
 
 	// shuffle the inputs and outputs
 	int *input_indices = alloca(input_set_count * sizeof(int));
@@ -330,21 +343,27 @@ real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outpu
 
 	shuffle_indices(input_indices, input_set_count);
 
-//	while (!converged)
+	while (!converged)
 	{
+		real *ins = inputs;
+		real *outs = outputs;
+
 		// iterate over all sets of inputs
 		for (int i = 0; i < input_set_count; i++)
 		{
 			mse += train_pass_network(pnet, inputs, outputs);
-			inputs += (pnet->layers[0].node_count - 1);
-			outputs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
+			ins += (pnet->layers[0].node_count - 1);
+			outs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
 		}
 
-//		if (mse < )
-//			converged = 1;
+		mse /= (real)input_set_count;
+		if (mse < pnet->convergence_epsilon)
+			converged = 1;
+
+		printf("Epoch %d, MSE = %5.2g\n", ++epoch, mse);
 	}
 
-	return mse / (real)input_set_count;
+	return mse;
 }
 
 //------------------------------

@@ -128,7 +128,7 @@ void init_weights(PNetwork pnet)
 }
 
 //------------------------------
-//
+// forward evaluate the network
 //------------------------------
 real eval_network(PNetwork pnet)
 {
@@ -235,7 +235,7 @@ real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// node 0 is a bias node in every layer
 	pnet->layers[0].nodes[0].value = 1.0;
 
-	// set the input values
+	// set the input values on the network
 	int node_count = pnet->layers[0].node_count;
 	for (int node = 1; node < node_count; node++)
 	{
@@ -245,14 +245,14 @@ real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// forward evaluate the network
 	eval_network(pnet);
 
-	print_network(pnet);
-	printf("Err: %5.2g\n", compute_error(pnet, outputs));
+//	print_network(pnet);
 
 	//
 	// back propagate and adjust weights
 	//
 
 	// for each node in the output layer, excluding bias nodes
+	real *expected_values = outputs;
 	for (int node = 1; node < pnet->layers[pnet->layer_count - 1].node_count; node++)
 	{
 		real delta_w = 0.0;
@@ -261,14 +261,15 @@ real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 		for (int prev_node = 0; prev_node < pnet->layers[pnet->layer_count - 2].node_count; prev_node++)
 		{
 			real x = pnet->layers[pnet->layer_count - 2].nodes[prev_node].value;
-			real result = *outputs;
+			real result = *expected_values;
 			real y = pnet->layers[pnet->layer_count - 1].nodes[node].value;
 
 			delta_w = pnet->learning_rate * (result - y) * x;
 			pnet->layers[pnet->layer_count - 1].nodes[node].weights[prev_node] += delta_w;
 		}
 
-		outputs++;
+		// get next expected output value
+		expected_values++;
 	}
 
 	// hidden layers
@@ -277,7 +278,10 @@ real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 
 	//}
 
-	return 0.0;
+	real err = compute_error(pnet, outputs);
+	printf("Err: %5.2g\n", err);
+
+	return err;
 }
 
 //-----------------------------------------------
@@ -292,18 +296,18 @@ real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outpu
 	init_weights(pnet);
 
 	int converged = 0;
-
+	real mse;
 //	while (!converged)
 	{
 		// iterate over all sets of inputs
 		for (int i = 0; i < input_set_count; i++)
 		{
-			train_pass_network(pnet, inputs, outputs);
+			mse = train_pass_network(pnet, inputs, outputs);
 			inputs += (pnet->layers[0].node_count - 1);
 			outputs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
 		}
 
-//		if ()
+//		if (mse < )
 //			converged = 1;
 	}
 

@@ -21,9 +21,25 @@ typedef struct
 	real value;			// node value
 } Node, *PNode;
 
-//
-typedef enum { LAYER_INPUT, LAYER_HIDDEN, LAYER_OUTPUT } Layer_type;
-typedef enum { ACTIVATION_NULL, ACTIVATION_SIGMOID, ACTIVATION_RELU, ACTIVATION_SOFTMAX } Activation_type;
+//------------------------------
+// Layer types
+//------------------------------
+typedef enum { 
+	LAYER_INPUT, 
+	LAYER_HIDDEN, 
+	LAYER_OUTPUT 
+} Layer_type;
+
+//------------------------------
+// Activation types
+//------------------------------
+typedef enum { 
+	ACTIVATION_NULL, 
+	ACTIVATION_SIGMOID, 
+	ACTIVATION_RELU,
+	ACTIVATION_LEAKY_RELU,
+	ACTIVATION_SOFTMAX 
+} Activation_type;
 
 //------------------------------
 // Defines a layer in a network

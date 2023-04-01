@@ -66,10 +66,11 @@ typedef struct
 } Network, *PNetwork;
 
 //------------------------------
-//
+// Configurable parameters
 //------------------------------
 #define DEFAULT_LAYERS	4
 #define DEFAULT_CONVERGENCE 0.01
+#define DEFAULT_BUFFER_SIZE	1024
 
 //------------------------------
 //
@@ -81,7 +82,7 @@ void free_network(PNetwork pnet);
 real train_pass_network(PNetwork pnet, real *inputs, real *outputs);
 real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outputs);
 real test_network(PNetwork pnet, real *inputs, real *outputs);
-//void init_weights(PNetwork pnet);
 void set_convergence(PNetwork pnet, real limit);
+int load_csv(const char *filename, real **data, int *count);
 
 #endif

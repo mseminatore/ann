@@ -404,6 +404,7 @@ void set_convergence(PNetwork pnet, real limit)
 
 	pnet->convergence_epsilon = limit;
 }
+
 //------------------------------
 // free a network
 //------------------------------
@@ -429,4 +430,56 @@ void free_network(PNetwork pnet)
 
 	// free network
 	free(pnet);
+}
+
+//------------------------------
+// load data from a csv file
+//------------------------------
+int load_csv(const char *filename, real **data, int *count)
+{
+	FILE *f;
+	char *s, buf[DEFAULT_BUFFER_SIZE];
+	int size = 8;
+	real *dbuf;
+
+	f = fopen(filename, "rt");
+	if (!f)
+		return E_FAIL;
+
+	*count = 0;
+
+	dbuf = malloc(size * sizeof(real));
+
+	// read a line
+	while (fgets(buf, DEFAULT_BUFFER_SIZE - 1, f))
+	{
+		// tokenize the line
+		s = strtok(buf, ", ");
+
+		while (s) {
+			dbuf[*count] = atof(s);
+			(*count)++;
+
+			if (*count >= size)
+			{
+				// double the size
+				size <<= 1;
+
+				dbuf = realloc(dbuf, size * sizeof(real));
+				
+				// check for OOM
+				if (!dbuf)
+				{
+					free(dbuf);
+					return E_FAIL;
+				}
+			}
+
+			s = strtok(NULL, ", ");
+		}
+	}
+
+	*data = dbuf;
+	fclose(f);
+	return E_OK;
 }

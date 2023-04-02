@@ -28,13 +28,55 @@ static real relu(real x)
 	return fmax(0.0, x);
 }
 
-
 //------------------------------
 // compute the leaky ReLU activation
 //------------------------------
 static real leaky_relu(real x)
 {
 	return fmax(0.01 * x, x);
+}
+
+//------------------------------
+//
+//------------------------------
+static real get_rand(real min, real max)
+{
+	real r = (real)rand() / (real)RAND_MAX;
+	real scale = max - min;
+
+	r *= scale;
+	r += min;
+	return r;
+}
+
+//------------------------------
+// initialize the weights
+//------------------------------
+static void init_weights(PNetwork pnet)
+{
+	if (!pnet || pnet->weights_set)
+		return;
+
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		// input layers don't have weights
+		if (pnet->layers[layer].layer_type == LAYER_INPUT)
+			continue;
+
+		int weight_count	= pnet->layers[layer - 1].node_count;
+		int node_count		= pnet->layers[layer].node_count;
+
+		for (int node = 0; node < node_count; node++)
+		{
+			for (int weight = 0; weight < weight_count; weight++)
+			{
+				// initialize weights to random values
+				pnet->layers[layer].nodes[node].weights[weight] = get_rand(-0.01, 0.01);	// (2.0 * (real)rand() / (real)RAND_MAX) - 1.0;
+			}
+		}
+	}
+
+	pnet->weights_set = 1;
 }
 
 //[]---------------------------------------------
@@ -113,49 +155,6 @@ PNetwork make_network(void)
 	pnet->convergence_epsilon = DEFAULT_CONVERGENCE;
 
 	return pnet;
-}
-
-//------------------------------
-//
-//------------------------------
-static real get_rand(real min, real max)
-{
-	real r = (real)rand() / (real)RAND_MAX;
-	real scale = max - min;
-
-	r *= scale;
-	r += min;
-	return r;
-}
-
-//------------------------------
-// initialize the weights
-//------------------------------
-static void init_weights(PNetwork pnet)
-{
-	if (!pnet || pnet->weights_set)
-		return;
-
-	for (int layer = 0; layer < pnet->layer_count; layer++)
-	{
-		// input layers don't have weights
-		if (pnet->layers[layer].layer_type == LAYER_INPUT)
-			continue;
-
-		int weight_count	= pnet->layers[layer - 1].node_count;
-		int node_count		= pnet->layers[layer].node_count;
-
-		for (int node = 0; node < node_count; node++)
-		{
-			for (int weight = 0; weight < weight_count; weight++)
-			{
-				// initialize weights to random values
-				pnet->layers[layer].nodes[node].weights[weight] = get_rand(-0.01, 0.01);	// (2.0 * (real)rand() / (real)RAND_MAX) - 1.0;
-			}
-		}
-	}
-
-	pnet->weights_set = 1;
 }
 
 //------------------------------

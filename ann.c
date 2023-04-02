@@ -333,7 +333,7 @@ PNetwork ann_make_network(void)
 	pnet->size			= DEFAULT_LAYERS;
 	pnet->layers		= malloc(pnet->size * (sizeof(Layer)));
 	pnet->layer_count	= 0;
-	pnet->learning_rate = 0.15;	// pick a better default?
+	pnet->learning_rate = DEFAULT_LEARNING_RATE;
 	pnet->weights_set	= 0;
 	pnet->convergence_epsilon = DEFAULT_CONVERGENCE;
 

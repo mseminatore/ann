@@ -68,9 +68,10 @@ typedef struct
 //------------------------------
 // Configurable parameters
 //------------------------------
-#define DEFAULT_LAYERS	4
-#define DEFAULT_CONVERGENCE 0.01
-#define DEFAULT_BUFFER_SIZE	1024
+#define DEFAULT_LAYERS			4
+#define DEFAULT_CONVERGENCE 	0.01
+#define DEFAULT_BUFFER_SIZE		1024
+#define DEFAULT_LEARNING_RATE 	0.15	// pick a better default?
 
 //------------------------------
 //
@@ -79,7 +80,6 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 PNetwork ann_make_network(void);
 void ann_set_learning_rate(PNetwork pnet, real rate);
 void ann_free_network(PNetwork pnet);
-//real train_pass_network(PNetwork pnet, real *inputs, real *outputs);
 real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride);
 real ann_test_network(PNetwork pnet, real *inputs, real *outputs);
 void ann_set_convergence(PNetwork pnet, real limit);

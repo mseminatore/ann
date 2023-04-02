@@ -27,9 +27,9 @@ int main(int argc, char *argv[])
 	size_t rows, stride;
 
 	// load the data
-	ann_load_csv("or.csv", &data, &rows, &stride);
+	ann_load_csv("and.csv", &data, &rows, &stride);
 
-	print_data(data, rows, stride);
+	// print_data(data, rows, stride);
 
 	// define our network
 	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);

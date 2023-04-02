@@ -81,14 +81,185 @@ static void init_weights(PNetwork pnet)
 	pnet->weights_set = 1;
 }
 
-//[]---------------------------------------------
+//------------------------------
+// print the network
+//------------------------------
+static void print_network(PNetwork pnet)
+{
+	if (!pnet)
+		return;
+
+	// print each layer
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		printf("\nLayer %d\n"
+			"--------\n", layer);
+
+		// print nodes in the layer
+		for (int node = 0; node < pnet->layers[layer].node_count; node++)
+		{
+			printf("(%3.2g), ", pnet->layers[layer].nodes[node].value);
+		}
+
+		puts("");
+	}
+}
+
+//--------------------------------
+// compute the mean squared error
+//--------------------------------
+static real compute_error(PNetwork pnet, real *outputs)
+{
+	// get the output layer
+	PLayer pLayer = &pnet->layers[pnet->layer_count - 1];
+
+	assert(pLayer->layer_type == LAYER_OUTPUT);
+
+	real mse = 0.0, diff;
+
+	for (int i = 1; i < pLayer->node_count; i++)
+	{
+		diff = pLayer->nodes[i].value - outputs[i - 1];
+		mse += diff * diff;
+	}
+
+	mse *= 0.5;
+
+	return mse;
+}
+
+//------------------------------
+// forward evaluate the network
+//------------------------------
+static real eval_network(PNetwork pnet)
+{
+	if (!pnet)
+		return 0.0;
+
+	// loop over the non-input layers
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+	{
+		// loop over each node in the layer, skipping the bias node
+		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		{
+			real sum = 0.0;
+
+			// loop over nodes in previous layer, including the bias node
+			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			{
+				// accumulate sum of prev nodes value times this nodes weight for that value
+				sum += pnet->layers[layer - 1].nodes[prev_node].value * pnet->layers[layer].nodes[node].weights[prev_node];
+			}
+
+			// TODO - switch to function pointers for perf??
+			// update the nodes final value, using the correct activation function
+			switch (pnet->layers[layer].activation)
+			{
+			case ACTIVATION_SIGMOID:
+				pnet->layers[layer].nodes[node].value = sigmoid(sum);
+				break;
+
+			case ACTIVATION_RELU:
+				pnet->layers[layer].nodes[node].value = relu(sum);
+				break;
+
+			case ACTIVATION_LEAKY_RELU:
+				pnet->layers[layer].nodes[node].value = leaky_relu(sum);
+				break;
+
+			default:
+			case ACTIVATION_SOFTMAX:
+				assert(0);
+				break;
+			}
+		}
+	}
+
+	return 0.0;
+}
+
+//------------------------------
+// train the network
+//------------------------------
+static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
+{
+	if (!pnet)
+		return 0.0;
+
+	//	print_network(pnet);
+
+	assert(pnet->layers[0].layer_type == LAYER_INPUT);
+
+	// node 0 is a bias node in every layer
+	pnet->layers[0].nodes[0].value = 1.0;
+
+	// set the input values on the network
+	int node_count = pnet->layers[0].node_count;
+	for (int node = 1; node < node_count; node++)
+	{
+		pnet->layers[0].nodes[node].value = *inputs++;
+	}
+
+	// forward evaluate the network
+	eval_network(pnet);
+
+	//	print_network(pnet);
+
+	//
+	// back propagate and adjust weights
+	//
+
+	// for each node in the output layer, excluding bias nodes
+	real *expected_values = outputs;
+	for (int node = 1; node < pnet->layers[pnet->layer_count - 1].node_count; node++)
+	{
+		real delta_w = 0.0;
+
+		// for each incoming input for this node, calculate the change in weight for that node
+		for (int prev_node = 0; prev_node < pnet->layers[pnet->layer_count - 2].node_count; prev_node++)
+		{
+			real x = pnet->layers[pnet->layer_count - 2].nodes[prev_node].value;
+			real result = *expected_values;
+			real y = pnet->layers[pnet->layer_count - 1].nodes[node].value;
+
+			delta_w = pnet->learning_rate * (result - y) * x;
+			pnet->layers[pnet->layer_count - 1].nodes[node].weights[prev_node] += delta_w;
+		}
+
+		// get next expected output value
+		expected_values++;
+	}
+
+	// hidden layers
+	//for (int layer = pnet->layer_count - 1; layer > 0; layer--)
+	//{
+
+	//}
+
+	// compute the Mean Squared Error
+	real err = compute_error(pnet, outputs);
+	//	printf("Err: %5.2g\n", err);
+	//	print_network(pnet);
+
+	return err;
+}
+
+//-----------------------------------------------
+// shuffle the indices
+//-----------------------------------------------
+static void shuffle_indices(int *input_indices, int count)
+{
+
+}
+
+//[]---------------------------------------------[]
 // Public interfaces
-//[]---------------------------------------------
+//[]---------------------------------------------[]
 
 //------------------------------
 // add a new layer to the network
 //------------------------------
-int add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type)
+int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type)
 {
 	if (!pnet)
 		return E_FAIL;
@@ -143,7 +314,7 @@ int add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_t
 //------------------------------
 // make a new network
 //------------------------------
-PNetwork make_network(void)
+PNetwork ann_make_network(void)
 {
 	PNetwork pnet = malloc(sizeof(Network));
 	if (NULL == pnet)
@@ -159,181 +330,10 @@ PNetwork make_network(void)
 	return pnet;
 }
 
-//------------------------------
-// forward evaluate the network
-//------------------------------
-real eval_network(PNetwork pnet)
-{
-	if (!pnet)
-		return 0.0;
-
-	// loop over the non-input layers
-	for (int layer = 1; layer < pnet->layer_count; layer++)
-	{
-		// loop over each node in the layer, skipping the bias node
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
-		{
-			real sum = 0.0;
-
-			// loop over nodes in previous layer, including the bias node
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-			{
-				// accumulate sum of prev nodes value times this nodes weight for that value
-				sum += pnet->layers[layer - 1].nodes[prev_node].value * pnet->layers[layer].nodes[node].weights[prev_node];
-			}
-
-			// TODO - switch to function pointers for perf??
-			// update the nodes final value, using the correct activation function
-			switch (pnet->layers[layer].activation)
-			{
-			case ACTIVATION_SIGMOID:
-				pnet->layers[layer].nodes[node].value = sigmoid(sum);
-				break;
-
-			case ACTIVATION_RELU:
-				pnet->layers[layer].nodes[node].value = relu(sum);
-				break;
-
-			case ACTIVATION_LEAKY_RELU:
-				pnet->layers[layer].nodes[node].value = leaky_relu(sum);
-				break;
-
-			default:
-			case ACTIVATION_SOFTMAX:
-				assert(0);
-				break;
-			}
-		}
-	}
-
-	return 0.0;
-}
-
-//------------------------------
-// print the network
-//------------------------------
-static void print_network(PNetwork pnet)
-{
-	if (!pnet)
-		return;
-
-	// print each layer
-	for (int layer = 0; layer < pnet->layer_count; layer++)
-	{
-		printf(	"\nLayer %d\n"
-				"--------\n", layer);
-
-		// print nodes in the layer
-		for (int node = 0; node < pnet->layers[layer].node_count; node++)
-		{
-			printf("(%3.2g), ", pnet->layers[layer].nodes[node].value);
-		}
-
-		puts("");
-	}
-}
-
-//--------------------------------
-// compute the mean squared error
-//--------------------------------
-real compute_error(PNetwork pnet, real *outputs)
-{
-	// get the output layer
-	PLayer pLayer = &pnet->layers[pnet->layer_count - 1];
-	
-	assert(pLayer->layer_type == LAYER_OUTPUT);
-
-	real mse = 0.0, diff;
-
-	for (int i = 1; i < pLayer->node_count; i++)
-	{
-		diff = pLayer->nodes[i].value - outputs[i - 1];
-		mse += diff * diff;
-	}
-
-	mse *= 0.5;
-
-	return mse;
-}
-
-//------------------------------
-// train the network
-//------------------------------
-real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
-{
-	if (!pnet)
-		return 0.0;
-
-//	print_network(pnet);
-
-	assert(pnet->layers[0].layer_type == LAYER_INPUT);
-
-	// node 0 is a bias node in every layer
-	pnet->layers[0].nodes[0].value = 1.0;
-
-	// set the input values on the network
-	int node_count = pnet->layers[0].node_count;
-	for (int node = 1; node < node_count; node++)
-	{
-		pnet->layers[0].nodes[node].value = *inputs++;
-	}
-
-	// forward evaluate the network
-	eval_network(pnet);
-
-//	print_network(pnet);
-
-	//
-	// back propagate and adjust weights
-	//
-
-	// for each node in the output layer, excluding bias nodes
-	real *expected_values = outputs;
-	for (int node = 1; node < pnet->layers[pnet->layer_count - 1].node_count; node++)
-	{
-		real delta_w = 0.0;
-
-		// for each incoming input for this node, calculate the change in weight for that node
-		for (int prev_node = 0; prev_node < pnet->layers[pnet->layer_count - 2].node_count; prev_node++)
-		{
-			real x = pnet->layers[pnet->layer_count - 2].nodes[prev_node].value;
-			real result = *expected_values;
-			real y = pnet->layers[pnet->layer_count - 1].nodes[node].value;
-
-			delta_w = pnet->learning_rate * (result - y) * x;
-			pnet->layers[pnet->layer_count - 1].nodes[node].weights[prev_node] += delta_w;
-		}
-
-		// get next expected output value
-		expected_values++;
-	}
-
-	// hidden layers
-	//for (int layer = pnet->layer_count - 1; layer > 0; layer--)
-	//{
-
-	//}
-
-	// compute the Mean Squared Error
-	real err = compute_error(pnet, outputs);
-//	printf("Err: %5.2g\n", err);
-//	print_network(pnet);
-
-	return err;
-}
-
-//-----------------------------------------------
-// shuffle the indices
-//-----------------------------------------------
-void shuffle_indices(int *input_indices, int count)
-{
-
-}
-
 //-----------------------------------------------
 // Train the network for a set of inputs/outputs
 //-----------------------------------------------
-real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outputs)
+real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
 {
 	if (!pnet)
 		return 0.0;
@@ -346,28 +346,28 @@ real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outpu
 	int epoch = 0;
 
 	// shuffle the inputs and outputs
-	int *input_indices = alloca(input_set_count * sizeof(int));
-	for (int i = 0; i < input_set_count; i++)
+	int *input_indices = alloca(rows * sizeof(int));
+	for (size_t i = 0; i < rows; i++)
 	{
 		input_indices[i] = i;
 	}
 
-	shuffle_indices(input_indices, input_set_count);
+	shuffle_indices(input_indices, rows);
 
 	while (!converged)
 	{
-		real *ins = inputs;
-		real *outs = outputs;
-
 		// iterate over all sets of inputs
-		for (int i = 0; i < input_set_count; i++)
+		for (size_t i = 0; i < rows; i++)
 		{
+			real *ins = inputs + input_indices[i] * stride;
+			real *outs = ins + pnet->layers[0].node_count - 1;
+
 			mse += train_pass_network(pnet, ins, outs);
-			ins += (pnet->layers[0].node_count - 1);
-			outs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
+//			ins += (pnet->layers[0].node_count - 1);
+//			outs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
 		}
 
-		mse /= (real)input_set_count;
+		mse /= (real)rows;
 		if (mse < pnet->convergence_epsilon)
 			converged = 1;
 
@@ -380,7 +380,7 @@ real train_network(PNetwork pnet, real *inputs, int input_set_count, real *outpu
 //------------------------------
 //
 //------------------------------
-real test_network(PNetwork pnet, real *inputs, real *outputs)
+real ann_test_network(PNetwork pnet, real *inputs, real *outputs)
 {
 	return 0.0;
 }
@@ -388,7 +388,7 @@ real test_network(PNetwork pnet, real *inputs, real *outputs)
 //------------------------------
 // set the network learning rate
 //------------------------------
-void set_learning_rate(PNetwork pnet, real rate)
+void ann_set_learning_rate(PNetwork pnet, real rate)
 {
 	if (!pnet)
 		return;
@@ -399,7 +399,7 @@ void set_learning_rate(PNetwork pnet, real rate)
 //------------------------------
 //
 //------------------------------
-void set_convergence(PNetwork pnet, real limit)
+void ann_set_convergence(PNetwork pnet, real limit)
 {
 	if (!pnet)
 		return;
@@ -410,7 +410,7 @@ void set_convergence(PNetwork pnet, real limit)
 //------------------------------
 // free a network
 //------------------------------
-void free_network(PNetwork pnet)
+void ann_free_network(PNetwork pnet)
 {
 	if (!pnet)
 		return;
@@ -437,18 +437,19 @@ void free_network(PNetwork pnet)
 //------------------------------
 // load data from a csv file
 //------------------------------
-int load_csv(const char *filename, real **data, int *count)
+int ann_load_csv(const char *filename, real **data, size_t *rows, size_t *stride)
 {
 	FILE *f;
 	char *s, buf[DEFAULT_BUFFER_SIZE];
-	int size = 8;
+	size_t size = 8;
 	real *dbuf;
+	size_t lastStride = 0;
 
 	f = fopen(filename, "rt");
 	if (!f)
 		return E_FAIL;
 
-	*count = 0;
+	*rows = 0;
 
 	dbuf = malloc(size * sizeof(real));
 
@@ -456,13 +457,16 @@ int load_csv(const char *filename, real **data, int *count)
 	while (fgets(buf, DEFAULT_BUFFER_SIZE - 1, f))
 	{
 		// tokenize the line
-		s = strtok(buf, ", ");
+		*stride = 0;
+		s = strtok(buf, ", \n");
 
+		// parse the line
 		while (s) {
-			dbuf[*count] = atof(s);
-			(*count)++;
+			dbuf[*rows] = atof(s);
+			(*rows)++;
+			(*stride)++;
 
-			if (*count >= size)
+			if (*rows >= size)
 			{
 				// double the size
 				size <<= 1;
@@ -477,11 +481,24 @@ int load_csv(const char *filename, real **data, int *count)
 				}
 			}
 
-			s = strtok(NULL, ", ");
+			s = strtok(NULL, ", \n");
+		}
+
+		if (lastStride == 0)
+			lastStride = *stride;
+
+		// check that all row strides are the same
+		if (lastStride != *stride)
+		{
+			puts("Error: malformed CSV file\n");
+			free(dbuf);
+			fclose(f);
+			return E_FAIL;
 		}
 	}
 
 	*data = dbuf;
+	(*rows) /= *stride;
 	fclose(f);
 	return E_OK;
 }

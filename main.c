@@ -4,79 +4,68 @@
 
 // AND function
 real inputs[] = {
-	0.0, 0.0, 
-	0.0, 1.0,
-	1.0, 0.0,
-	1.0, 1.0
-};
-
-real outputs[] = {
-	0.0,
-	0.0,
-	0.0,
-	1.0
+	0.0, 0.0, 0.0,
+	0.0, 1.0, 0.0,
+	1.0, 0.0, 0.0,
+	1.0, 1.0, 1.0
 };
 
 // OR function
 // real inputs[] = {
-// 	0.0, 0.0, 
-// 	0.0, 1.0,
-// 	1.0, 0.0,
-// 	1.0, 1.0
-// };
-
-// real outputs[] = {
-// 	0.0,
-// 	1.0,
-// 	1.0,
-// 	1.0
+// 	0.0, 0.0, 0.0,
+// 	0.0, 1.0, 1.0,
+// 	1.0, 0.0, 1.0,
+// 	1.0, 1.0, 1.0
 // };
 
 // XOR function
 //real inputs[] = {
-//	0.0, 0.0,
-//	0.0, 1.0,
-//	1.0, 0.0,
-//	1.0, 1.0
+//	0.0, 0.0, 0.0,
+//	0.0, 1.0, 1.0,
+//	1.0, 0.0, 1.0,
+//	1.0, 1.0, 0,0
 //};
+
 //
-//real outputs[] = {
-//	0.0,
-//	1.0,
-//	1.0,
-//	0.0
-//};
+void print_data(real *data, size_t rows, size_t stride)
+{
+	for (size_t row = 0; row < rows; row++)
+	{
+		for (size_t col = 0; col < stride; col++)
+		{
+			printf("%g, ", *data++);
+		}
+
+		puts("");
+	}
+}
 
 //------------------------------
 //
 //------------------------------
 int main(int argc, char *argv[])
 {
-	PNetwork pnet = make_network();
+	PNetwork pnet = ann_make_network();
 
 	real *data;
-	int count;
+	size_t rows, stride;
 
-	load_csv("data.csv", &data, &count);
+	// load the data
+	ann_load_csv("or.csv", &data, &rows, &stride);
 
-	//for (int i = 1; i <= count; i++)
-	//{
-	//	printf("%g, ", data[i-1]);
-	//	if (i % 3 == 0)
-	//		puts("");
-	//}
+//	print_data(data, rows, stride);
 
 	// define our network
-	add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
-	add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
+	ann_add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
-//	set_learning_rate(pnet, 0.2);
+//	ann_set_learning_rate(pnet, 0.2);
 
-	train_network(pnet, inputs, 4, outputs);
+	ann_train_network(pnet, inputs, rows, stride);
 	
-	test_network(pnet, inputs, outputs);
+//	ann_test_network(pnet, inputs, outputs);
 
-	free_network(pnet);
+	ann_free_network(pnet);
 
 	free(data);
 	return 0;

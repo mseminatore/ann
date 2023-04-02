@@ -95,8 +95,8 @@ static void print_network(PNetwork pnet)
 		printf("\nLayer %d\n"
 			"--------\n", layer);
 
-		// print nodes in the layer
-		for (int node = 0; node < pnet->layers[layer].node_count; node++)
+		// print nodes in the layer, skipping bias nodes
+		for (int node = 1; node < pnet->layers[layer].node_count; node++)
 		{
 			printf("(%3.2g), ", pnet->layers[layer].nodes[node].value);
 		}
@@ -238,8 +238,8 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 
 	// compute the Mean Squared Error
 	real err = compute_error(pnet, outputs);
-	//	printf("Err: %5.2g\n", err);
-	//	print_network(pnet);
+//	printf("Err: %5.2g\n", err);
+	//print_network(pnet);
 
 	return err;
 }

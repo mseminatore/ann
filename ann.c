@@ -39,7 +39,7 @@ static real leaky_relu(real x)
 }
 
 //------------------------------
-//
+// return rand num [min..max)
 //------------------------------
 static real get_rand(real min, real max)
 {
@@ -89,19 +89,21 @@ static void print_network(PNetwork pnet)
 	if (!pnet)
 		return;
 
+	puts("");
 	// print each layer
 	for (int layer = 0; layer < pnet->layer_count; layer++)
 	{
-		printf("\nLayer %d\n"
-			"--------\n", layer);
+		// printf("\nLayer %d\n"
+		// 	"--------\n", layer);
+		putchar('(');
 
 		// print nodes in the layer, skipping bias nodes
 		for (int node = 1; node < pnet->layers[layer].node_count; node++)
 		{
-			printf("(%3.2g), ", pnet->layers[layer].nodes[node].value);
+			printf("%3.2g, ", pnet->layers[layer].nodes[node].value);
 		}
 
-		puts("");
+		puts(")");
 	}
 }
 
@@ -239,17 +241,25 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// compute the Mean Squared Error
 	real err = compute_error(pnet, outputs);
 //	printf("Err: %5.2g\n", err);
-	//print_network(pnet);
+	// print_network(pnet);
 
 	return err;
 }
 
 //-----------------------------------------------
 // shuffle the indices
+// https://en.wikipedia.org/wiki/Fisher–Yates_shuffle
 //-----------------------------------------------
-static void shuffle_indices(int *input_indices, int count)
+static void shuffle_indices(size_t *input_indices, size_t count)
 {
-
+	// Knuth's algorithm to shuffle an array a of n elements (indices 0..n-1):
+	for (int i = 0; i < count - 2; i++)
+	{
+		int j = i + rand() % count;
+		size_t val = input_indices[i];
+		input_indices[i] = input_indices[j];
+		input_indices[j] = val;
+	}
 }
 
 //[]---------------------------------------------[]
@@ -346,16 +356,16 @@ real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
 	int epoch = 0;
 
 	// shuffle the inputs and outputs
-	int *input_indices = alloca(rows * sizeof(int));
+	size_t *input_indices = alloca(rows * sizeof(size_t));
 	for (size_t i = 0; i < rows; i++)
 	{
 		input_indices[i] = i;
 	}
 
-	shuffle_indices(input_indices, rows);
-
 	while (!converged)
 	{
+		shuffle_indices(input_indices, rows);
+	
 		// iterate over all sets of inputs
 		for (size_t i = 0; i < rows; i++)
 		{

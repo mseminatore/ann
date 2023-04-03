@@ -27,7 +27,7 @@ int main(int argc, char *argv[])
 	size_t rows, stride;
 
 	// load the data
-	ann_load_csv("and.csv", &data, &rows, &stride);
+	ann_load_csv("data.csv", &data, &rows, &stride);
 
 	// print_data(data, rows, stride);
 

@@ -39,6 +39,26 @@ static real leaky_relu(real x)
 }
 
 //------------------------------
+// compute the softmax
+//------------------------------
+static void softmax(PNetwork pnet)
+{
+	real sum = 0.0;
+
+	// find the sum of the output node values, excluding the bias noad
+	int output_layer = pnet->layer_count - 1;
+	for (int node = 1; node < pnet->layers[output_layer].node_count - 1; node++)
+	{
+		sum += exp(pnet->layers[output_layer].nodes[node].value);
+	}
+
+	for (int node = 1; node < pnet->layers[output_layer].node_count - 1; node++)
+	{
+		pnet->layers[output_layer].nodes[node].value = pnet->layers[output_layer].nodes[node].value / sum;
+	}
+}
+
+//------------------------------
 // return rand num [min..max)
 //------------------------------
 static real get_rand(real min, real max)
@@ -169,13 +189,20 @@ static real eval_network(PNetwork pnet)
 				pnet->layers[layer].nodes[node].value = leaky_relu(sum);
 				break;
 
-			default:
 			case ACTIVATION_SOFTMAX:
+				// handled after full network is evaluated
+				break;
+
+			default:
 				assert(0);
 				break;
 			}
 		}
 	}
+
+	// apply softmax on output if requested
+	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
+		softmax(pnet);
 
 	return 0.0;
 }
@@ -255,7 +282,7 @@ static void shuffle_indices(size_t *input_indices, size_t count)
 	// Knuth's algorithm to shuffle an array a of n elements (indices 0..n-1):
 	for (int i = 0; i < count - 2; i++)
 	{
-		int j = i + rand() % count;
+		int j = i + (rand() % (count - i));
 		size_t val = input_indices[i];
 		input_indices[i] = input_indices[j];
 		input_indices[j] = val;
@@ -365,7 +392,10 @@ real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
 	while (!converged)
 	{
 		shuffle_indices(input_indices, rows);
-	
+		
+		// for (size_t i = 0; i < rows; i++)
+		// 	printf("%zu, ", input_indices[i]);
+
 		// iterate over all sets of inputs
 		for (size_t i = 0; i < rows; i++)
 		{
@@ -373,8 +403,6 @@ real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
 			real *outs = ins + pnet->layers[0].node_count - 1;
 
 			mse += train_pass_network(pnet, ins, outs);
-//			ins += (pnet->layers[0].node_count - 1);
-//			outs += (pnet->layers[pnet->layer_count - 1].node_count - 1);
 		}
 
 		mse /= (real)rows;

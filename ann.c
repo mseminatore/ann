@@ -153,10 +153,10 @@ static real compute_error(PNetwork pnet, real *outputs)
 //------------------------------
 // forward evaluate the network
 //------------------------------
-static real eval_network(PNetwork pnet)
+static void eval_network(PNetwork pnet)
 {
 	if (!pnet)
-		return 0.0;
+		return;
 
 	// loop over the non-input layers
 	for (int layer = 1; layer < pnet->layer_count; layer++)
@@ -203,23 +203,21 @@ static real eval_network(PNetwork pnet)
 	// apply softmax on output if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
-
-	return 0.0;
 }
 
 //------------------------------
-// train the network
+// train the network over 
 //------------------------------
 static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 {
-	if (!pnet)
+	if (!pnet || !inputs || !outputs)
 		return 0.0;
 
-	//	print_network(pnet);
-
 	assert(pnet->layers[0].layer_type == LAYER_INPUT);
+	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
 
 	// node 0 is a bias node in every layer
+	// TODO - this not needed here?
 	pnet->layers[0].nodes[0].value = 1.0;
 
 	// set the input values on the network
@@ -232,38 +230,62 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// forward evaluate the network
 	eval_network(pnet);
 
-	//	print_network(pnet);
-
 	//
 	// back propagate and adjust weights
 	//
 
-	// for each node in the output layer, excluding bias nodes
+	//
+	// TODO: compute the dw across the net, THEN update the weights
+	//
+
+	// for each node in the output layer, excluding output layer bias node
 	real *expected_values = outputs;
-	for (int node = 1; node < pnet->layers[pnet->layer_count - 1].node_count; node++)
+	int output_layer = pnet->layer_count - 1;
+	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
 	{
 		real delta_w = 0.0;
 
 		// for each incoming input for this node, calculate the change in weight for that node
-		for (int prev_node = 0; prev_node < pnet->layers[pnet->layer_count - 2].node_count; prev_node++)
+		for (int prev_node = 0; prev_node < pnet->layers[output_layer - 1].node_count; prev_node++)
 		{
-			real x = pnet->layers[pnet->layer_count - 2].nodes[prev_node].value;
+			real x = pnet->layers[output_layer - 1].nodes[prev_node].value;
 			real result = *expected_values;
-			real y = pnet->layers[pnet->layer_count - 1].nodes[node].value;
+			real y = pnet->layers[output_layer].nodes[node].value;
 
 			delta_w = pnet->learning_rate * (result - y) * x;
-			pnet->layers[pnet->layer_count - 1].nodes[node].weights[prev_node] += delta_w;
+			pnet->layers[output_layer].nodes[node].weights[prev_node] += delta_w;
 		}
 
 		// get next expected output value
 		expected_values++;
 	}
 
-	// hidden layers
-	//for (int layer = pnet->layer_count - 1; layer > 0; layer--)
+	// process hidden layers, exluding input layer
+	//expected_values = outputs;
+	//for (int layer = output_layer - 1; layer > 0; layer--)
 	//{
+	//	// for each node of this layer
+	//	for (int node = 0; node < pnet->layers[layer].node_count; node++)
+	//	{
+	//		real delta_w = 0.0;
 
+	//		// for each incoming input to this node, calculate the weight change
+	//		for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+	//		{
+	//			// dw = n * (r - y) * v * z * (1-z) * x
+	//			real r = *expected_values;
+	//			real y = pnet->layers[output_layer].nodes[node].value;
+	//			real x = pnet->layers[layer - 1].nodes[prev_node].value;
+	//			real v = pnet->layers[]
+	//			real z = pnet->layers[layer].nodes[]
+
+	//			delta_w = pnet->learning_rate * (r - y) * v * z * (1.0 - z) * x;
+	//		}
+
+	//	}
 	//}
+
+	// TODO - update the weights based on calculated changes
 
 	// compute the Mean Squared Error
 	real err = compute_error(pnet, outputs);
@@ -280,9 +302,9 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 static void shuffle_indices(size_t *input_indices, size_t count)
 {
 	// Knuth's algorithm to shuffle an array a of n elements (indices 0..n-1):
-	for (int i = 0; i < count - 2; i++)
+	for (size_t i = 0; i < count - 2; i++)
 	{
-		int j = i + (rand() % (count - i));
+		size_t j = i + (rand() % (count - i));
 		size_t val = input_indices[i];
 		input_indices[i] = input_indices[j];
 		input_indices[j] = val;

@@ -144,9 +144,11 @@
   <ItemGroup>
     <ClCompile Include="ann.c" />
     <ClCompile Include="main.c" />
+    <ClCompile Include="tensor.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ann.h" />
+    <ClInclude Include="tensor.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

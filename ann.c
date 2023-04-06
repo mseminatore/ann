@@ -262,7 +262,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 		expected_values++;
 	}
 
-	// process hidden layers, exluding input layer
+	// process hidden layers, excluding input layer
 	//for (int layer = output_layer - 1; layer > 0; layer--)
 	//{
 	//	// for each node of this layer
@@ -275,7 +275,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	//		// for each incoming input to this node, calculate the weight change
 	//		for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 	//		{
-	//			// dw = n * (r - y) * z * v * (1-z) * x = n * err_term * v * (1-z) * x
+	//			// dw = n * (r - y) * z * v * (1-z) * x => n * err_term * v * (1-z) * x
 	//			real x = pnet->layers[layer - 1].nodes[prev_node].value;
 	//			real v = pnet->layers[]
 	//			real z = pnet->layers[layer].nodes[]
@@ -296,6 +296,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 			// for each node in previous layer
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 			{
+				// update the weights by the change
 				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->layers[layer].nodes[node].dw[prev_node];
 			}
 		}

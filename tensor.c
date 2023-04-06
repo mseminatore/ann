@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
+#include <xmmintrin.h>
 #include "tensor.h"
 
 //------------------------------
@@ -194,7 +195,7 @@ PTensor tensor_slice(PTensor t, size_t row_start)
 
 	// copy the elements
 	double *v = &(t->values[row_start * t->cols]);
-	for (int i = 0; i < (t->rows - row_start) * t->cols; i++)
+	for (size_t i = 0; i < (t->rows - row_start) * t->cols; i++)
 		r->values[i] = *v++;
 
 	// adjust size of t to remove sliced rows

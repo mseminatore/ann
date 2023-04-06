@@ -24,12 +24,31 @@ PTensor tensor_create(size_t rows, size_t cols)
 	t->cols = cols;
 	t->rank = 2;
 
-	t->values = malloc(rows * cols * sizeof(double));
+	t->values = malloc(rows * cols * sizeof(FLOAT));
 	if (!t->values)
 	{
 		free(t);
 		t = NULL;
 	}
+
+	return t;
+}
+
+//------------------------------
+//
+//------------------------------
+PTensor tensor_create_from_array(size_t rows, size_t cols, FLOAT *vals)
+{
+	PTensor t = tensor_create(rows, cols);
+
+	assert(t);
+	if (!t)
+		return NULL;
+
+	int limit = t->rows * t->cols;
+
+	for (int i = 0; i < limit; i++)
+		t->values[i] = *vals++;
 
 	return t;
 }
@@ -51,7 +70,7 @@ void tensor_free(PTensor t)
 //------------------------------
 // fill tensor with given value
 //------------------------------
-void tensor_fill(PTensor t, double val)
+void tensor_fill(PTensor t, FLOAT val)
 {
 	assert(t);
 	if (!t)
@@ -100,7 +119,7 @@ PTensor tensor_rand(size_t rows, size_t cols)
 
 	int limit = t->rows * t->cols;
 	for (int i = 0; i < limit; i++)
-		t->values[i] = (double)rand() / (double)RAND_MAX;
+		t->values[i] = (FLOAT)rand() / (FLOAT)RAND_MAX;
 
 	return t;
 }
@@ -108,7 +127,7 @@ PTensor tensor_rand(size_t rows, size_t cols)
 //------------------------------
 // add scalar to tensor
 //------------------------------
-PTensor tensor_add_scalar(PTensor t, double val)
+PTensor tensor_add_scalar(PTensor t, FLOAT val)
 {
 	if (!t)
 		return NULL;
@@ -163,7 +182,7 @@ PTensor tensor_mul(PTensor a, PTensor b)
 //------------------------------
 // get a tensor component
 //------------------------------
-double tensor_get(PTensor t, size_t row, size_t col)
+FLOAT tensor_get(PTensor t, size_t row, size_t col)
 {
 	if (row > t->rows || col > t->cols)
 		return 0.0;
@@ -174,7 +193,7 @@ double tensor_get(PTensor t, size_t row, size_t col)
 //------------------------------
 // set a tensor component
 //------------------------------
-void tensor_set(PTensor t, size_t row, size_t col, double val)
+void tensor_set(PTensor t, size_t row, size_t col, FLOAT val)
 {
 	if (row > t->rows || col > t->cols)
 		return;
@@ -185,7 +204,7 @@ void tensor_set(PTensor t, size_t row, size_t col, double val)
 //-------------------------------------------
 // slice out rows from the end of the tensor
 //-------------------------------------------
-PTensor tensor_slice(PTensor t, size_t row_start)
+PTensor tensor_slice_rows(PTensor t, size_t row_start)
 {
 	PTensor r;
 
@@ -198,7 +217,7 @@ PTensor tensor_slice(PTensor t, size_t row_start)
 		return NULL;
 
 	// copy the elements
-	double *v = &(t->values[row_start * t->cols]);
+	FLOAT *v = &(t->values[row_start * t->cols]);
 	for (size_t i = 0; i < (t->rows - row_start) * t->cols; i++)
 		r->values[i] = *v++;
 
@@ -207,6 +226,46 @@ PTensor tensor_slice(PTensor t, size_t row_start)
 	t->rows -= row_start;
 	
 	return r;
+}
+
+//-------------------------------------------
+// slice out cols from the end of the tensor
+//-------------------------------------------
+PTensor tensor_slice_cols(PTensor t, size_t col_start)
+{
+	PTensor r;
+
+	assert(t);
+	if (!t || col_start > t->cols)
+		return NULL;
+
+	// create result tensor
+	r = tensor_create(t->rows, t->cols - col_start);
+	if (!r)
+		return NULL;
+
+	// copy the elements
+	for (size_t row = 0; row < t->rows; row++)
+	{
+		for (size_t col = col_start; col < t->cols; col++)
+			tensor_set(r, row, col, tensor_get(t, row, col));
+	}
+
+	// fixup t
+	
+	// adjust size of t to remove sliced cols
+	// NOTE: we don't release t's extra memory
+	t->cols -= col_start;
+	
+	return r;
+}
+
+//------------------------------
+//
+//------------------------------
+PTensor tensor_dot(PTensor a, PTensor b)
+{
+
 }
 
 //------------------------------
@@ -218,7 +277,7 @@ void tensor_print(PTensor t)
 	if (!t)
 		return;
 
-	double *v = t->values;
+	FLOAT *v = t->values;
 	putchar('[');
 	for (size_t row = 0; row < t->rows; row++)
 	{

@@ -34,6 +34,10 @@ int main(int argc, char *argv[])
 
 	// print_data(data, rows, stride);
 
+	PTensor t = tensor_create_from_array(rows, stride, data);
+	tensor_print(t);
+	tensor_free(t);
+
 	// define our network
 	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
 	//ann_add_layer(pnet, 2, LAYER_HIDDEN, ACTIVATION_SIGMOID);

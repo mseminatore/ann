@@ -20,7 +20,9 @@ typedef double real;
 typedef struct
 {
 	real *weights;		// array of node weights
+	real *dw;
 	real value;			// node value
+	real err;			// error term for this node
 } Node, *PNode;
 
 //------------------------------
@@ -65,6 +67,10 @@ typedef struct
 	int size;					// number of layers allocated
 	int weights_set;			// have the weights been initialized?
 	real convergence_epsilon;	// threshold for convergence
+	real lastMSE[4];
+	unsigned mseCounter;
+	int adaptiveLearning;
+	unsigned epochLimit;
 } Network, *PNetwork;
 
 //------------------------------
@@ -74,6 +80,8 @@ typedef struct
 #define DEFAULT_CONVERGENCE 	0.01
 #define DEFAULT_BUFFER_SIZE		1024
 #define DEFAULT_LEARNING_RATE 	0.15	// pick a better default?
+#define DEFAULT_LEARN_ADD		0.05
+#define DEFAULT_LEARN_SUB		0.1
 
 //------------------------------
 //

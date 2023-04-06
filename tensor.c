@@ -1,6 +1,10 @@
 #include <assert.h>
 #include <stdio.h>
-#include <xmmintrin.h>
+
+#ifdef _WIN32
+#	include <xmmintrin.h>
+#endif
+
 #include "tensor.h"
 
 //------------------------------

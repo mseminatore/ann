@@ -3,7 +3,9 @@
 
 #ifdef _WIN32
 #	include <xmmintrin.h>
-#elseif defined(__aarch64__)
+#endif
+
+#ifdef __arm64__
 #	include "sse2neon.h"
 #endif
 

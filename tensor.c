@@ -5,6 +5,7 @@
 #	include <xmmintrin.h>
 #endif
 
+// __aarch64__ and __ARM_NEON should also work?
 #ifdef __arm64__
 #	include "sse2neon.h"
 #endif

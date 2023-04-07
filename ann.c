@@ -54,7 +54,7 @@ static void softmax(PNetwork pnet)
 
 	for (int node = 1; node < pnet->layers[output_layer].node_count - 1; node++)
 	{
-		pnet->layers[output_layer].nodes[node].value = pnet->layers[output_layer].nodes[node].value / sum;
+		pnet->layers[output_layer].nodes[node].value = exp(pnet->layers[output_layer].nodes[node].value) / sum;
 	}
 }
 

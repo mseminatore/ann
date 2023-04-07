@@ -12,7 +12,7 @@
 //------------------------------
 // Note: change to float if desired
 //------------------------------
-typedef double real;
+typedef FLOAT real;
 
 //------------------------------
 // Defines a node

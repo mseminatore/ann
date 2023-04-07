@@ -3,6 +3,8 @@
 
 #ifdef _WIN32
 #	include <xmmintrin.h>
+#elseif defined(__aarch64__)
+#	include "sse2neon.h"
 #endif
 
 #include "tensor.h"
@@ -251,7 +253,7 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 			tensor_set(r, row, col, tensor_get(t, row, col));
 	}
 
-	// fixup t
+	// TODO - fixup t to remove the cols
 
 	// adjust size of t to remove sliced cols
 	// NOTE: we don't release t's extra memory
@@ -266,7 +268,7 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 PTensor tensor_dot(PTensor a, PTensor b)
 {
 	PTensor t = NULL;
-	
+
 	return t;
 }
 

@@ -252,7 +252,7 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 	}
 
 	// fixup t
-	
+
 	// adjust size of t to remove sliced cols
 	// NOTE: we don't release t's extra memory
 	t->cols -= col_start;
@@ -265,7 +265,9 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 //------------------------------
 PTensor tensor_dot(PTensor a, PTensor b)
 {
-
+	PTensor t = NULL;
+	
+	return t;
 }
 
 //------------------------------

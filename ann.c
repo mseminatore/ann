@@ -286,7 +286,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	//	}
 	//}
 
-	// TODO - update the weights based on calculated changes
+	// update the weights based on calculated changes
 	// for each layer after input
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{

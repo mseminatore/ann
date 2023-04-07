@@ -181,6 +181,10 @@ PTensor tensor_mul(PTensor a, PTensor b)
 		return NULL;
 	}
 
+	int limit = a->rows * a->cols;
+	for (int i = 0; i < limit; i++)
+		a->values[i] *= b->values[i];
+
 	return a;
 }
 
@@ -227,7 +231,7 @@ PTensor tensor_slice_rows(PTensor t, size_t row_start)
 		r->values[i] = *v++;
 
 	// adjust size of t to remove sliced rows
-	// NOTE: we don't release t's extra memory
+	// TODO: we don't release t's extra memory
 	t->rows -= row_start;
 	
 	return r;
@@ -253,14 +257,28 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 	for (size_t row = 0; row < t->rows; row++)
 	{
 		for (size_t col = col_start; col < t->cols; col++)
-			tensor_set(r, row, col, tensor_get(t, row, col));
+		{
+			FLOAT v = tensor_get(t, row, col);
+			tensor_set(r, row, col - col_start, v);
+		}
 	}
 
-	// TODO - fixup t to remove the cols
+	// fixup t to remove the cols
+	FLOAT *values = t->values;
+	for (size_t row = 0; row < t->rows; row++)
+	{
+		for (size_t col = 0; col < t->cols; col++)
+		{
+			if (col >= col_start)
+				continue;
+
+			*values++ = t->values[row * t->cols + col];
+		}
+	}
 
 	// adjust size of t to remove sliced cols
-	// NOTE: we don't release t's extra memory
-	t->cols -= col_start;
+	// TODO: we don't release t's extra memory
+	t->cols -= (t->cols - col_start);
 	
 	return r;
 }

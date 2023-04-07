@@ -36,7 +36,13 @@ int main(int argc, char *argv[])
 
 	PTensor t = tensor_create_from_array(rows, stride, data);
 	tensor_print(t);
+
+	PTensor o = tensor_slice_cols(t, 2);
+	tensor_print(t);
+	tensor_print(o);
+
 	tensor_free(t);
+	tensor_free(o);
 
 	// define our network
 	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);

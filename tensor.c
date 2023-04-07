@@ -88,6 +88,21 @@ void tensor_fill(PTensor t, FLOAT val)
 }
 
 //------------------------------
+// fill tensor with given value
+//------------------------------
+void tensor_randomize(PTensor t)
+{
+	assert(t);
+	if (!t)
+		return;
+
+	int limit = t->rows * t->cols;
+
+	for (int i = 0; i < limit; i++)
+		t->values[i] = (FLOAT)rand() / (FLOAT)RAND_MAX;
+}
+
+//------------------------------
 // create new tensor of ones
 //------------------------------
 PTensor tensor_ones(size_t rows, size_t cols)

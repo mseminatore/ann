@@ -26,6 +26,7 @@ void tensor_free(PTensor t);
 FLOAT tensor_get(PTensor t, size_t row, size_t col);
 void tensor_set(PTensor t, size_t row, size_t col, FLOAT val);
 void tensor_fill(PTensor t, FLOAT val);
+void tensor_randomize(PTensor t);
 PTensor tensor_ones(size_t rows, size_t cols);
 PTensor tensor_zeros(size_t rows, size_t cols);
 PTensor tensor_rand(size_t rows, size_t cols);

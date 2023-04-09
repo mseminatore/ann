@@ -1,16 +1,19 @@
 #include <assert.h>
 #include <stdio.h>
 
-#ifdef _WIN32
-#	include <xmmintrin.h>
+#if defined(_WIN32) || defined(__x86_64__)
+#include <xmmintrin.h>
 #endif
 
-// __aarch64__ and __ARM_NEON should also work?
-#ifdef __arm64__
+#if defined(__aarch64__)
 #	include "sse2neon.h"
 #endif
 
 #include "tensor.h"
+
+#define SSE
+#define SSE4
+#define AVX
 
 //------------------------------
 // create a new tensor
@@ -82,8 +85,15 @@ void tensor_fill(PTensor t, FLOAT val)
 		return;
 
 	int limit = t->rows * t->cols;
+	int i = 0;
 
-	for (int i = 0; i < limit; i++)
+#ifdef SSE
+	__m128 a = _mm_set1_ps(val);
+	for (;i + 4 < limit; i += 4)
+		_mm_store_ps(&t->values[i], a);
+#endif
+
+	for (; i < limit; i++)
 		t->values[i] = val;
 }
 
@@ -298,9 +308,9 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 	return r;
 }
 
-//------------------------------
-//
-//------------------------------
+//-------------------------------
+// compute the tensor dot product
+//-------------------------------
 PTensor tensor_dot(PTensor a, PTensor b)
 {
 	PTensor t = NULL;

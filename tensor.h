@@ -5,7 +5,7 @@
 
 #include <stdlib.h>
 
-#define FLOAT double
+#define FLOAT float
 
 //------------------------------
 // tensor structure

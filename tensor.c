@@ -163,7 +163,20 @@ PTensor tensor_add_scalar(PTensor t, FLOAT val)
 		return NULL;
 
 	int limit = t->rows * t->cols;
-	for (int i = 0; i < limit; i++)
+	int i = 0;
+
+#ifdef SSE
+	__m128 a = _mm_set1_ps(val);
+
+	for (; i + 4 < limit; i += 4)
+	{
+		__m128 b = _mm_load_ps(&t->values[i]);
+		__m128 c = _mm_add_ps(b, a);
+		_mm_store_ps(&t->values[i], c);
+	}
+#endif
+
+	for (; i < limit; i++)
 		t->values[i] += val;
 
 	return t;

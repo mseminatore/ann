@@ -7,12 +7,13 @@
 #endif
 
 #if defined(__aarch64__)
+#	define TENSOR_SSE
+//#	define TENSOR_AVX
 #	include "sse2neon.h"
 #endif
 
 #include "tensor.h"
 
-//__AVX__
 #ifdef __AVX__
 #	define TENSOR_AVX
 #endif

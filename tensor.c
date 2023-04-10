@@ -2,13 +2,12 @@
 #include <stdio.h>
 
 #if defined(_WIN32) || defined(__x86_64__)
-#include <xmmintrin.h>
-#include <immintrin.h>
+#	include <immintrin.h>
+#	define TENSOR_SSE
 #endif
 
 #if defined(__aarch64__)
 #	define TENSOR_SSE
-//#	define TENSOR_AVX
 #	include "sse2neon.h"
 #endif
 

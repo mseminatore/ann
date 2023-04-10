@@ -1,7 +1,7 @@
 TARGET = ann
 OBJS = main.o ann.o tensor.o
 DEPS = ann.h tensor.h
-CFLAGS = -g
+CFLAGS = -g -mavx
 
 $(TARGET):	$(OBJS)
 	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS)

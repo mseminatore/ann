@@ -235,7 +235,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	//
 
 	//
-	// TODO: compute the dw across the net, THEN update the weights
+	// compute the dw across the net, THEN update the weights
 	//
 
 	// for each node in the output layer, excluding output layer bias node
@@ -482,12 +482,15 @@ real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
 			pnet->lastMSE[index] = mse;
 		}
 
+		// check for no convergence
 		if (epoch > pnet->epochLimit)
 		{
 			puts("Error: network not converged.\n");
 			converged = 1;
 		}
 	}
+
+	//print_network(pnet);
 
 	return mse;
 }
@@ -512,7 +515,7 @@ void ann_set_learning_rate(PNetwork pnet, real rate)
 }
 
 //------------------------------
-//
+// set the convergence limit
 //------------------------------
 void ann_set_convergence(PNetwork pnet, real limit)
 {

@@ -44,11 +44,6 @@ int main(int argc, char *argv[])
 	tensor_free(t);
 	tensor_free(o);
 
-	PTensor ones = tensor_ones(3, 5);
-	PTensor zeros = tensor_zeros(3, 5);
-	PTensor r = tensor_mul(ones, zeros);
-	tensor_print(r);
-
 	// define our network
 	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
 	//ann_add_layer(pnet, 2, LAYER_HIDDEN, ACTIVATION_SIGMOID);

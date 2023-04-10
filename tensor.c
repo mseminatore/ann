@@ -28,7 +28,7 @@
 #endif
 
 //------------------------------
-//
+// aligned alloc where needed
 //------------------------------
 void *tmalloc(size_t size)
 {
@@ -40,7 +40,7 @@ void *tmalloc(size_t size)
 }
 
 //------------------------------
-//
+// aligned free where needed
 //------------------------------
 void tfree(void *block)
 {
@@ -52,7 +52,7 @@ void tfree(void *block)
 }
 
 //------------------------------
-//
+// aligned realloc where needed
 //------------------------------
 void* trealloc(void *block, size_t size)
 {
@@ -66,7 +66,7 @@ void* trealloc(void *block, size_t size)
 //------------------------------
 // create a new tensor
 //
-// Note: tensors are col major
+// Note: tensors are COL major
 //------------------------------
 PTensor tensor_create(size_t rows, size_t cols)
 {

@@ -22,6 +22,11 @@
 #	define TENSOR_SSE
 #endif
 
+#ifdef TENSOR_AVX
+#	define TENSOR_ALIGN 32
+#else
+#	define TENSOR_ALIGN 16
+#endif
 
 //------------------------------
 //
@@ -29,7 +34,7 @@
 void *tmalloc(size_t size)
 {
 	#if defined(_WIN32) && !defined(_WIN64)
-		return _aligned_malloc(size, 16);
+		return _aligned_malloc(size, TENSOR_ALIGN);
 	#else
 		return malloc(size);
 	#endif
@@ -50,10 +55,10 @@ void tfree(void *block)
 //------------------------------
 //
 //------------------------------
-void* trealloc(void *block, size_t size, size_t alignment)
+void* trealloc(void *block, size_t size)
 {
 	#if defined(_WIN32) && !defined(_WIN64)
-		return _aligned_realloc(block, size, alignment);
+		return _aligned_realloc(block, size, TENSOR_ALIGN);
 	#else
 		return realloc(block, size);
 	#endif
@@ -303,14 +308,24 @@ PTensor tensor_mul(PTensor a, PTensor b)
 		return NULL;
 	}
 
+	int limit = a->rows * a->cols;
+	int i = 0;
+
 #ifdef TENSOR_AVX
 #endif
 
 #ifdef TENSOR_SSE
+	for (; i + 4 < limit; i += 4)
+	{
+		__m128 av = _mm_load_ps(&a->values[i]);
+		__m128 bv = _mm_load_ps(&b->values[i]);
+		__m128 c = _mm_mul_ps(av, bv);
+		_mm_store_ps(&a->values[i], c);
+	}
+
 #endif
 
-	int limit = a->rows * a->cols;
-	for (int i = 0; i < limit; i++)
+	for (; i < limit; i++)
 		a->values[i] *= b->values[i];
 
 	return a;

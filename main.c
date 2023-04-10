@@ -46,7 +46,7 @@ int main(int argc, char *argv[])
 
 	PTensor ones = tensor_ones(3, 5);
 	PTensor zeros = tensor_zeros(3, 5);
-	PTensor r = tensor_add(ones, zeros);
+	PTensor r = tensor_mul(ones, zeros);
 	tensor_print(r);
 
 	// define our network

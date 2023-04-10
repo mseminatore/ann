@@ -275,12 +275,15 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	//		// for each incoming input to this node, calculate the weight change
 	//		for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 	//		{
-	//			// dw = n * (r - y) * z * v * (1-z) * x => n * err_term * v * (1-z) * x
+	//			// dw = n * (r - y) * z * v * (1-z) * x
+	//			// dw = n * err_term * v * (1-z) * x
 	//			real x = pnet->layers[layer - 1].nodes[prev_node].value;
 	//			real v = pnet->layers[]
 	//			real z = pnet->layers[layer].nodes[]
 
-	//			delta_w = pnet->learning_rate * (r - y) * v * z * (1.0 - z) * x;
+	//			delta_w = pnet->learning_rate * err_term * v * (1.0 - z) * x;
+	//			pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
+	//			pnet->layers[layer].nodes[node].err = new_err_term;
 	//		}
 
 	//	}

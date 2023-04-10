@@ -3,6 +3,7 @@
 
 #if defined(_WIN32) || defined(__x86_64__)
 #include <xmmintrin.h>
+#include <immintrin.h>
 #endif
 
 #if defined(__aarch64__)
@@ -11,9 +12,51 @@
 
 #include "tensor.h"
 
-#define SSE
-#define SSE4
-#define AVX
+//__AVX__
+#ifdef __AVX__
+#	define TENSOR_AVX
+#endif
+
+#if _M_IX86_FP == 2
+#	define TENSOR_SSE
+#endif
+
+
+//------------------------------
+//
+//------------------------------
+void *tmalloc(size_t size)
+{
+	#if defined(_WIN32) && !defined(_WIN64)
+		return _aligned_malloc(size, 16);
+	#else
+		return malloc(size);
+	#endif
+}
+
+//------------------------------
+//
+//------------------------------
+void tfree(void *block)
+{
+	#if defined(_WIN32) && !defined(_WIN64)
+		_aligned_free(block);
+	#else
+		free(block);
+	#endif
+}
+
+//------------------------------
+//
+//------------------------------
+void* trealloc(void *block, size_t size, size_t alignment)
+{
+	#if defined(_WIN32) && !defined(_WIN64)
+		return _aligned_realloc(block, size, alignment);
+	#else
+		return realloc(block, size);
+	#endif
+}
 
 //------------------------------
 // create a new tensor
@@ -32,7 +75,7 @@ PTensor tensor_create(size_t rows, size_t cols)
 	t->cols = cols;
 	t->rank = 2;
 
-	t->values = malloc(rows * cols * sizeof(FLOAT));
+	t->values = tmalloc(rows * cols * sizeof(FLOAT));
 	if (!t->values)
 	{
 		free(t);
@@ -71,7 +114,7 @@ void tensor_free(PTensor t)
 		return;
 
 	t->rows = t->cols = -1;
-	free(t->values);
+	tfree(t->values);
 	free(t);
 }
 
@@ -87,10 +130,16 @@ void tensor_fill(PTensor t, FLOAT val)
 	int limit = t->rows * t->cols;
 	int i = 0;
 
-#ifdef SSE
+#ifdef TENSOR_AVX
+	__m256 va = _mm256_set1_ps(val);
+	for (; i + 8 < limit; i += 8)
+		_mm256_store_ps(&(t->values[i]), va);
+#endif
+
+#ifdef TENSOR_SSE
 	__m128 a = _mm_set1_ps(val);
 	for (;i + 4 < limit; i += 4)
-		_mm_store_ps(&t->values[i], a);
+		_mm_store_ps(&(t->values[i]), a);
 #endif
 
 	for (; i < limit; i++)
@@ -165,7 +214,18 @@ PTensor tensor_add_scalar(PTensor t, FLOAT val)
 	int limit = t->rows * t->cols;
 	int i = 0;
 
-#ifdef SSE
+#ifdef TENSOR_AVX
+	__m256 va = _mm256_set1_ps(val);
+	for (; i + 8 < limit; i += 8)
+	{
+		__m256 vb = _mm256_load_ps(&t->values[i]);
+		__m256 vc = _mm256_add_ps(vb, va);
+		_mm256_store_ps(&t->values[i], vc);
+	}
+
+#endif
+
+#ifdef TENSOR_SSE
 	__m128 a = _mm_set1_ps(val);
 
 	for (; i + 4 < limit; i += 4)
@@ -198,7 +258,30 @@ PTensor tensor_add(PTensor a, PTensor b)
 	}
 
 	int limit = a->rows * a->cols;
-	for (int i = 0; i < limit; i++)
+	int i = 0;
+
+#ifdef TENSOR_AVX
+	for (; i + 8 < limit; i += 8)
+	{
+		__m256 a256 = _mm256_load_ps(&a->values[i]);
+		__m256 b256 = _mm256_load_ps(&b->values[i]);
+		__m256 c256 = _mm256_add_ps(a256, b256);
+		_mm256_store_ps(&a->values[i], c256);
+	}
+#endif
+
+#ifdef TENSOR_SSE
+	for (; i + 4 < limit; i += 4)
+	{
+		__m128 av = _mm_load_ps(&a->values[i]);
+		__m128 bv = _mm_load_ps(&b->values[i]);
+		__m128 c = _mm_add_ps(av, bv);
+		_mm_store_ps(&a->values[i], c);
+	}
+
+#endif
+
+	for (; i < limit; i++)
 		a->values[i] += b->values[i];
 
 	return a;
@@ -218,6 +301,12 @@ PTensor tensor_mul(PTensor a, PTensor b)
 		puts("err: tensor_mul shapes not equal");
 		return NULL;
 	}
+
+#ifdef TENSOR_AVX
+#endif
+
+#ifdef TENSOR_SSE
+#endif
 
 	int limit = a->rows * a->cols;
 	for (int i = 0; i < limit; i++)
@@ -269,9 +358,10 @@ PTensor tensor_slice_rows(PTensor t, size_t row_start)
 		r->values[i] = *v++;
 
 	// adjust size of t to remove sliced rows
-	// TODO: we don't release t's extra memory
 	t->rows -= row_start;
-	
+
+	// TODO: we don't release t's extra memory
+
 	return r;
 }
 
@@ -315,9 +405,10 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 	}
 
 	// adjust size of t to remove sliced cols
-	// TODO: we don't release t's extra memory
 	t->cols -= (t->cols - col_start);
-	
+
+	// TODO: we don't release t's extra memory
+
 	return r;
 }
 

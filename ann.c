@@ -19,7 +19,7 @@
 //------------------------------
 static real sigmoid(real x)
 {
-	return 1.0 / (1.0 + exp(-x));
+	return (real)(1.0 / (1.0 + exp(-x)));
 }
 
 //------------------------------
@@ -27,7 +27,7 @@ static real sigmoid(real x)
 //------------------------------
 static real relu(real x)
 {
-	return fmax(0.0, x);
+	return (real)fmax(0.0, x);
 }
 
 //------------------------------
@@ -35,7 +35,7 @@ static real relu(real x)
 //------------------------------
 static real leaky_relu(real x)
 {
-	return fmax(0.01 * x, x);
+	return (real)fmax(0.01 * x, x);
 }
 
 //------------------------------
@@ -49,12 +49,12 @@ static void softmax(PNetwork pnet)
 	int output_layer = pnet->layer_count - 1;
 	for (int node = 1; node < pnet->layers[output_layer].node_count - 1; node++)
 	{
-		sum += exp(pnet->layers[output_layer].nodes[node].value);
+		sum += (real)exp(pnet->layers[output_layer].nodes[node].value);
 	}
 
 	for (int node = 1; node < pnet->layers[output_layer].node_count - 1; node++)
 	{
-		pnet->layers[output_layer].nodes[node].value = exp(pnet->layers[output_layer].nodes[node].value) / sum;
+		pnet->layers[output_layer].nodes[node].value = (real)(exp(pnet->layers[output_layer].nodes[node].value) / sum);
 	}
 }
 
@@ -93,7 +93,7 @@ static void init_weights(PNetwork pnet)
 			for (int weight = 0; weight < weight_count; weight++)
 			{
 				// initialize weights to random values
-				pnet->layers[layer].nodes[node].weights[weight] = get_rand(-0.01, 0.01);	// (2.0 * (real)rand() / (real)RAND_MAX) - 1.0;
+				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-0.01, (real)0.01);	// (2.0 * (real)rand() / (real)RAND_MAX) - 1.0;
 			}
 		}
 	}
@@ -401,9 +401,9 @@ PNetwork ann_make_network(void)
 	pnet->size			= DEFAULT_LAYERS;
 	pnet->layers		= malloc(pnet->size * (sizeof(Layer)));
 	pnet->layer_count	= 0;
-	pnet->learning_rate = DEFAULT_LEARNING_RATE;
+	pnet->learning_rate = (real)DEFAULT_LEARNING_RATE;
 	pnet->weights_set	= 0;
-	pnet->convergence_epsilon = DEFAULT_CONVERGENCE;
+	pnet->convergence_epsilon = (real)DEFAULT_CONVERGENCE;
 	pnet->mseCounter	= 0;
 	pnet->lastMSE[0]	= pnet->lastMSE[1] = pnet->lastMSE[2] = pnet->lastMSE[3] = 0.0;
 	pnet->adaptiveLearning = 1;
@@ -457,12 +457,12 @@ real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
 		if (pnet->adaptiveLearning)
 		{
 			// average the last 4 learning rates
-			real lastMSE = 0.25 * (pnet->lastMSE[0] + pnet->lastMSE[1] + pnet->lastMSE[2] + pnet->lastMSE[3]);
+			real lastMSE = (real)0.25 * (pnet->lastMSE[0] + pnet->lastMSE[1] + pnet->lastMSE[2] + pnet->lastMSE[3]);
 			if (lastMSE > 0.0)
 			{
 				if (mse < lastMSE)
 				{
-					pnet->learning_rate += DEFAULT_LEARN_ADD;
+					pnet->learning_rate += (real)DEFAULT_LEARN_ADD;
 
 					// don't let learning rate go above 1
 					if (pnet->learning_rate > 1.0)
@@ -470,7 +470,7 @@ real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
 				}
 				else
 				{
-					pnet->learning_rate -= DEFAULT_LEARN_SUB * pnet->learning_rate;
+					pnet->learning_rate -= (real)DEFAULT_LEARN_SUB * pnet->learning_rate;
 
 					// don't let rate go below zero
 					if (pnet->learning_rate <= 0.0)
@@ -580,7 +580,7 @@ int ann_load_csv(const char *filename, real **data, size_t *rows, size_t *stride
 
 		// parse the line
 		while (s) {
-			dbuf[*rows] = atof(s);
+			dbuf[*rows] = (real)atof(s);
 			(*rows)++;
 			(*stride)++;
 

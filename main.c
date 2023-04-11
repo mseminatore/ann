@@ -46,11 +46,9 @@ int main(int argc, char *argv[])
 
 	// define our network
 	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
-	ann_add_layer(pnet, 2, LAYER_HIDDEN, ACTIVATION_RELU /*ACTIVATION_SIGMOID*/);
+	// ann_add_layer(pnet, 2, LAYER_HIDDEN, ACTIVATION_RELU /*ACTIVATION_SIGMOID*/);
+	ann_add_layer(pnet, 2, LAYER_HIDDEN, ACTIVATION_SIGMOID);
 	ann_add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
-
-//	ann_set_learning_rate(pnet, 0.2); 
-	//pnet->adaptiveLearning = 0;
 
 	ann_train_network(pnet, data, rows, stride);
 	

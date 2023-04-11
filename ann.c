@@ -234,6 +234,9 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// forward evaluate the network
 	eval_network(pnet);
 
+	// compute the Mean Squared Error
+	real err = compute_error(pnet, outputs);
+
 	//
 	// back propagate and adjust weights
 	//
@@ -316,10 +319,8 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 		}
 	}
 
-	// compute the Mean Squared Error
-	real err = compute_error(pnet, outputs);
 //	printf("Err: %5.2g\n", err);
-	print_network(pnet);
+	// print_network(pnet);
 
 	return err;
 }

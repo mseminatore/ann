@@ -30,7 +30,7 @@ int main(int argc, char *argv[])
 	if (argc > 1)
 		ann_load_csv(argv[1], &data, &rows, &stride);
 	else
-		ann_load_csv("and.csv", &data, &rows, &stride);
+		ann_load_csv("xor.csv", &data, &rows, &stride);
 
 	// print_data(data, rows, stride);
 
@@ -46,7 +46,7 @@ int main(int argc, char *argv[])
 
 	// define our network
 	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
-	//ann_add_layer(pnet, 2, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+	ann_add_layer(pnet, 2, LAYER_HIDDEN, ACTIVATION_RELU /*ACTIVATION_SIGMOID*/);
 	ann_add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
 //	ann_set_learning_rate(pnet, 0.2); 

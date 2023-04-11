@@ -93,7 +93,7 @@ static void init_weights(PNetwork pnet)
 			for (int weight = 0; weight < weight_count; weight++)
 			{
 				// initialize weights to random values
-				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-0.01, (real)0.01);	// (2.0 * (real)rand() / (real)RAND_MAX) - 1.0;
+				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-0.01, (real)0.01);
 			}
 		}
 	}
@@ -115,15 +115,23 @@ static void print_network(PNetwork pnet)
 	{
 		// printf("\nLayer %d\n"
 		// 	"--------\n", layer);
-		putchar('(');
+		putchar('[');
 
-		// print nodes in the layer, skipping bias nodes
+		// print nodes in the layer
 		for (int node = 1; node < pnet->layers[layer].node_count; node++)
 		{
-			printf("%3.2g, ", pnet->layers[layer].nodes[node].value);
+			printf("(%3.2g, ", pnet->layers[layer].nodes[node].value);
+
+			if (layer > 0)
+			{
+				for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+				{
+					printf("%3.2g, ", pnet->layers[layer].nodes[node].weights[prev_node]);
+				}
+			}
 		}
 
-		puts(")");
+		puts("]");
 	}
 }
 
@@ -216,10 +224,6 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	assert(pnet->layers[0].layer_type == LAYER_INPUT);
 	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
 
-	// node 0 is a bias node in every layer
-	// TODO - this not needed here?
-	pnet->layers[0].nodes[0].value = 1.0;
-
 	// set the input values on the network
 	int node_count = pnet->layers[0].node_count;
 	for (int node = 1; node < node_count; node++)
@@ -239,11 +243,12 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	//
 
 	// for each node in the output layer, excluding output layer bias node
-	real *expected_values = outputs;
-	int output_layer = pnet->layer_count - 1;
+	real *expected_values	= outputs;
+	int output_layer		= pnet->layer_count - 1;
+
 	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
 	{
-		real delta_w = 0.0;
+		real delta_w = (real)0.0;
 
 		// for each incoming input for this node, calculate the change in weight for that node
 		for (int prev_node = 0; prev_node < pnet->layers[output_layer - 1].node_count; prev_node++)
@@ -252,49 +257,55 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 			real result = *expected_values;
 			real y = pnet->layers[output_layer].nodes[node].value;
 
-			real err_term = (result - y) * z;
-			delta_w = pnet->learning_rate * err_term;
+			real err_term = (result - y);
+			delta_w = pnet->learning_rate * err_term * z;
 			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
-			pnet->layers[output_layer].nodes[node].err = err_term;
+			pnet->layers[output_layer].nodes[node].err = err_term * pnet->layers[output_layer].nodes[node].weights[prev_node];
 		}
 
 		// get next expected output value
 		expected_values++;
 	}
 
-	// process hidden layers, excluding input layer
-	//for (int layer = output_layer - 1; layer > 0; layer--)
-	//{
-	//	// for each node of this layer
-	//	for (int node = 0; node < pnet->layers[layer].node_count; node++)
-	//	{
-	//		real delta_w = 0.0;
+	// process all hidden layers, excluding the input layer
+	for (int layer = output_layer - 1; layer > 0; layer--)
+	{
+		// for each node of this layer
+		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		{
+			real delta_w = (real)0.0;
 
-	//		real err_term = pnet->layers[layer + 1].nodes[node].err;
+			// for each incoming input to this node, calculate the weight change
+			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			{
+				real err_sum = (real)0.0;
 
-	//		// for each incoming input to this node, calculate the weight change
-	//		for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-	//		{
-	//			// dw = n * (r - y) * z * v * (1-z) * x
-	//			// dw = n * err_term * v * (1-z) * x
-	//			real x = pnet->layers[layer - 1].nodes[prev_node].value;
-	//			real v = pnet->layers[]
-	//			real z = pnet->layers[layer].nodes[]
+				// for each following node
+				for (int next_node = 1; next_node < pnet->layers[layer + 1].node_count; next_node++)
+				{
+					err_sum += pnet->layers[layer + 1].nodes[next_node].err;
+				}
 
-	//			delta_w = pnet->learning_rate * err_term * v * (1.0 - z) * x;
-	//			pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
-	//			pnet->layers[layer].nodes[node].err = new_err_term;
-	//		}
+				real x = pnet->layers[layer - 1].nodes[prev_node].value;
+				real z = pnet->layers[layer].nodes[node].value;
 
-	//	}
-	//}
+				delta_w = pnet->learning_rate * err_sum * z * ((real)1.0 - z) * x;
+
+				pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
+
+				// TODO - figure this out for multiple hidden layer case
+//				pnet->layers[layer].nodes[node].err = new_err_term;
+			}
+
+		}
+	}
 
 	// update the weights based on calculated changes
 	// for each layer after input
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		// for each node in the layer
-		for (int node = 0; node < pnet->layers[layer].node_count; node++)
+		for (int node = 1; node < pnet->layers[layer].node_count; node++)
 		{
 			// for each node in previous layer
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
@@ -308,7 +319,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// compute the Mean Squared Error
 	real err = compute_error(pnet, outputs);
 //	printf("Err: %5.2g\n", err);
-	// print_network(pnet);
+	print_network(pnet);
 
 	return err;
 }

@@ -93,7 +93,7 @@ static void init_weights(PNetwork pnet)
 			for (int weight = 0; weight < weight_count; weight++)
 			{
 				// initialize weights to random values
-				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-0.01, (real)0.01);
+				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-0.5, (real)0.5);
 			}
 		}
 	}
@@ -262,6 +262,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 
 			real err_term = (result - y);
 			delta_w = pnet->learning_rate * err_term * z;
+
 			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
 			pnet->layers[output_layer].nodes[node].err = err_term * pnet->layers[output_layer].nodes[node].weights[prev_node];
 		}

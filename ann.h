@@ -45,6 +45,14 @@ typedef enum {
 	ACTIVATION_SOFTMAX 
 } Activation_type;
 
+//
+//
+//
+typedef enum {
+	LOSS_MSE,
+	LOSS_CROSS_ENTROPY
+} Loss_type;
+
 //------------------------------
 // Defines a layer in a network
 //------------------------------
@@ -71,6 +79,7 @@ typedef struct
 	unsigned mseCounter;
 	int adaptiveLearning;
 	unsigned epochLimit;
+	Loss_type loss_type;
 } Network, *PNetwork;
 
 //------------------------------
@@ -94,5 +103,9 @@ real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride);
 real ann_test_network(PNetwork pnet, real *inputs, real *outputs);
 void ann_set_convergence(PNetwork pnet, real limit);
 int ann_load_csv(const char *filename, real **data, size_t *rows, size_t *stride);
+
+void print_network(PNetwork pnet);
+void print_outputs(PNetwork pnet);
+void softmax(PNetwork pnet);
 
 #endif

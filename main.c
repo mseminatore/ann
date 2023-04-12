@@ -16,6 +16,9 @@ void print_data(real *data, size_t rows, size_t stride)
 	}
 }
 
+#define ACTIVATION ACTIVATION_SIGMOID
+//#define ACTIVATION ACTIVATION_RELU
+
 //------------------------------
 //
 //------------------------------
@@ -30,7 +33,7 @@ int main(int argc, char *argv[])
 	if (argc > 1)
 		ann_load_csv(argv[1], &data, &rows, &stride);
 	else
-		ann_load_csv("xor.csv", &data, &rows, &stride);
+		ann_load_csv("num5x7.csv", &data, &rows, &stride);
 
 	// print_data(data, rows, stride);
 
@@ -45,15 +48,18 @@ int main(int argc, char *argv[])
 	tensor_free(o);
 
 	// define our network
-	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
-	//ann_add_layer(pnet, 2, LAYER_HIDDEN, ACTIVATION_SIGMOID);
-	ann_add_layer(pnet, 5, LAYER_HIDDEN, ACTIVATION_RELU);
-	//ann_add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
-	ann_add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_RELU);
+//	pnet->loss_type = LOSS_CROSS_ENTROPY;
+
+	ann_add_layer(pnet, 35, LAYER_INPUT, ACTIVATION_NULL);
+	ann_add_layer(pnet, 48, LAYER_HIDDEN, ACTIVATION);
+	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION);
 
 	ann_train_network(pnet, data, rows, stride);
 	
 //	ann_test_network(pnet, inputs, outputs);
+
+//	softmax(pnet);
+	print_outputs(pnet);
 
 	ann_free_network(pnet);
 

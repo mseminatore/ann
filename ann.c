@@ -41,21 +41,23 @@ static real leaky_relu(real x)
 //------------------------------
 // compute the softmax
 //------------------------------
-static void softmax(PNetwork pnet)
+void softmax(PNetwork pnet)
 {
 	real sum = 0.0;
 
 	// find the sum of the output node values, excluding the bias noad
 	int output_layer = pnet->layer_count - 1;
-	for (int node = 1; node < pnet->layers[output_layer].node_count - 1; node++)
+	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
 	{
 		sum += (real)exp(pnet->layers[output_layer].nodes[node].value);
 	}
 
-	for (int node = 1; node < pnet->layers[output_layer].node_count - 1; node++)
+	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
 	{
 		pnet->layers[output_layer].nodes[node].value = (real)(exp(pnet->layers[output_layer].nodes[node].value) / sum);
+		printf("%3.2g ", pnet->layers[output_layer].nodes[node].value);
 	}
+	puts("");
 }
 
 //------------------------------
@@ -104,7 +106,7 @@ static void init_weights(PNetwork pnet)
 //------------------------------
 // print the network
 //------------------------------
-static void print_network(PNetwork pnet)
+void print_network(PNetwork pnet)
 {
 	if (!pnet)
 		return;
@@ -136,9 +138,41 @@ static void print_network(PNetwork pnet)
 }
 
 //--------------------------------
+//
+//--------------------------------
+void print_outputs(PNetwork pnet)
+{
+	if (!pnet)
+		return;
+
+	puts("");
+
+	putchar('[');
+
+	PLayer pLayer = &pnet->layers[0];
+	for (int node = 1; node < pLayer->node_count; node++)
+	{
+		printf("%3.2g, ", pLayer->nodes[node].value);
+	}
+
+	puts("]");
+
+	putchar('[');
+
+	// print nodes in the output layer
+	pLayer = &pnet->layers[pnet->layer_count - 1];
+	for (int node = 1; node < pLayer->node_count; node++)
+	{
+		printf("%3.2g, ", pLayer->nodes[node].value);
+	}
+
+	puts("]");
+}
+
+//--------------------------------
 // compute the mean squared error
 //--------------------------------
-static real compute_error(PNetwork pnet, real *outputs)
+static real compute_ms_error(PNetwork pnet, real *outputs)
 {
 	// get the output layer
 	PLayer pLayer = &pnet->layers[pnet->layer_count - 1];
@@ -156,6 +190,26 @@ static real compute_error(PNetwork pnet, real *outputs)
 	mse *= 0.5;
 
 	return mse;
+}
+
+//------------------------------
+// compute the cross entropy error
+//------------------------------
+static real compute_cross_entropy(PNetwork pnet, real *outputs)
+{
+	// get the output layer
+	PLayer pLayer = &pnet->layers[pnet->layer_count - 1];
+
+	assert(pLayer->layer_type == LAYER_OUTPUT);
+
+	real xe = 0.0;
+
+	for (int i = 1; i < pLayer->node_count; i++)
+	{
+		xe += (real)(outputs[i - 1] * log(pLayer->nodes[i].value));
+	}
+
+	return -xe;
 }
 
 //------------------------------
@@ -235,7 +289,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	eval_network(pnet);
 
 	// compute the Mean Squared Error
-	real err = compute_error(pnet, outputs);
+	real err = pnet->loss_type == LOSS_MSE ? compute_ms_error(pnet, outputs) : compute_cross_entropy(pnet, outputs);
 
 	//
 	// back propagate and adjust weights
@@ -422,8 +476,9 @@ PNetwork ann_make_network(void)
 	pnet->convergence_epsilon = (real)DEFAULT_CONVERGENCE;
 	pnet->mseCounter	= 0;
 	pnet->lastMSE[0]	= pnet->lastMSE[1] = pnet->lastMSE[2] = pnet->lastMSE[3] = 0.0;
-	pnet->adaptiveLearning = 1;
 	pnet->epochLimit	= 10000;
+	pnet->loss_type		= LOSS_MSE;
+	pnet->adaptiveLearning = 1;
 
 	return pnet;
 }
@@ -467,7 +522,7 @@ real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
 		if (mse < pnet->convergence_epsilon)
 			converged = 1;
 
-		printf("Epoch %u, MSE = %5.2g, LR = %5.2g\n", ++epoch, mse, pnet->learning_rate);
+		printf("Epoch %u, Error = %5.2g, LR = %5.2g\n", ++epoch, mse, pnet->learning_rate);
 
 		// adapt the learning rate if enabled
 		if (pnet->adaptiveLearning)

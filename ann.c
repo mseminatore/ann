@@ -14,6 +14,15 @@
 #include <assert.h>
 #include "ann.h"
 
+#if defined(_WIN32) && !defined(_WIN64)
+	#define R_MIN -0.5
+	#define R_MAX 0.5
+
+#else
+	#define R_MIN -1.0
+	#define R_MAX 1.0
+#endif
+
 //------------------------------
 // compute the sigmoid activation
 //------------------------------
@@ -95,7 +104,7 @@ static void init_weights(PNetwork pnet)
 			for (int weight = 0; weight < weight_count; weight++)
 			{
 				// initialize weights to random values
-				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-0.5, (real)0.5);
+				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)R_MIN, (real)R_MAX);
 			}
 		}
 	}

@@ -58,3 +58,8 @@ dkms.conf
 Debug/
 Release/
 ann
+.DS_Store
+fashion-mnist_test.csv
+fashion-mnist_train.csv
+logic
+test5x7

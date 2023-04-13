@@ -406,7 +406,7 @@ static void shuffle_indices(size_t *input_indices, size_t count)
 }
 
 //[]---------------------------------------------[]
-// Public interfaces
+// Public ANN library interfaces
 //[]---------------------------------------------[]
 
 //------------------------------
@@ -638,13 +638,14 @@ void ann_free_network(PNetwork pnet)
 //------------------------------
 // load data from a csv file
 //------------------------------
-int ann_load_csv(const char *filename, real **data, size_t *rows, size_t *stride)
+int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows, size_t *stride)
 {
 	FILE *f;
 	char *s, buf[DEFAULT_BUFFER_SIZE];
 	size_t size = 8;
 	real *dbuf;
 	size_t lastStride = 0;
+	uint32_t lineno = 0;
 
 	f = fopen(filename, "rt");
 	if (!f)
@@ -654,9 +655,15 @@ int ann_load_csv(const char *filename, real **data, size_t *rows, size_t *stride
 
 	dbuf = malloc(size * sizeof(real));
 
+	// skip header if present
+	if (has_header)
+		fgets(buf, DEFAULT_BUFFER_SIZE - 1, f);
+
 	// read a line
 	while (fgets(buf, DEFAULT_BUFFER_SIZE - 1, f))
 	{
+		lineno++;
+
 		// tokenize the line
 		*stride = 0;
 		s = strtok(buf, ", \n");
@@ -691,7 +698,7 @@ int ann_load_csv(const char *filename, real **data, size_t *rows, size_t *stride
 		// check that all row strides are the same
 		if (lastStride != *stride)
 		{
-			puts("Error: malformed CSV file\n");
+			printf("Error: malformed CSV file at line %u\n", lineno);
 			free(dbuf);
 			fclose(f);
 			return E_FAIL;
@@ -702,4 +709,63 @@ int ann_load_csv(const char *filename, real **data, size_t *rows, size_t *stride
 	(*rows) /= *stride;
 	fclose(f);
 	return E_OK;
+}
+
+//------------------------------
+// predict an outcome
+//------------------------------
+int ann_predict(PNetwork pnet, real *inputs, real *outputs)
+{
+	if (!pnet || !inputs || !outputs)
+		return E_FAIL;
+
+	// set inputs
+	int node_count = pnet->layers[0].node_count;
+	for (int node = 1; node < node_count; node++)
+	{
+		pnet->layers[0].nodes[node].value = *inputs++;
+	}
+
+	// evaluate network
+	eval_network(pnet);
+
+	// get the outputs
+	node_count = pnet->layers[pnet->layer_count - 1].node_count;
+	for (int node = 1; node < node_count; node++)
+	{
+		*outputs++ = pnet->layers[pnet->layer_count - 1].nodes[node].value;
+	}
+
+	return E_OK;
+}
+
+//------------------------------
+// save out a network
+//------------------------------
+int ann_save_network(PNetwork pnet, const char *filename)
+{
+	if (!pnet || !filename)
+		return E_FAIL;
+
+	FILE *fptr = fopen(filename, "wt");
+	if (!fptr)
+		return E_FAIL;
+
+	// TODO - save out network
+	// TODO - save network props
+	// TODO - save layer details
+	// TODO - save node weights
+
+	fclose(fptr);
+	return E_OK;
+}
+
+//------------------------------
+// load a previously saved network
+//------------------------------
+PNetwork ann_load_network(const char *filename)
+{
+	PNetwork pnet = ann_make_network();
+
+	return pnet;
 }

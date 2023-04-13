@@ -4,7 +4,7 @@
 #include "tensor.h"
 
 //------------------------------
-//
+// Error values
 //------------------------------
 #define E_FAIL -1
 #define E_OK 0
@@ -20,7 +20,7 @@ typedef FLOAT real;
 typedef struct
 {
 	real *weights;		// array of node weights
-	real *dw;
+	real *dw;			// change in weights
 	real value;			// node value
 	real err;			// error term for this node
 } Node, *PNode;
@@ -45,9 +45,9 @@ typedef enum {
 	ACTIVATION_SOFTMAX 
 } Activation_type;
 
-//
-//
-//
+//------------------------------
+// Loss function types
+//------------------------------
 typedef enum {
 	LOSS_MSE,
 	LOSS_CROSS_ENTROPY
@@ -75,25 +75,29 @@ typedef struct
 	int size;					// number of layers allocated
 	int weights_set;			// have the weights been initialized?
 	real convergence_epsilon;	// threshold for convergence
-	real lastMSE[4];
+	real lastMSE[4];			// we average the last 4 MSE values
 	unsigned mseCounter;
-	int adaptiveLearning;
-	unsigned epochLimit;
-	Loss_type loss_type;
+	int adaptiveLearning;		// is adaptive learning enabled?
+	unsigned epochLimit;		// convergence epoch limit
+	Loss_type loss_type;		// type of loss function used
 } Network, *PNetwork;
 
 //------------------------------
 // Configurable parameters
 //------------------------------
-#define DEFAULT_LAYERS			4
-#define DEFAULT_CONVERGENCE 	0.01
-#define DEFAULT_BUFFER_SIZE		1024
-#define DEFAULT_LEARNING_RATE 	0.15	// pick a better default?
-#define DEFAULT_LEARN_ADD		0.05
+#define DEFAULT_LAYERS			4		// we pre-alloc this many layers
+#define DEFAULT_CONVERGENCE 	0.01	// MSE <= 1% is default
+#define DEFAULT_BUFFER_SIZE		1024	// size used for temp buffers
+#define DEFAULT_LEARNING_RATE 	0.15	// base learning rate
+#define DEFAULT_LEARN_ADD		0.05	// adaptive learning rate factors
 #define DEFAULT_LEARN_SUB		0.1
 
-//------------------------------
 //
+#define CSV_HAS_HEADER 1
+#define CSV_NO_HEADER 0
+
+//------------------------------
+// ANN function decls
 //------------------------------
 int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type);
 PNetwork ann_make_network(void);
@@ -102,8 +106,12 @@ void ann_free_network(PNetwork pnet);
 real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride);
 real ann_test_network(PNetwork pnet, real *inputs, real *outputs);
 void ann_set_convergence(PNetwork pnet, real limit);
-int ann_load_csv(const char *filename, real **data, size_t *rows, size_t *stride);
+int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows, size_t *stride);
+PNetwork ann_load_network(const char *filename);
+int ann_save_network(PNetwork pnet, const char *filename);
+int ann_predict(PNetwork pnet, real *inputs, real *outputs);
 
+// debugging functions
 void print_network(PNetwork pnet);
 void print_outputs(PNetwork pnet);
 void softmax(PNetwork pnet);

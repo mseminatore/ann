@@ -6,6 +6,7 @@
 
 #ifdef _WIN32
 #	include <malloc.h>
+#include <stdint.h>
 #else
 #	include <alloca.h>
 #endif
@@ -642,10 +643,11 @@ int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows
 {
 	FILE *f;
 	char *s, buf[DEFAULT_BUFFER_SIZE];
-	size_t size = 8;
+	size_t size = DEFAULT_BUFFER_SIZE;
 	real *dbuf;
 	size_t lastStride = 0;
 	uint32_t lineno = 0;
+	size_t count = 0;
 
 	f = fopen(filename, "rt");
 	if (!f)
@@ -657,11 +659,14 @@ int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows
 
 	// skip header if present
 	if (has_header)
-		fgets(buf, DEFAULT_BUFFER_SIZE - 1, f);
+		fgets(buf, DEFAULT_BUFFER_SIZE, f);
 
 	// read a line
-	while (fgets(buf, DEFAULT_BUFFER_SIZE - 1, f))
+	while (fgets(buf, DEFAULT_BUFFER_SIZE, f))
 	{
+		if (buf[0] == 0)
+			continue;
+
 		lineno++;
 
 		// tokenize the line
@@ -670,11 +675,10 @@ int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows
 
 		// parse the line
 		while (s) {
-			dbuf[*rows] = (real)atof(s);
-			(*rows)++;
+			dbuf[count++] = (real)atof(s);
 			(*stride)++;
 
-			if (*rows >= size)
+			if (count >= size)
 			{
 				// double the size
 				size <<= 1;
@@ -703,10 +707,13 @@ int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows
 			fclose(f);
 			return E_FAIL;
 		}
+
+		(*rows)++;
+
 	}
 
 	*data = dbuf;
-	(*rows) /= *stride;
+	//(*rows) /= *stride;
 	fclose(f);
 	return E_OK;
 }

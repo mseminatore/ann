@@ -87,7 +87,7 @@ typedef struct
 //------------------------------
 #define DEFAULT_LAYERS			4		// we pre-alloc this many layers
 #define DEFAULT_CONVERGENCE 	0.01	// MSE <= 1% is default
-#define DEFAULT_BUFFER_SIZE		1024	// size used for temp buffers
+#define DEFAULT_BUFFER_SIZE		8192	// size used for temp buffers
 #define DEFAULT_LEARNING_RATE 	0.15	// base learning rate
 #define DEFAULT_LEARN_ADD		0.05	// adaptive learning rate factors
 #define DEFAULT_LEARN_SUB		0.1

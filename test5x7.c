@@ -42,6 +42,17 @@ void print5x7(real *data)
 	}
 }
 
+// add noise
+void add_noise(real *data, size_t size, int amount)
+{
+	for (int i = 0; i < amount; i++)
+	{
+		int index = rand() % size;
+
+		data[index] = (data[index] == 1.0) ? 0.0 : 1.0;
+	}
+}
+
 //------------------------------
 // main program start
 //------------------------------
@@ -65,11 +76,16 @@ int main(int argc, char *argv[])
 
 	ann_train_network(pnet, data, rows, stride);
 
-	real outputs[10];
-	ann_predict(pnet, &data[45], outputs);
+	for (int i = 0; i < 10; i++)
+	{
+		add_noise(&data[i * 45], 35, 5);
 
-	print5x7(&data[45]);
-	print_class_pred(outputs);
+		real outputs[10];
+		ann_predict(pnet, &data[i * 45], outputs);
+
+		print5x7(&data[i * 45]);
+		print_class_pred(outputs);
+	}
 
 	ann_free_network(pnet);
 

@@ -19,6 +19,7 @@
 
 #if _M_IX86_FP == 2
 #	define TENSOR_SSE
+#	define TENSOR_AVX
 #endif
 
 #ifdef TENSOR_AVX
@@ -101,9 +102,9 @@ PTensor tensor_create_from_array(size_t rows, size_t cols, FLOAT *vals)
 	if (!t)
 		return NULL;
 
-	int limit = t->rows * t->cols;
+	size_t limit = t->rows * t->cols;
 
-	for (int i = 0; i < limit; i++)
+	for (size_t i = 0; i < limit; i++)
 		t->values[i] = *vals++;
 
 	return t;
@@ -132,8 +133,8 @@ void tensor_fill(PTensor t, FLOAT val)
 	if (!t)
 		return;
 
-	int limit = t->rows * t->cols;
-	int i = 0;
+	size_t limit = t->rows * t->cols;
+	size_t i = 0;
 
 #ifdef TENSOR_AVX
 	__m256 va = _mm256_set1_ps(val);
@@ -160,9 +161,9 @@ void tensor_randomize(PTensor t)
 	if (!t)
 		return;
 
-	int limit = t->rows * t->cols;
+	size_t limit = t->rows * t->cols;
 
-	for (int i = 0; i < limit; i++)
+	for (size_t i = 0; i < limit; i++)
 		t->values[i] = (FLOAT)rand() / (FLOAT)RAND_MAX;
 }
 
@@ -201,8 +202,8 @@ PTensor tensor_rand(size_t rows, size_t cols)
 	if (!t)
 		return NULL;
 
-	int limit = t->rows * t->cols;
-	for (int i = 0; i < limit; i++)
+	size_t limit = t->rows * t->cols;
+	for (size_t i = 0; i < limit; i++)
 		t->values[i] = (FLOAT)rand() / (FLOAT)RAND_MAX;
 
 	return t;
@@ -216,8 +217,8 @@ PTensor tensor_add_scalar(PTensor t, FLOAT val)
 	if (!t)
 		return NULL;
 
-	int limit = t->rows * t->cols;
-	int i = 0;
+	size_t limit = t->rows * t->cols;
+	size_t i = 0;
 
 #ifdef TENSOR_AVX
 	__m256 va = _mm256_set1_ps(val);
@@ -262,8 +263,8 @@ PTensor tensor_add(PTensor a, PTensor b)
 		return NULL;
 	}
 
-	int limit = a->rows * a->cols;
-	int i = 0;
+	size_t limit = a->rows * a->cols;
+	size_t i = 0;
 
 #ifdef TENSOR_AVX
 	for (; i + 8 < limit; i += 8)
@@ -290,6 +291,45 @@ PTensor tensor_add(PTensor a, PTensor b)
 		a->values[i] += b->values[i];
 
 	return a;
+}
+
+//------------------------------
+// multiply tensor by a scalar
+//------------------------------
+PTensor tensor_mul_scalar(PTensor t, FLOAT val)
+{
+	if (!t)
+		return NULL;
+
+	size_t limit = t->rows * t->cols;
+	size_t i = 0;
+
+#ifdef TENSOR_AVX
+	__m256 va = _mm256_set1_ps(val);
+	for (; i + 8 < limit; i += 8)
+	{
+		__m256 vb = _mm256_load_ps(&t->values[i]);
+		__m256 vc = _mm256_mul_ps(vb, va);
+		_mm256_store_ps(&t->values[i], vc);
+	}
+#endif
+
+#ifdef TENSOR_SSE
+	__m128 a = _mm_set1_ps(val);
+
+	for (; i + 4 < limit; i += 4)
+	{
+		__m128 b = _mm_load_ps(&t->values[i]);
+		__m128 c = _mm_mul_ps(b, a);
+		_mm_store_ps(&t->values[i], c);
+	}
+#endif
+
+	for (; i < limit; i++)
+		t->values[i] += val;
+
+	return t;
+
 }
 
 //------------------------------
@@ -375,7 +415,9 @@ PTensor tensor_slice_rows(PTensor t, size_t row_start)
 	// adjust size of t to remove sliced rows
 	t->rows -= row_start;
 
-	// TODO: we don't release t's extra memory
+	// release t's extra memory
+	t->values = trealloc(t->values, t->rows * t->cols * sizeof(FLOAT));
+	assert(t->values);
 
 	return r;
 }
@@ -422,7 +464,30 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 	// adjust size of t to remove sliced cols
 	t->cols -= (t->cols - col_start);
 
-	// TODO: we don't release t's extra memory
+	// release t's extra memory
+	t->values = trealloc(t->values, t->rows * t->cols * sizeof(FLOAT));
+	assert(t->values);
+
+	return r;
+}
+
+//-------------------------------
+// turn int vector to onethot
+//-------------------------------
+PTensor tensor_onehot(PTensor t, size_t classes)
+{
+	if (t->cols > 1)
+	{
+		assert(t->cols == 1);
+		return NULL;
+	}
+
+	PTensor r = tensor_zeros(t->rows, classes);
+
+	for (size_t row = 0; row < t->rows; row++)
+	{
+		tensor_set(r, row, (size_t)tensor_get(t, row, 0), (FLOAT)1.0);
+	}
 
 	return r;
 }

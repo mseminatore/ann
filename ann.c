@@ -519,7 +519,7 @@ real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
 	{
 		shuffle_indices(input_indices, rows);
 		
-		// iterate over all sets of inputs in this epoch/batch
+		// iterate over all sets of inputs in this epoch/minibatch
 		for (size_t i = 0; i < rows; i++)
 		{
 			real *ins = inputs + input_indices[i] * stride;

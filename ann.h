@@ -103,7 +103,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 PNetwork ann_make_network(void);
 void ann_set_learning_rate(PNetwork pnet, real rate);
 void ann_free_network(PNetwork pnet);
-real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride);
+real ann_train_network(PNetwork pnet, real *inputs, real *outputs, size_t rows);
 real ann_test_network(PNetwork pnet, real *inputs, real *outputs);
 void ann_set_convergence(PNetwork pnet, real limit);
 int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows, size_t *stride);

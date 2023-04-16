@@ -68,12 +68,15 @@ int main(int argc, char *argv[])
 	//tensor_print(t);
 
 	PTensor x_train = tensor_slice_cols(y_labels, 1);
+	PTensor x_test = tensor_slice_rows(x_train, 50000);
 
 	// convert outputs to onehot code
 	PTensor y_train = tensor_onehot(y_labels, 10);
+	PTensor y_test = tensor_slice_rows(y_train, 50000);
 
 	// normalize inputs
 	tensor_mul_scalar(x_train, (real)(1.0 / 255.0));
+	tensor_mul_scalar(x_test, (real)(1.0 / 255.0));
 
 	//tensor_print(t);
 	//tensor_print(o);
@@ -83,15 +86,19 @@ int main(int argc, char *argv[])
 
 	// define our network
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);
-	ann_add_layer(pnet, 784, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
-	ann_train_network(pnet, data, rows, stride);
+	pnet->epochLimit = 5;
+
+	ann_train_network(pnet, x_train->values, y_train->values, rows/48);
 	
 //	ann_test_network(pnet, inputs, outputs);
 
+	printf("Actual class is %g\n", y_labels->values[50002]);
+
 	real outputs[10];
-	ann_predict(pnet, &data[45], outputs);
+	ann_predict(pnet, &x_test->values[784], outputs);
 	//	softmax(pnet);
 
 	print_class_pred(outputs);

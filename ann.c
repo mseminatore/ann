@@ -496,7 +496,7 @@ PNetwork ann_make_network(void)
 //-----------------------------------------------
 // Train the network for a set of inputs/outputs
 //-----------------------------------------------
-real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
+real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 {
 	if (!pnet)
 		return 0.0;
@@ -520,19 +520,24 @@ real ann_train_network(PNetwork pnet, real *inputs, size_t rows, size_t stride)
 		shuffle_indices(input_indices, rows);
 		
 		// iterate over all sets of inputs in this epoch/minibatch
+		printf("Epoch %u\n[", ++epoch);
+		int inc = rows / 60;
 		for (size_t i = 0; i < rows; i++)
 		{
-			real *ins = inputs + input_indices[i] * stride;
-			real *outs = ins + pnet->layers[0].node_count - 1;
+			real *ins = inputs + input_indices[i] * (pnet->layers[0].node_count - 1);
+			real *outs = outputs + input_indices[i] * (pnet->layers[pnet->layer_count - 1].node_count - 1);
 
 			mse += train_pass_network(pnet, ins, outs);
+
+			if (i % inc == 0)
+				putchar('=');
 		}
 
 		mse /= (real)rows;
 		if (mse < pnet->convergence_epsilon)
 			converged = 1;
 
-		printf("Epoch %u, Error = %5.2g, LR = %5.2g\n", ++epoch, mse, pnet->learning_rate);
+		printf("], Error = %5.2g, LR = %5.2g\n", mse, pnet->learning_rate);
 
 		// adapt the learning rate if enabled
 		if (pnet->adaptiveLearning)

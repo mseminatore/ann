@@ -183,6 +183,7 @@ static real compute_ms_error(PNetwork pnet, real *outputs)
 
 	real mse = 0.0, diff;
 
+	#pragma clang loop vectorize(enable)
 	for (int i = 1; i < pLayer->node_count; i++)
 	{
 		diff = pLayer->nodes[i].value - outputs[i - 1];
@@ -206,6 +207,7 @@ static real compute_cross_entropy(PNetwork pnet, real *outputs)
 
 	real xe = 0.0;
 
+	#pragma clang loop vectorize(enable)
 	for (int i = 1; i < pLayer->node_count; i++)
 	{
 		xe += (real)(outputs[i - 1] * log(pLayer->nodes[i].value));
@@ -231,6 +233,7 @@ static void eval_network(PNetwork pnet)
 			real sum = 0.0;
 
 			// loop over nodes in previous layer, including the bias node
+			#pragma clang loop vectorize(enable)
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 			{
 				// accumulate sum of prev nodes value times this nodes weight for that value
@@ -368,6 +371,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 		for (int node = 1; node < pnet->layers[layer].node_count; node++)
 		{
 			// for each node in previous layer
+			#pragma clang loop vectorize(enable)
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 			{
 				// update the weights by the change
@@ -573,9 +577,9 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 	return mse;
 }
 
-//------------------------------
-//
-//------------------------------
+//-----------------------------------
+// predict class from onehot outputs
+//-----------------------------------
 int ann_class_prediction(real *outputs, int classes)
 {
 	int class = -1;

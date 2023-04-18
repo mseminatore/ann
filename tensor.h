@@ -12,7 +12,7 @@
 //------------------------------
 typedef struct
 {
-	size_t rows, cols;
+	size_t rows, cols, stride;
 	FLOAT *values;
 	size_t rank;
 } Tensor, *PTensor;

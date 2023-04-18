@@ -79,6 +79,8 @@ PTensor tensor_create(size_t rows, size_t cols)
 
 	t->rows = rows;
 	t->cols = cols;
+	t->stride = (cols + TENSOR_ALIGN - 1) & (SIZE_MAX ^ 0x1f);
+
 	t->rank = 2;
 
 	t->values = tmalloc(rows * cols * sizeof(FLOAT));
@@ -413,7 +415,7 @@ PTensor tensor_slice_rows(PTensor t, size_t row_start)
 		r->values[i] = *v++;
 
 	// adjust size of t to remove sliced rows
-	t->rows -= row_start;
+	t->rows -= (t->rows - row_start);
 
 	// release t's extra memory
 	t->values = trealloc(t->values, t->rows * t->cols * sizeof(FLOAT));

@@ -3,21 +3,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef _WIN32
-#	include <malloc.h>
-#include <stdint.h>
-#else
-#	include <alloca.h>
-#endif
-
 #include <math.h>
 #include <assert.h>
 #include "ann.h"
 
 #if defined(_WIN32) && !defined(_WIN64)
-	#define R_MIN -0.5
-	#define R_MAX 0.5
+	#define R_MIN -0.1
+	#define R_MAX 0.1
 
 #else
 	#define R_MIN -1.0
@@ -520,8 +512,8 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 		shuffle_indices(input_indices, rows);
 		
 		// iterate over all sets of inputs in this epoch/minibatch
-		printf("Epoch %u\n[", ++epoch);
-		int inc = rows / 60;
+		printf("Epoch %u/%u\n[", ++epoch, pnet->epochLimit);
+		int inc = rows / 20;
 		for (size_t i = 0; i < rows; i++)
 		{
 			real *ins = inputs + input_indices[i] * (pnet->layers[0].node_count - 1);
@@ -537,7 +529,7 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 		if (mse < pnet->convergence_epsilon)
 			converged = 1;
 
-		printf("], Error = %5.2g, LR = %5.2g\n", mse, pnet->learning_rate);
+		printf("], Err=%3.2g, LR=%3.2g\n", mse, pnet->learning_rate);
 
 		// adapt the learning rate if enabled
 		if (pnet->adaptiveLearning)
@@ -569,7 +561,7 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 		}
 
 		// check for no convergence
-		if (epoch > pnet->epochLimit)
+		if (epoch >= pnet->epochLimit)
 		{
 			puts("Error: network not converged.\n");
 			converged = 1;
@@ -579,6 +571,26 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 	//print_network(pnet);
 
 	return mse;
+}
+
+//------------------------------
+//
+//------------------------------
+int ann_class_prediction(real *outputs, int classes)
+{
+	int class = -1;
+	real prob = 0.0;
+
+	for (int i = 0; i < classes; i++)
+	{
+		if (outputs[i] > prob)
+		{
+			prob = outputs[i];
+			class = i;
+		}
+	}
+
+	return class;
 }
 
 //------------------------------

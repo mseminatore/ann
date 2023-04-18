@@ -3,6 +3,14 @@
 
 #include "tensor.h"
 
+#ifdef _WIN32
+#	include <malloc.h>
+#	include <stdint.h>
+#else
+#	include <alloca.h>
+#endif
+
+
 //------------------------------
 // Error values
 //------------------------------
@@ -89,8 +97,8 @@ typedef struct
 #define DEFAULT_CONVERGENCE 	0.01	// MSE <= 1% is default
 #define DEFAULT_BUFFER_SIZE		8192	// size used for temp buffers
 #define DEFAULT_LEARNING_RATE 	0.15	// base learning rate
-#define DEFAULT_LEARN_ADD		0.05	// adaptive learning rate factors
-#define DEFAULT_LEARN_SUB		0.1
+#define DEFAULT_LEARN_ADD		0.1		// adaptive learning rate factors
+#define DEFAULT_LEARN_SUB		0.05
 
 //
 #define CSV_HAS_HEADER 1
@@ -110,6 +118,7 @@ int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows
 PNetwork ann_load_network(const char *filename);
 int ann_save_network(PNetwork pnet, const char *filename);
 int ann_predict(PNetwork pnet, real *inputs, real *outputs);
+int ann_class_prediction(real *outputs, int classes);
 
 // debugging functions
 void print_network(PNetwork pnet);

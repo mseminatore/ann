@@ -18,11 +18,14 @@ int main(int argc, char *argv[])
 
 	PNetwork pnet = ann_make_network();
 
+	PTensor x_train = tensor_create_from_array(rows, stride, data);
+	PTensor y_train = tensor_slice_cols(x_train, 2);
+
 	// define our network
 	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
 	ann_add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
-	ann_train_network(pnet, data, rows, stride);
+	ann_train_network(pnet, x_train, y_train, x_train->rows);
 	
 	real outputs[1];
 	ann_predict(pnet, &data[0], outputs);

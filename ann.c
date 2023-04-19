@@ -17,6 +17,10 @@
 	#define R_MAX 1.0
 #endif
 
+#ifndef max
+#	define max(a, b) (((a) > (b)) ? (a) : (b))
+#endif
+
 //-----------------------------------------------
 //
 //-----------------------------------------------
@@ -166,7 +170,7 @@ static void print_network(PNetwork pnet)
 //--------------------------------
 //
 //--------------------------------
-static void print_outputs(PNetwork pnet)
+void print_outputs(PNetwork pnet)
 {
 	if (!pnet)
 		return;

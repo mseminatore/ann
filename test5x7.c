@@ -2,6 +2,12 @@
 #include <stdlib.h>
 #include "ann.h"
 
+#ifdef _WIN32
+#	define DIR_FIX "..\\"
+#else
+#	define DIR_FIX
+#endif
+
 //---------------------------------------
 // print the Ci with highest probability
 //---------------------------------------
@@ -42,10 +48,6 @@ void add_noise(real *data, size_t size, int amount)
 	}
 }
 
-#ifdef _WIN32
-#define DIR_FIX "..\\"
-#endif
-
 //------------------------------
 // main program start
 //------------------------------
@@ -79,7 +81,7 @@ int main(int argc, char *argv[])
 
 	for (int i = 0; i < 10; i++)
 	{
-		add_noise(&data[i * 45], 35, 2);
+		add_noise(&data[i * 45], 35, 3);
 
 		real outputs[10];
 		ann_predict(pnet, &data[i * 45], outputs);

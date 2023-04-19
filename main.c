@@ -34,6 +34,7 @@ void print_class_pred(real * data)
 void print28x28(real *data)
 {
 	char c;
+	char *pixels = " `. - ':_,^=;><+!rc*/z?sLTv)J7(|Fi{C}fI31tlu[neoZ5Yxjya]2ESwqkP6h9d4VpOGbUAKXHm8RD#$Bg0MNWQ%&@";
 
 	puts("\nInput image\n");
 
@@ -41,17 +42,19 @@ void print28x28(real *data)
 	{
 		for (int col = 0; col< 28; col++)
 		{
-			real val = data[row * 28 + col];
-			if (val == 0.0)
-				c = ' ';
-			//else if (val < 0.25)
-			//	c = '.';
-			//else if (val < 0.5)
-			//	c = '+';
-			else
-				c = '*';
+			c = (int)(94.0  * data[row * 28 + col]);
 
-			putchar(c);
+			//real val = data[row * 28 + col];
+			//if (val == 0.0)
+			//	c = ' ';
+			////else if (val < 0.25)
+			////	c = '.';
+			////else if (val < 0.5)
+			////	c = '+';
+			//else
+			//	c = 'M';
+
+			putchar(pixels[c]);
 		}
 		puts("");
 	}
@@ -81,12 +84,13 @@ int main(int argc, char *argv[])
 	real *data, *test_data;
 	size_t rows, stride, test_rows, test_stride;
 
-	// load the data
+	// load the training data
 	if (argc > 1)
 		ann_load_csv(argv[1], CSV_HAS_HEADER, &data, &rows, &stride);
 	else
 		ann_load_csv("fashion-mnist_train.csv", CSV_HAS_HEADER, &data, &rows, &stride);
 
+	// load the test data
 	ann_load_csv("fashion-mnist_test.csv", CSV_HAS_HEADER, &test_data, &test_rows, &test_stride);
 
 	// convert outputs to onehot code
@@ -114,14 +118,14 @@ int main(int argc, char *argv[])
 	pnet->epochLimit = 5;
 
 	// train the network
-	ann_train_network(pnet, x_train->values, y_train->values, x_train->rows/20);
+	ann_train_network(pnet, x_train, y_train, x_train->rows);
 	
 	// evaluate the network against the test data
 	real acc = ann_evaluate(pnet, x_test, y_test);
 	printf("Test accuracy: %g%%\n", acc * 100);
 
 	// print_outputs(pnet);
-	print28x28(&x_train->values[784]);
+	print28x28(&x_train->values[0 * 784]);
 
 	// free memory
 	ann_free_network(pnet);

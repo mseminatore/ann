@@ -12,6 +12,22 @@
 
 
 //------------------------------
+// Configurable parameters
+//------------------------------
+#define DEFAULT_LAYERS			4		// we pre-alloc this many layers
+#define DEFAULT_CONVERGENCE 	0.01	// MSE <= 1% is default
+#define DEFAULT_SMALL_BUF_SIZE	1024	// size use for small temp buffers
+#define DEFAULT_BUFFER_SIZE		8192	// size used for large temp buffers
+#define DEFAULT_LEARNING_RATE 	0.05	// base learning rate
+#define DEFAULT_LEARN_ADD		0.01	// adaptive learning rate factors
+#define DEFAULT_LEARN_SUB		0.75
+#define DEFAULT_MSE_AVG			4		// number of prior MSE's to average
+
+//
+#define CSV_HAS_HEADER 1
+#define CSV_NO_HEADER 0
+
+//------------------------------
 // Error values
 //------------------------------
 #define E_FAIL -1
@@ -70,14 +86,19 @@ typedef struct
 	PNode nodes;					// array of nodes
 	Layer_type layer_type;			// type of this layer
 	Activation_type activation;		// type of activation, none, sigmoid, Relu
+
+	// migration to tensor code path
+	PTensor values;
+	PTensor weights;
 } Layer, *PLayer;
 
 // defines an error function
 typedef struct Network Network;
 typedef struct Network *PNetwork;
 
-typedef real (*err_func)(PNetwork pnet, real *outputs);
-typedef void(*output_func)(const char *);
+typedef real (*err_func) (PNetwork pnet, real *outputs);
+typedef void (*output_func) (const char *);
+typedef void (*optimize_func) (PNetwork pnet);
 
 //------------------------------
 // Defines a network
@@ -90,29 +111,15 @@ struct Network
 	int size;					// number of layers allocated
 	int weights_set;			// have the weights been initialized?
 	real convergence_epsilon;	// threshold for convergence
-	real lastMSE[4];			// we average the last 4 MSE values
+	real lastMSE[DEFAULT_MSE_AVG];			// we average the last 4 MSE values
 	unsigned mseCounter;
 	int adaptiveLearning;		// is adaptive learning enabled?
 	unsigned epochLimit;		// convergence epoch limit
 	Loss_type loss_type;		// type of loss function used
 	err_func error_func;		// the error function
 	output_func print_func;
+	optimize_func opt_func;
 };
-
-//------------------------------
-// Configurable parameters
-//------------------------------
-#define DEFAULT_LAYERS			4		// we pre-alloc this many layers
-#define DEFAULT_CONVERGENCE 	0.01	// MSE <= 1% is default
-#define DEFAULT_SMALL_BUF_SIZE	1024
-#define DEFAULT_BUFFER_SIZE		8192	// size used for temp buffers
-#define DEFAULT_LEARNING_RATE 	0.05	// base learning rate
-#define DEFAULT_LEARN_ADD		0.1		// adaptive learning rate factors
-#define DEFAULT_LEARN_SUB		0.05
-
-//
-#define CSV_HAS_HEADER 1
-#define CSV_NO_HEADER 0
 
 //------------------------------
 // ANN function decls
@@ -127,7 +134,7 @@ PNetwork ann_load_network(const char *filename);
 int ann_save_network(PNetwork pnet, const char *filename);
 
 // training/evaluating
-real ann_train_network(PNetwork pnet, real *inputs, real *outputs, size_t rows);
+real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t rows);
 void ann_set_convergence(PNetwork pnet, real limit);
 int ann_predict(PNetwork pnet, real *inputs, real *outputs);
 int ann_class_prediction(real *outputs, int classes);

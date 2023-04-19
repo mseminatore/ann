@@ -501,12 +501,25 @@ PTensor tensor_onehot(PTensor t, size_t classes)
 	return r;
 }
 
+//
+PTensor tensor_exp(PTensor t)
+{
+	return NULL;
+}
+
+//
+PTensor tensor_argmax(PTensor t)
+{
+	return NULL;
+
+}
+
 //-------------------------------
 // compute the tensor dot product
 //-------------------------------
 FLOAT tensor_dot(PTensor a, PTensor b)
 {
-	FLOAT r;
+	FLOAT r = 0.0;
 
 	return r;
 }

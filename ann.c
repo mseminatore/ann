@@ -488,6 +488,14 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	return E_OK;
 }
 
+//-----------------------------------------------
+//
+//-----------------------------------------------
+static void ann_adapt(PNetwork pnet)
+{
+
+}
+
 //------------------------------
 // make a new network
 //------------------------------
@@ -511,6 +519,7 @@ PNetwork ann_make_network(void)
 	pnet->adaptiveLearning = 1;
 	pnet->error_func	= compute_ms_error;
 	pnet->print_func	= ann_puts;
+	pnet->opt_func		= ann_adapt;
 
 	return pnet;
 }
@@ -518,7 +527,7 @@ PNetwork ann_make_network(void)
 //-----------------------------------------------
 // Train the network for a set of inputs/outputs
 //-----------------------------------------------
-real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
+real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t rows)
 {
 	if (!pnet)
 		return 0.0;
@@ -545,15 +554,15 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 		// iterate over all sets of inputs in this epoch/minibatch
 		ann_printf(pnet, "Epoch %u/%u\n[", ++epoch, pnet->epochLimit);
 		
-		size_t inc = rows / 20;
+		size_t inc = max(1, rows / 20);
 		
 		size_t intput_node_count = (pnet->layers[0].node_count - 1);
 		size_t output_node_count = (pnet->layers[pnet->layer_count - 1].node_count - 1);
 
 		for (size_t i = 0; i < rows; i++)
 		{
-			real *ins = inputs + input_indices[i] * intput_node_count;
-			real *outs = outputs + input_indices[i] * output_node_count;
+			real *ins = inputs->values + input_indices[i] * intput_node_count;
+			real *outs = outputs->values + input_indices[i] * output_node_count;
 
 			mse += train_pass_network(pnet, ins, outs);
 
@@ -570,8 +579,17 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 		// adapt the learning rate if enabled
 		if (pnet->adaptiveLearning)
 		{
+			pnet->learning_rate *= (real)0.95;
+
+			real lastMSE = 0.0;
 			// average the last 4 learning rates
-			real lastMSE = (real)0.25 * (pnet->lastMSE[0] + pnet->lastMSE[1] + pnet->lastMSE[2] + pnet->lastMSE[3]);
+			for (int i = 0; i < DEFAULT_MSE_AVG; i++)
+			{
+				lastMSE += pnet->lastMSE[i];
+			}
+
+			lastMSE /= DEFAULT_MSE_AVG;
+
 			if (lastMSE > 0.0)
 			{
 				if (mse < lastMSE)
@@ -592,7 +610,7 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 				}
 			}
 
-			int index = (pnet->mseCounter++) & 3;
+			int index = (pnet->mseCounter++) & (DEFAULT_MSE_AVG - 1);
 			pnet->lastMSE[index] = mse;
 		}
 

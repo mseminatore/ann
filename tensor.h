@@ -39,7 +39,7 @@ void tensor_set(PTensor t, size_t row, size_t col, FLOAT val);
 PTensor tensor_slice_rows(PTensor t, size_t rows);
 PTensor tensor_slice_cols(PTensor t, size_t cols);
 void tensor_print(PTensor t);
-PTensor tensor_dot(PTensor a, PTensor b);
+FLOAT tensor_dot(PTensor a, PTensor b);
 PTensor tensor_onehot(PTensor t, size_t classes);
 
 #endif

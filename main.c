@@ -37,9 +37,9 @@ void print28x28(real *data)
 
 	puts("\nInput image\n");
 
-	for (int col = 0; col < 28; col++)
+	for (int row = 0; row < 28; row++)
 	{
-		for (int row = 0; row < 28; row++)
+		for (int col = 0; col< 28; col++)
 		{
 			real val = data[row * 28 + col];
 			if (val == 0.0)
@@ -55,38 +55,6 @@ void print28x28(real *data)
 		}
 		puts("");
 	}
-}
-
-//------------------------------
-// evaluate the accuracy 
-//------------------------------
-real ann_evaluate(PNetwork pnet, PTensor inputs, PTensor outputs)
-{
-	size_t correct = 0;
-
-	if (!pnet || !inputs || !outputs)
-	{
-		return -1.0;
-	}
-
-	real *pred = alloca(outputs->cols * sizeof(real));
-	int pred_class, act_class;
-
-	for (size_t i = 0; i < inputs->rows; i++)
-	{
-		ann_predict(pnet, &inputs->values[i * inputs->cols], pred);
-		pred_class = ann_class_prediction(pred, 10);
-		act_class = ann_class_prediction(&outputs->values[i * outputs->cols], 10);
-
-		if (pred_class == act_class)
-			correct++;
-	}
-
-//	printf("Actual class is %s (%g)\n", classes[(int)y_labels->values[50001]], y_labels->values[50001]);
-	//print28x28(&x_test->values[0]);
-	//print_class_pred(outputs);
-
-	return (real)correct / inputs->rows;
 }
 
 //------------------------------
@@ -140,19 +108,20 @@ int main(int argc, char *argv[])
 
 	// define our network
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);
-	ann_add_layer(pnet, 912, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
 	pnet->epochLimit = 5;
 
 	// train the network
-	ann_train_network(pnet, x_train->values, y_train->values, x_train->rows);
+	ann_train_network(pnet, x_train->values, y_train->values, x_train->rows/20);
 	
 	// evaluate the network against the test data
 	real acc = ann_evaluate(pnet, x_test, y_test);
 	printf("Test accuracy: %g%%\n", acc * 100);
 
 	// print_outputs(pnet);
+	print28x28(&x_train->values[784]);
 
 	// free memory
 	ann_free_network(pnet);

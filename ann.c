@@ -4,17 +4,41 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdarg.h>
 #include <assert.h>
 #include "ann.h"
 
 #if defined(_WIN32) && !defined(_WIN64)
-	#define R_MIN -0.1
-	#define R_MAX 0.1
+	#define R_MIN -0.05
+	#define R_MAX 0.05
 
 #else
 	#define R_MIN -1.0
 	#define R_MAX 1.0
 #endif
+
+//-----------------------------------------------
+//
+//-----------------------------------------------
+static void ann_puts(const char *s)
+{
+	fputs(s, stdout);
+}
+
+//-----------------------------------------------
+//
+//-----------------------------------------------
+static void ann_printf(PNetwork pnet, const char *format, ...)
+{
+	char buf[DEFAULT_SMALL_BUF_SIZE];
+	va_list valist;
+
+	va_start(valist, format);
+		vsprintf(buf, format, valist);
+	va_end(valist);
+
+	pnet->print_func(buf);
+}
 
 //------------------------------
 // compute the sigmoid activation
@@ -43,7 +67,7 @@ static real leaky_relu(real x)
 //------------------------------
 // compute the softmax
 //------------------------------
-void softmax(PNetwork pnet)
+static void softmax(PNetwork pnet)
 {
 	real sum = 0.0;
 
@@ -57,7 +81,7 @@ void softmax(PNetwork pnet)
 	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
 	{
 		pnet->layers[output_layer].nodes[node].value = (real)(exp(pnet->layers[output_layer].nodes[node].value) / sum);
-		printf("%3.2g ", pnet->layers[output_layer].nodes[node].value);
+		ann_printf(pnet, "%3.2g ", pnet->layers[output_layer].nodes[node].value);
 	}
 	puts("");
 }
@@ -108,7 +132,7 @@ static void init_weights(PNetwork pnet)
 //------------------------------
 // print the network
 //------------------------------
-void print_network(PNetwork pnet)
+static void print_network(PNetwork pnet)
 {
 	if (!pnet)
 		return;
@@ -117,20 +141,20 @@ void print_network(PNetwork pnet)
 	// print each layer
 	for (int layer = 0; layer < pnet->layer_count; layer++)
 	{
-		// printf("\nLayer %d\n"
+		// ann_printf(pnet, "\nLayer %d\n"
 		// 	"--------\n", layer);
 		putchar('[');
 
 		// print nodes in the layer
 		for (int node = 1; node < pnet->layers[layer].node_count; node++)
 		{
-			printf("(%3.2g, ", pnet->layers[layer].nodes[node].value);
+			ann_printf(pnet, "(%3.2g, ", pnet->layers[layer].nodes[node].value);
 
 			if (layer > 0)
 			{
 				for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 				{
-					printf("%3.2g, ", pnet->layers[layer].nodes[node].weights[prev_node]);
+					ann_printf(pnet, "%3.2g, ", pnet->layers[layer].nodes[node].weights[prev_node]);
 				}
 			}
 		}
@@ -142,7 +166,7 @@ void print_network(PNetwork pnet)
 //--------------------------------
 //
 //--------------------------------
-void print_outputs(PNetwork pnet)
+static void print_outputs(PNetwork pnet)
 {
 	if (!pnet)
 		return;
@@ -154,7 +178,7 @@ void print_outputs(PNetwork pnet)
 	PLayer pLayer = &pnet->layers[0];
 	for (int node = 1; node < pLayer->node_count; node++)
 	{
-		printf("%3.2g, ", pLayer->nodes[node].value);
+		ann_printf(pnet, "%3.2g, ", pLayer->nodes[node].value);
 	}
 
 	puts("]");
@@ -165,7 +189,7 @@ void print_outputs(PNetwork pnet)
 	pLayer = &pnet->layers[pnet->layer_count - 1];
 	for (int node = 1; node < pLayer->node_count; node++)
 	{
-		printf("%3.2g, ", pLayer->nodes[node].value);
+		ann_printf(pnet, "%3.2g, ", pLayer->nodes[node].value);
 	}
 
 	puts("]");
@@ -291,32 +315,32 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	eval_network(pnet);
 
 	// compute the Mean Squared Error
-	real err = pnet->loss_type == LOSS_MSE ? compute_ms_error(pnet, outputs) : compute_cross_entropy(pnet, outputs);
+	real err = pnet->error_func(pnet, outputs);
 
-	//
+	//--------------------------------------------------------
 	// back propagate and adjust weights
 	//
-
-	//
 	// compute the dw across the net, THEN update the weights
-	//
+	//--------------------------------------------------------
 
 	// for each node in the output layer, excluding output layer bias node
 	real *expected_values	= outputs;
 	int output_layer		= pnet->layer_count - 1;
+	real x, z, result, y, err_term;
+	real delta_w;
 
 	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
 	{
-		real delta_w = (real)0.0;
+		delta_w = (real)0.0;
 
 		// for each incoming input for this node, calculate the change in weight for that node
 		for (int prev_node = 0; prev_node < pnet->layers[output_layer - 1].node_count; prev_node++)
 		{
-			real z = pnet->layers[output_layer - 1].nodes[prev_node].value;
-			real result = *expected_values;
-			real y = pnet->layers[output_layer].nodes[node].value;
+			z = pnet->layers[output_layer - 1].nodes[prev_node].value;
+			result = *expected_values;
+			y = pnet->layers[output_layer].nodes[node].value;
 
-			real err_term = (result - y);
+			err_term = (result - y);
 			delta_w = pnet->learning_rate * err_term * z;
 
 			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
@@ -333,7 +357,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 		// for each node of this layer
 		for (int node = 1; node < pnet->layers[layer].node_count; node++)
 		{
-			real delta_w = (real)0.0;
+			delta_w = (real)0.0;
 
 			// for each incoming input to this node, calculate the weight change
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
@@ -346,8 +370,8 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 					err_sum += pnet->layers[layer + 1].nodes[next_node].err;
 				}
 
-				real x = pnet->layers[layer - 1].nodes[prev_node].value;
-				real z = pnet->layers[layer].nodes[node].value;
+				x = pnet->layers[layer - 1].nodes[prev_node].value;
+				z = pnet->layers[layer].nodes[node].value;
 
 				delta_w = pnet->learning_rate * err_sum * z * ((real)1.0 - z) * x;
 
@@ -376,7 +400,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 		}
 	}
 
-//	printf("Err: %5.2g\n", err);
+//	ann_printf(pnet, "Err: %5.2g\n", err);
 	// print_network(pnet);
 
 	return err;
@@ -481,6 +505,8 @@ PNetwork ann_make_network(void)
 	pnet->epochLimit	= 10000;
 	pnet->loss_type		= LOSS_MSE;
 	pnet->adaptiveLearning = 1;
+	pnet->error_func	= compute_ms_error;
+	pnet->print_func	= ann_puts;
 
 	return pnet;
 }
@@ -499,7 +525,8 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 	int converged = 0;
 	real mse = 0.0;
 	unsigned epoch = 0;
-	
+	unsigned correct = 0;
+
 	// shuffle the inputs and outputs
 	size_t *input_indices = alloca(rows * sizeof(size_t));
 	for (size_t i = 0; i < rows; i++)
@@ -512,12 +539,17 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 		shuffle_indices(input_indices, rows);
 		
 		// iterate over all sets of inputs in this epoch/minibatch
-		printf("Epoch %u/%u\n[", ++epoch, pnet->epochLimit);
-		int inc = rows / 20;
+		ann_printf(pnet, "Epoch %u/%u\n[", ++epoch, pnet->epochLimit);
+		
+		size_t inc = rows / 20;
+		
+		size_t intput_node_count = (pnet->layers[0].node_count - 1);
+		size_t output_node_count = (pnet->layers[pnet->layer_count - 1].node_count - 1);
+
 		for (size_t i = 0; i < rows; i++)
 		{
-			real *ins = inputs + input_indices[i] * (pnet->layers[0].node_count - 1);
-			real *outs = outputs + input_indices[i] * (pnet->layers[pnet->layer_count - 1].node_count - 1);
+			real *ins = inputs + input_indices[i] * intput_node_count;
+			real *outs = outputs + input_indices[i] * output_node_count;
 
 			mse += train_pass_network(pnet, ins, outs);
 
@@ -529,7 +561,7 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 		if (mse < pnet->convergence_epsilon)
 			converged = 1;
 
-		printf("], Err=%3.2g, LR=%3.2g\n", mse, pnet->learning_rate);
+		ann_printf(pnet, "], loss=%3.2g, LR=%3.2g\n", mse, pnet->learning_rate);
 
 		// adapt the learning rate if enabled
 		if (pnet->adaptiveLearning)
@@ -574,8 +606,41 @@ real ann_train_network(PNetwork pnet, real *inputs, real * outputs, size_t rows)
 }
 
 //------------------------------
-//
+// evaluate the accuracy 
 //------------------------------
+real ann_evaluate(PNetwork pnet, PTensor inputs, PTensor outputs)
+{
+	size_t correct = 0;
+
+	if (!pnet || !inputs || !outputs)
+	{
+		return -1.0;
+	}
+
+	int classes = outputs->cols;
+	real *pred = alloca(classes * sizeof(real));
+	int pred_class, act_class;
+
+	for (size_t i = 0; i < inputs->rows; i++)
+	{
+		ann_predict(pnet, &inputs->values[i * inputs->cols], pred);
+		pred_class = ann_class_prediction(pred, classes);
+		act_class = ann_class_prediction(&outputs->values[i * outputs->cols], classes);
+
+		if (pred_class == act_class)
+			correct++;
+	}
+
+	//	printf("Actual class is %s (%g)\n", classes[(int)y_labels->values[50001]], y_labels->values[50001]);
+	//print28x28(&x_test->values[0]);
+	//print_class_pred(outputs);
+
+	return (real)correct / inputs->rows;
+}
+
+//------------------------------------
+// predict a class from onehot vector
+//------------------------------------
 int ann_class_prediction(real *outputs, int classes)
 {
 	int class = -1;
@@ -591,14 +656,6 @@ int ann_class_prediction(real *outputs, int classes)
 	}
 
 	return class;
-}
-
-//------------------------------
-//
-//------------------------------
-real ann_test_network(PNetwork pnet, real *inputs, real *outputs)
-{
-	return 0.0;
 }
 
 //------------------------------
@@ -621,6 +678,29 @@ void ann_set_convergence(PNetwork pnet, real limit)
 		return;
 
 	pnet->convergence_epsilon = limit;
+}
+
+//------------------------------
+//
+//------------------------------
+void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
+{
+	if (!pnet)
+		return;
+
+	switch (loss_type)
+	{
+	case LOSS_CROSS_ENTROPY:
+		pnet->error_func = compute_cross_entropy;
+		break;
+
+	default:
+	case LOSS_MSE:
+		pnet->error_func = compute_ms_error;
+		break;
+	}
+
+	pnet->loss_type = loss_type;
 }
 
 //------------------------------

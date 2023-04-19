@@ -353,6 +353,13 @@ PTensor tensor_mul(PTensor a, PTensor b)
 	int i = 0;
 
 #ifdef TENSOR_AVX
+	for (; i + 8 < limit; i += 8)
+	{
+		__m256 a256 = _mm256_load_ps(&a->values[i]);
+		__m256 b256 = _mm256_load_ps(&b->values[i]);
+		__m256 c256 = _mm256_mul_ps(a256, b256);
+		_mm256_store_ps(&a->values[i], c256);
+	}
 #endif
 
 #ifdef TENSOR_SSE
@@ -497,11 +504,11 @@ PTensor tensor_onehot(PTensor t, size_t classes)
 //-------------------------------
 // compute the tensor dot product
 //-------------------------------
-PTensor tensor_dot(PTensor a, PTensor b)
+FLOAT tensor_dot(PTensor a, PTensor b)
 {
-	PTensor t = NULL;
+	FLOAT r;
 
-	return t;
+	return r;
 }
 
 //------------------------------

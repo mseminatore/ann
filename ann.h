@@ -72,10 +72,17 @@ typedef struct
 	Activation_type activation;		// type of activation, none, sigmoid, Relu
 } Layer, *PLayer;
 
+// defines an error function
+typedef struct Network Network;
+typedef struct Network *PNetwork;
+
+typedef real (*err_func)(PNetwork pnet, real *outputs);
+typedef void(*output_func)(const char *);
+
 //------------------------------
 // Defines a network
 //------------------------------
-typedef struct
+struct Network
 {
 	int layer_count;			// number of layers in network
 	PLayer layers;				// array of layers
@@ -88,15 +95,18 @@ typedef struct
 	int adaptiveLearning;		// is adaptive learning enabled?
 	unsigned epochLimit;		// convergence epoch limit
 	Loss_type loss_type;		// type of loss function used
-} Network, *PNetwork;
+	err_func error_func;		// the error function
+	output_func print_func;
+};
 
 //------------------------------
 // Configurable parameters
 //------------------------------
 #define DEFAULT_LAYERS			4		// we pre-alloc this many layers
 #define DEFAULT_CONVERGENCE 	0.01	// MSE <= 1% is default
+#define DEFAULT_SMALL_BUF_SIZE	1024
 #define DEFAULT_BUFFER_SIZE		8192	// size used for temp buffers
-#define DEFAULT_LEARNING_RATE 	0.15	// base learning rate
+#define DEFAULT_LEARNING_RATE 	0.05	// base learning rate
 #define DEFAULT_LEARN_ADD		0.1		// adaptive learning rate factors
 #define DEFAULT_LEARN_SUB		0.05
 
@@ -107,18 +117,25 @@ typedef struct
 //------------------------------
 // ANN function decls
 //------------------------------
+
+// building/freeing network model
 int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type);
 PNetwork ann_make_network(void);
-void ann_set_learning_rate(PNetwork pnet, real rate);
 void ann_free_network(PNetwork pnet);
-real ann_train_network(PNetwork pnet, real *inputs, real *outputs, size_t rows);
-real ann_test_network(PNetwork pnet, real *inputs, real *outputs);
-void ann_set_convergence(PNetwork pnet, real limit);
 int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows, size_t *stride);
 PNetwork ann_load_network(const char *filename);
 int ann_save_network(PNetwork pnet, const char *filename);
+
+// training/evaluating
+real ann_train_network(PNetwork pnet, real *inputs, real *outputs, size_t rows);
+void ann_set_convergence(PNetwork pnet, real limit);
 int ann_predict(PNetwork pnet, real *inputs, real *outputs);
 int ann_class_prediction(real *outputs, int classes);
+real ann_evaluate(PNetwork pnet, PTensor inputs, PTensor outputs);
+
+// get/set network properties
+void ann_set_learning_rate(PNetwork pnet, real rate);
+void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
 
 // debugging functions
 void print_network(PNetwork pnet);

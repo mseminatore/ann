@@ -43,17 +43,6 @@ void print28x28(real *data)
 		for (int col = 0; col< 28; col++)
 		{
 			c = (int)(94.0  * data[row * 28 + col]);
-
-			//real val = data[row * 28 + col];
-			//if (val == 0.0)
-			//	c = ' ';
-			////else if (val < 0.25)
-			////	c = '.';
-			////else if (val < 0.5)
-			////	c = '+';
-			//else
-			//	c = 'M';
-
 			putchar(pixels[c]);
 		}
 		puts("");

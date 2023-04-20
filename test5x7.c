@@ -81,7 +81,7 @@ int main(int argc, char *argv[])
 
 	for (int i = 0; i < 10; i++)
 	{
-		add_noise(&data[i * 45], 35, 3);
+		add_noise(&data[i * 45], 35, 2);
 
 		real outputs[10];
 		ann_predict(pnet, &data[i * 45], outputs);
@@ -94,6 +94,7 @@ int main(int argc, char *argv[])
 		if (pred_class == class)
 			correct++;
 
+//		softmax(pnet);
 		printf("Actual class: %d\n", class + 1);
 	}
 

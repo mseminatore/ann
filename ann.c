@@ -71,7 +71,7 @@ static real leaky_relu(real x)
 //------------------------------
 // compute the softmax
 //------------------------------
-static void softmax(PNetwork pnet)
+void softmax(PNetwork pnet)
 {
 	real sum = 0.0;
 

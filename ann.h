@@ -80,11 +80,12 @@ typedef enum {
 
 //
 typedef enum {
-	OPT_NONE,
-	OPT_DECAY,
+	OPT_SGD,
+	OPT_SGD_WITH_DECAY,
 	OPT_ADAPT,
 	OPT_MOMENTUM,
-	OPT_ADAM
+	OPT_ADAM,
+	OPT_DEFAULT = OPT_SGD
 } Optimizer_type;
 
 //------------------------------

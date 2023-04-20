@@ -517,7 +517,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 }
 
 //-----------------------------------------------
-// simple static learning rate
+// Stochastic Gradient Descent (SGD)
 //-----------------------------------------------
 static void ann_lr_none(PNetwork pnet, real loss)
 {
@@ -525,7 +525,7 @@ static void ann_lr_none(PNetwork pnet, real loss)
 }
 
 //-----------------------------------------------
-// simple decaying learning rate
+// SG with decaying learning rate
 //-----------------------------------------------
 static void ann_lr_decay(PNetwork pnet, real loss)
 {
@@ -574,7 +574,7 @@ static void ann_lr_adapt(PNetwork pnet, real loss)
 }
 
 //-----------------------------------------------
-//
+// Gradient descent with momentum
 //-----------------------------------------------
 static void ann_lr_momentum(PNetwork pnet, real loss)
 {
@@ -582,7 +582,7 @@ static void ann_lr_momentum(PNetwork pnet, real loss)
 }
 
 //-----------------------------------------------
-//
+// Adaptive moment estimation
 //-----------------------------------------------
 static void ann_lr_adam(PNetwork pnet, real loss)
 {
@@ -628,7 +628,7 @@ PNetwork ann_make_network(Optimizer_type opt)
 		pnet->opt_func = ann_lr_adapt;
 		break;
 
-	case OPT_DECAY:
+	case OPT_SGD_WITH_DECAY:
 		pnet->opt_func = ann_lr_decay;
 		break;
 
@@ -637,7 +637,7 @@ PNetwork ann_make_network(Optimizer_type opt)
 		break;
 
 	default:
-	case OPT_NONE:
+	case OPT_SGD:
 		pnet->opt_func = ann_lr_none;
 	}
 
@@ -972,7 +972,7 @@ int ann_save_network(PNetwork pnet, const char *filename)
 //------------------------------
 PNetwork ann_load_network(const char *filename)
 {
-	PNetwork pnet = ann_make_network(OPT_NONE);
+	PNetwork pnet = ann_make_network(OPT_SGD);
 
 	FILE *fptr = fopen(filename, "wt");
 	if (!fptr)

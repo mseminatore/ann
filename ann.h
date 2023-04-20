@@ -19,6 +19,7 @@
 #define DEFAULT_SMALL_BUF_SIZE	1024	// size use for small temp buffers
 #define DEFAULT_BUFFER_SIZE		8192	// size used for large temp buffers
 #define DEFAULT_LEARNING_RATE 	0.05	// base learning rate
+#define DEFAULT_LEARNING_DECAY	0.95	// decay rate for learning rate
 #define DEFAULT_LEARN_ADD		0.01	// adaptive learning rate factors
 #define DEFAULT_LEARN_SUB		0.75
 #define DEFAULT_MSE_AVG			4		// number of prior MSE's to average
@@ -77,6 +78,15 @@ typedef enum {
 	LOSS_CROSS_ENTROPY
 } Loss_type;
 
+//
+typedef enum {
+	OPT_NONE,
+	OPT_DECAY,
+	OPT_ADAPT,
+	OPT_MOMENTUM,
+	OPT_ADAM
+} Optimizer_type;
+
 //------------------------------
 // Defines a layer in a network
 //------------------------------
@@ -98,7 +108,7 @@ typedef struct Network *PNetwork;
 
 typedef real (*err_func) (PNetwork pnet, real *outputs);
 typedef void (*output_func) (const char *);
-typedef void (*optimize_func) (PNetwork pnet);
+typedef void (*optimize_func) (PNetwork pnet, real loss);
 
 //------------------------------
 // Defines a network
@@ -113,12 +123,12 @@ struct Network
 	real convergence_epsilon;	// threshold for convergence
 	real lastMSE[DEFAULT_MSE_AVG];			// we average the last 4 MSE values
 	unsigned mseCounter;
-	int adaptiveLearning;		// is adaptive learning enabled?
+	// int adaptiveLearning;		// is adaptive learning enabled?
 	unsigned epochLimit;		// convergence epoch limit
 	Loss_type loss_type;		// type of loss function used
 	err_func error_func;		// the error function
-	output_func print_func;
-	optimize_func opt_func;
+	output_func print_func;		// print output function
+	optimize_func opt_func;		// learning rate/weight optimizer
 };
 
 //------------------------------
@@ -127,7 +137,7 @@ struct Network
 
 // building/freeing network model
 int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type);
-PNetwork ann_make_network(void);
+PNetwork ann_make_network(Optimizer_type opt);
 void ann_free_network(PNetwork pnet);
 int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows, size_t *stride);
 PNetwork ann_load_network(const char *filename);

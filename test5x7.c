@@ -53,7 +53,7 @@ void add_noise(real *data, size_t size, int amount)
 //------------------------------
 int main(int argc, char *argv[])
 {
-	PNetwork pnet = ann_make_network();
+	PNetwork pnet = ann_make_network(OPT_NONE);
 
 	real *data;
 	size_t rows, stride;
@@ -67,7 +67,6 @@ int main(int argc, char *argv[])
 	PTensor x_train = tensor_create_from_array(rows, stride, data);
 	PTensor y_train = tensor_slice_cols(x_train, 35);
 	
-	pnet->adaptiveLearning = 0;
 	pnet->learning_rate = 0.35;
 
 	// define our network
@@ -81,7 +80,7 @@ int main(int argc, char *argv[])
 
 	for (int i = 0; i < 10; i++)
 	{
-		add_noise(&data[i * 45], 35, 2);
+		add_noise(&data[i * 45], 35, 3);
 
 		real outputs[10];
 		ann_predict(pnet, &data[i * 45], outputs);

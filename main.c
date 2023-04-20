@@ -68,7 +68,7 @@ int main(int argc, char *argv[])
 		"Ankle boot"
 	};
 
-	PNetwork pnet = ann_make_network();
+	PNetwork pnet = ann_make_network(OPT_ADAPT);
 
 	real *data, *test_data;
 	size_t rows, stride, test_rows, test_stride;
@@ -107,7 +107,7 @@ int main(int argc, char *argv[])
 	pnet->epochLimit = 5;
 
 	// train the network
-	ann_train_network(pnet, x_train, y_train, x_train->rows);
+	ann_train_network(pnet, x_train, y_train, x_train->rows / 20);
 	
 	// evaluate the network against the test data
 	real acc = ann_evaluate(pnet, x_test, y_test);

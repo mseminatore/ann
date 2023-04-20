@@ -244,6 +244,23 @@ static real compute_cross_entropy(PNetwork pnet, real *outputs)
 	return -xe;
 }
 
+#include <time.h>
+
+// call this function to start a nanosecond-resolution timer
+struct timespec timer_start(){
+    struct timespec start_time;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start_time);
+    return start_time;
+}
+
+// call this function to end a timer, returning nanoseconds elapsed as a long
+long timer_end(struct timespec start_time){
+    struct timespec end_time;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end_time);
+    long diffInNanos = (end_time.tv_sec - start_time.tv_sec) * (long)1e9 + (end_time.tv_nsec - start_time.tv_nsec);
+    return diffInNanos;
+}
+
 //------------------------------
 // forward evaluate the network
 //------------------------------
@@ -251,6 +268,8 @@ static void eval_network(PNetwork pnet)
 {
 	if (!pnet)
 		return;
+
+// struct timespec vartime = timer_start();
 
 	// loop over the non-input layers
 	for (int layer = 1; layer < pnet->layer_count; layer++)
@@ -298,6 +317,11 @@ static void eval_network(PNetwork pnet)
 	// apply softmax on output if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
+
+// long time_elapsed_nanos = timer_end(vartime);
+// printf("Network eval, Time taken (nanoseconds): %ld\n", time_elapsed_nanos);
+
+//while(1);
 }
 
 //------------------------------
@@ -493,9 +517,74 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 }
 
 //-----------------------------------------------
+// simple static learning rate
+//-----------------------------------------------
+static void ann_lr_none(PNetwork pnet, real loss)
+{
+	// do nothing!!
+}
+
+//-----------------------------------------------
+// simple decaying learning rate
+//-----------------------------------------------
+static void ann_lr_decay(PNetwork pnet, real loss)
+{
+	pnet->learning_rate *= DEFAULT_LEARNING_DECAY;
+}
+
+//-----------------------------------------------
+// adaptive learning rate
+//-----------------------------------------------
+static void ann_lr_adapt(PNetwork pnet, real loss)
+{
+	// adapt the learning rate
+	ann_lr_decay(pnet, loss);
+
+	real lastMSE = 0.0;
+	// average the last 4 learning rates
+	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
+	{
+		lastMSE += pnet->lastMSE[i];
+	}
+
+	lastMSE /= DEFAULT_MSE_AVG;
+
+	if (lastMSE > 0.0)
+	{
+		if (loss < lastMSE)
+		{
+			pnet->learning_rate += (real)DEFAULT_LEARN_ADD;
+
+			// don't let learning rate go above 1
+			if (pnet->learning_rate > 1.0)
+				pnet->learning_rate = 1.0;
+		}
+		else
+		{
+			pnet->learning_rate -= (real)DEFAULT_LEARN_SUB * pnet->learning_rate;
+
+			// don't let rate go below zero
+			if (pnet->learning_rate <= 0.0)
+				assert(0);
+		}
+	}
+
+	int index = (pnet->mseCounter++) & (DEFAULT_MSE_AVG - 1);
+	pnet->lastMSE[index] = loss;
+}
+
+//-----------------------------------------------
 //
 //-----------------------------------------------
-static void ann_adapt(PNetwork pnet)
+static void ann_lr_momentum(PNetwork pnet, real loss)
+{
+
+}
+
+//-----------------------------------------------
+//
+//-----------------------------------------------
+static void ann_lr_adam(PNetwork pnet, real loss)
 {
 
 }
@@ -503,7 +592,7 @@ static void ann_adapt(PNetwork pnet)
 //------------------------------
 // make a new network
 //------------------------------
-PNetwork ann_make_network(void)
+PNetwork ann_make_network(Optimizer_type opt)
 {
 	PNetwork pnet = malloc(sizeof(Network));
 	if (NULL == pnet)
@@ -517,13 +606,40 @@ PNetwork ann_make_network(void)
 	pnet->weights_set	= 0;
 	pnet->convergence_epsilon = (real)DEFAULT_CONVERGENCE;
 	pnet->mseCounter	= 0;
-	pnet->lastMSE[0]	= pnet->lastMSE[1] = pnet->lastMSE[2] = pnet->lastMSE[3] = 0.0;
+
+	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
+	{
+		pnet->lastMSE[i] = (real)0.0;
+	}
+
 	pnet->epochLimit	= 10000;
 	pnet->loss_type		= LOSS_MSE;
-	pnet->adaptiveLearning = 1;
+
 	pnet->error_func	= compute_ms_error;
 	pnet->print_func	= ann_puts;
-	pnet->opt_func		= ann_adapt;
+
+	switch(opt)
+	{
+	case OPT_ADAM:
+		pnet->opt_func = ann_lr_adam;
+		break;
+
+	case OPT_ADAPT:
+		pnet->opt_func = ann_lr_adapt;
+		break;
+
+	case OPT_DECAY:
+		pnet->opt_func = ann_lr_decay;
+		break;
+
+	case OPT_MOMENTUM:
+		pnet->opt_func = ann_lr_momentum;
+		break;
+
+	default:
+	case OPT_NONE:
+		pnet->opt_func = ann_lr_none;
+	}
 
 	return pnet;
 }
@@ -540,7 +656,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	init_weights(pnet);
 
 	int converged = 0;
-	real mse = 0.0;
+	real loss = 0.0;
 	unsigned epoch = 0;
 	unsigned correct = 0;
 
@@ -568,67 +684,32 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 			real *ins = inputs->values + input_indices[i] * intput_node_count;
 			real *outs = outputs->values + input_indices[i] * output_node_count;
 
-			mse += train_pass_network(pnet, ins, outs);
+			loss += train_pass_network(pnet, ins, outs);
 
 			if (i % inc == 0)
 				putchar('=');
 		}
 
-		mse /= (real)rows;
-		if (mse < pnet->convergence_epsilon)
+		loss /= (real)rows;
+		if (loss < pnet->convergence_epsilon)
 			converged = 1;
 
-		ann_printf(pnet, "], loss=%3.2g, LR=%3.2g\n", mse, pnet->learning_rate);
+		ann_printf(pnet, "], loss=%3.2g, LR=%3.2g\n", loss, pnet->learning_rate);
 
-		// adapt the learning rate if enabled
-		if (pnet->adaptiveLearning)
-		{
-			pnet->learning_rate *= (real)0.95;
-
-			real lastMSE = 0.0;
-			// average the last 4 learning rates
-			for (int i = 0; i < DEFAULT_MSE_AVG; i++)
-			{
-				lastMSE += pnet->lastMSE[i];
-			}
-
-			lastMSE /= DEFAULT_MSE_AVG;
-
-			if (lastMSE > 0.0)
-			{
-				if (mse < lastMSE)
-				{
-					pnet->learning_rate += (real)DEFAULT_LEARN_ADD;
-
-					// don't let learning rate go above 1
-					if (pnet->learning_rate > 1.0)
-						pnet->learning_rate = 1.0;
-				}
-				else
-				{
-					pnet->learning_rate -= (real)DEFAULT_LEARN_SUB * pnet->learning_rate;
-
-					// don't let rate go below zero
-					if (pnet->learning_rate <= 0.0)
-						converged = 1;
-				}
-			}
-
-			int index = (pnet->mseCounter++) & (DEFAULT_MSE_AVG - 1);
-			pnet->lastMSE[index] = mse;
-		}
+		// optimize learning
+		pnet->opt_func(pnet, loss);
 
 		// check for no convergence
 		if (epoch >= pnet->epochLimit)
 		{
-			puts("Error: network not converged.\n");
+			// puts("Error: network not converged.\n");
 			converged = 1;
 		}
 	}
 
 	//print_network(pnet);
 
-	return mse;
+	return loss;
 }
 
 //------------------------------
@@ -656,10 +737,6 @@ real ann_evaluate(PNetwork pnet, PTensor inputs, PTensor outputs)
 		if (pred_class == act_class)
 			correct++;
 	}
-
-	//	printf("Actual class is %s (%g)\n", classes[(int)y_labels->values[50001]], y_labels->values[50001]);
-	//print28x28(&x_test->values[0]);
-	//print_class_pred(outputs);
 
 	return (real)correct / inputs->rows;
 }
@@ -836,14 +913,14 @@ int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows
 	}
 
 	*data = dbuf;
-	//(*rows) /= *stride;
+
 	fclose(f);
 	return E_OK;
 }
 
-//------------------------------
-// predict an outcome
-//------------------------------
+//-----------------------------------
+// predict an outcome from trained nn
+//-----------------------------------
 int ann_predict(PNetwork pnet, real *inputs, real *outputs)
 {
 	if (!pnet || !inputs || !outputs)
@@ -895,7 +972,16 @@ int ann_save_network(PNetwork pnet, const char *filename)
 //------------------------------
 PNetwork ann_load_network(const char *filename)
 {
-	PNetwork pnet = ann_make_network();
+	PNetwork pnet = ann_make_network(OPT_NONE);
 
+	FILE *fptr = fopen(filename, "wt");
+	if (!fptr)
+		return NULL;
+
+	// TODO - load network props
+	// TODO - create layers
+	// TODO - set node weights
+
+	fclose(fptr);
 	return pnet;
 }

@@ -1,7 +1,7 @@
 TARGET = ann
 OBJS = ann.o tensor.o
 DEPS = ann.h tensor.h
-CFLAGS = -g -mavx
+CFLAGS = -g -mavx -O3
 
 all: ann logic test5x7
 

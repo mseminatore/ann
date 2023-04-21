@@ -46,8 +46,10 @@ typedef struct
 {
 	real *weights;		// array of node weights
 	real *dw;			// change in weights
+	real *m;			// momentum
+	real *v;			// velocity
 	real value;			// node value
-	real err;			// error term for this node
+	real dl_dz;			// gradient term for this node
 } Node, *PNode;
 
 //------------------------------
@@ -78,7 +80,9 @@ typedef enum {
 	LOSS_CROSS_ENTROPY
 } Loss_type;
 
-//
+//------------------------------
+// SGD optimization kernels
+//------------------------------
 typedef enum {
 	OPT_SGD,
 	OPT_SGD_WITH_DECAY,
@@ -109,32 +113,37 @@ typedef struct
 	PTensor t_dw;
 } Layer, *PLayer;
 
-// defines an error function
+// forward decls
 typedef struct Network Network;
 typedef struct Network *PNetwork;
 
+// function pointers for Network
 typedef real (*Err_func) (PNetwork pnet, real *outputs);
 typedef void (*Output_func) (const char *);
-typedef void (*Optimization_func) (PNetwork pnet, real loss);
+typedef void (*Optimization_func) (PNetwork pnet, real *inputs, real *outputs);
 
 //------------------------------
 // Defines a network
 //------------------------------
 struct Network
 {
-	int layer_count;			// number of layers in network
-	PLayer layers;				// array of layers
-	real learning_rate;			// learning rate of network
-	int layer_size;				// number of layers allocated
-	int weights_set;			// have the weights been initialized?
-	real convergence_epsilon;	// threshold for convergence
-	real lastMSE[DEFAULT_MSE_AVG];			// we average the last 4 MSE values
+	int layer_count;					// number of layers in network
+	PLayer layers;						// array of layers
+
+	real learning_rate;					// learning rate of network
+	int layer_size;						// number of layers allocated
+	int weights_set;					// have the weights been initialized?
+
+	real convergence_epsilon;			// threshold for convergence
+
+	real lastMSE[DEFAULT_MSE_AVG];		// for averaging the last X MSE values
 	unsigned mseCounter;
-	// int adaptiveLearning;		// is adaptive learning enabled?
-	unsigned epochLimit;		// convergence epoch limit
-	Loss_type loss_type;		// type of loss function used
-	Err_func error_func;		// the error function
-	Output_func print_func;		// print output function
+	unsigned epochLimit;				// convergence epoch limit
+	Loss_type loss_type;				// type of loss function used
+	Optimizer_type optimizer;
+
+	Err_func error_func;				// the error function
+	Output_func print_func;				// print output function
 	Optimization_func optimize_func;	// learning rate/weight optimizer
 };
 

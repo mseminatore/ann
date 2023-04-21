@@ -23,6 +23,14 @@
 #	define max(a, b) (((a) > (b)) ? (a) : (b))
 #endif
 
+#ifdef __clang__
+#	define CLANG_VECTORIZE #pragma clang loop vectorize(enable)
+#else
+#	define CLANG_VECTORIZE
+#endif
+
+#define TENSOR_PATH 0
+
 //-----------------------------------------------
 //
 //-----------------------------------------------
@@ -213,7 +221,7 @@ static real compute_ms_error(PNetwork pnet, real *outputs)
 
 	real mse = (real)0.0, diff;
 
-	#pragma clang loop vectorize(enable)
+	CLANG_VECTORIZE
 	for (int i = 1; i < pLayer->node_count; i++)
 	{
 		diff = pLayer->nodes[i].value - outputs[i - 1];
@@ -236,7 +244,7 @@ static real compute_cross_entropy(PNetwork pnet, real *outputs)
 
 	real xe = 0.0;
 
-	#pragma clang loop vectorize(enable)
+	CLANG_VECTORIZE
 	for (int i = 1; i < pLayer->node_count; i++)
 	{
 		xe += (real)(outputs[i - 1] * log(pLayer->nodes[i].value));
@@ -283,7 +291,7 @@ static void eval_network(PNetwork pnet)
 			real sum = 0.0;
 
 			// loop over nodes in previous layer, including the bias node
-			#pragma clang loop vectorize(enable)
+			CLANG_VECTORIZE
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 			{
 				// accumulate sum of prev nodes value times this nodes weight for that value
@@ -327,42 +335,27 @@ static void eval_network(PNetwork pnet)
 //while(1);
 }
 
-//------------------------------
-// train the network over 
-//------------------------------
-static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
+//--------------------------------------------------------
+// Stochastic Gradient Descent (SGD)
+//
+// back propagate and adjust weights
+//--------------------------------------------------------
+static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 {
-	if (!pnet || !inputs || !outputs)
-		return 0.0;
-
-	assert(pnet->layers[0].layer_type == LAYER_INPUT);
-	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
-
-	// set the input values on the network
-	int node_count = pnet->layers[0].node_count;
-	for (int node = 1; node < node_count; node++)
-	{
-		pnet->layers[0].nodes[node].value = *inputs++;
-	}
-
-	// forward evaluate the network
-	eval_network(pnet);
-
-	// compute the Loss function
-	real err = pnet->error_func(pnet, outputs);
-
 	//--------------------------------------------------------
-	// back propagate and adjust weights
-	//
-	// compute the dw across the net, THEN update the weights
+	// compute the delta_w across the net, 
+	// THEN update the weights
 	//--------------------------------------------------------
 
 	// for each node in the output layer, excluding output layer bias node
-	real *expected_values	= outputs;
-	int output_layer		= pnet->layer_count - 1;
-	real x, z, result, y, err_term;
-	real delta_w;
+	real *expected_values = outputs;
+	int output_layer = pnet->layer_count - 1;
+	real x, z, r, y, dl_dy, dl_dz;
+	real delta_w, gradient;
 
+	//-------------------------------
+	// output layer back-propagation
+	//-------------------------------
 	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
 	{
 		delta_w = (real)0.0;
@@ -371,21 +364,25 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 		for (int prev_node = 0; prev_node < pnet->layers[output_layer - 1].node_count; prev_node++)
 		{
 			z = pnet->layers[output_layer - 1].nodes[prev_node].value;
-			result = *expected_values;
+			r = *expected_values;
 			y = pnet->layers[output_layer].nodes[node].value;
 
-			err_term = (result - y);
-			delta_w = pnet->learning_rate * err_term * z;
+			dl_dy = (r - y);
+			gradient = dl_dy * z;
+			delta_w = pnet->learning_rate * gradient;
 
 			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
-			pnet->layers[output_layer].nodes[node].err = err_term * pnet->layers[output_layer].nodes[node].weights[prev_node];
+			pnet->layers[output_layer].nodes[node].dl_dz = dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
 		}
 
 		// get next expected output value
 		expected_values++;
 	}
-
-	// process all hidden layers, excluding the input layer
+	
+	//-------------------------------
+	// hidden layer back-propagation
+	// excluding the input layer
+	//-------------------------------
 	for (int layer = output_layer - 1; layer > 0; layer--)
 	{
 		// for each node of this layer
@@ -396,23 +393,22 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 			// for each incoming input to this node, calculate the weight change
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 			{
-				real err_sum = (real)0.0;
+				dl_dz = (real)0.0;
 
 				// for each following node
 				for (int next_node = 1; next_node < pnet->layers[layer + 1].node_count; next_node++)
 				{
-					err_sum += pnet->layers[layer + 1].nodes[next_node].err;
+					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
 				}
 
 				x = pnet->layers[layer - 1].nodes[prev_node].value;
 				z = pnet->layers[layer].nodes[node].value;
 
-				delta_w = pnet->learning_rate * err_sum * z * ((real)1.0 - z) * x;
+				gradient = dl_dz * z * ((real)1.0 - z) * x;
+				delta_w = pnet->learning_rate * gradient;
 
 				pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
-
-				// TODO - figure this out for multiple hidden layer case
-//				pnet->layers[layer].nodes[node].err = new_err_term;
+				pnet->layers[layer].nodes[node].dl_dz = dl_dz * z * ((real)1.0 - z) * pnet->layers[layer].nodes[node].weights[prev_node];
 			}
 
 		}
@@ -426,7 +422,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 		for (int node = 1; node < pnet->layers[layer].node_count; node++)
 		{
 			// for each node in previous layer
-			#pragma clang loop vectorize(enable)
+			CLANG_VECTORIZE
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 			{
 				// update the weights by the change
@@ -434,6 +430,39 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 			}
 		}
 	}
+}
+
+//------------------------------
+// train the network over 
+//------------------------------
+static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
+{
+	if (!pnet || !inputs || !outputs)
+		return 0.0;
+
+	assert(pnet->layers[0].layer_type == LAYER_INPUT);
+	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
+
+	// set the input values on the network
+	int node_count = pnet->layers[0].node_count;
+	PLayer player = &pnet->layers[0];
+	for (int node = 1; node < node_count; node++)
+	{
+		player->nodes[node].value = *inputs++;
+	}
+
+#if TENSOR_PATH
+	tensor_set_from_array(player->t_values, 1, node_count, inputs);
+#endif
+
+	// forward evaluate the network
+	eval_network(pnet);
+
+	// compute the Loss function
+	real err = pnet->error_func(pnet, outputs);
+
+	// back propagate error through network and update weights
+	pnet->optimize_func(pnet, inputs, outputs);
 
 	return err;
 }
@@ -452,6 +481,93 @@ static void shuffle_indices(size_t *input_indices, size_t count)
 		input_indices[i] = input_indices[j];
 		input_indices[j] = val;
 	}
+}
+
+//
+static void optimize_none(PNetwork pnet, real *inputs, real *outputs)
+{
+	// do nothing!
+}
+
+//-----------------------------------------------
+// SG with decaying learning rate
+//-----------------------------------------------
+static void optimize_decay(PNetwork pnet, real loss)
+{
+	pnet->learning_rate *= (real)DEFAULT_LEARNING_DECAY;
+}
+
+//-----------------------------------------------
+// adaptive learning rate
+//-----------------------------------------------
+static void optimize_adapt(PNetwork pnet, real loss)
+{
+	// adapt the learning rate
+	optimize_decay(pnet, loss);
+
+	real lastMSE = 0.0;
+	// average the last 4 learning rates
+	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
+	{
+		lastMSE += pnet->lastMSE[i];
+	}
+
+	lastMSE /= DEFAULT_MSE_AVG;
+
+	if (lastMSE > 0.0)
+	{
+		if (loss < lastMSE)
+		{
+			pnet->learning_rate += (real)DEFAULT_LEARN_ADD;
+
+			// don't let learning rate go above 1
+			if (pnet->learning_rate > 1.0)
+				pnet->learning_rate = 1.0;
+		}
+		else
+		{
+			pnet->learning_rate -= (real)DEFAULT_LEARN_SUB * pnet->learning_rate;
+
+			// don't let rate go below zero
+			if (pnet->learning_rate <= 0.0)
+				assert(0);
+		}
+	}
+
+	int index = (pnet->mseCounter++) & (DEFAULT_MSE_AVG - 1);
+	pnet->lastMSE[index] = loss;
+}
+
+//-----------------------------------------------
+// Gradient descent with momentum
+//-----------------------------------------------
+static void optimize_momentum(PNetwork pnet, real *inputs, real *outputs)
+{
+
+}
+
+//-----------------------------------------------
+//
+//-----------------------------------------------
+static void optimize_adagrad(PNetwork pnet, real *inputs, real *outputs)
+{
+
+}
+
+//-----------------------------------------------
+//
+//-----------------------------------------------
+static void optimize_rmsprop(PNetwork pnet, real *inputs, real *outputs)
+{
+
+}
+
+//-----------------------------------------------
+// Adaptive moment estimation
+//-----------------------------------------------
+static void optimize_adam(PNetwork pnet, real *inputs, real *outputs)
+{
+
 }
 
 //[]---------------------------------------------[]
@@ -519,101 +635,20 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		// allocate array of weights for every node in the current layer
 		for (int i = 0; i < node_count; i++)
 		{
-			pnet->layers[cur_layer].nodes[i].weights = malloc(node_weights * sizeof(real));
-			pnet->layers[cur_layer].nodes[i].dw = malloc(node_weights * sizeof(real));
+			pnet->layers[cur_layer].nodes[i].weights	= malloc(node_weights * sizeof(real));
+			pnet->layers[cur_layer].nodes[i].dw			= malloc(node_weights * sizeof(real));
+			pnet->layers[cur_layer].nodes[i].m			= malloc(node_weights * sizeof(real));
+			pnet->layers[cur_layer].nodes[i].v			= malloc(node_weights * sizeof(real));
+
+			for (int j = 0; j < node_weights; j++)
+			{
+				pnet->layers[cur_layer].nodes[i].m[j] = (real)0.0;
+				pnet->layers[cur_layer].nodes[i].v[j] = (real)0.0;
+			}
 		}
 	}
 
 	return E_OK;
-}
-
-//-----------------------------------------------
-// Stochastic Gradient Descent (SGD)
-//-----------------------------------------------
-static void ann_lr_none(PNetwork pnet, real loss)
-{
-	// do nothing!!
-}
-
-//-----------------------------------------------
-// SG with decaying learning rate
-//-----------------------------------------------
-static void ann_lr_decay(PNetwork pnet, real loss)
-{
-	pnet->learning_rate *= (real)DEFAULT_LEARNING_DECAY;
-}
-
-//-----------------------------------------------
-// adaptive learning rate
-//-----------------------------------------------
-static void ann_lr_adapt(PNetwork pnet, real loss)
-{
-	// adapt the learning rate
-	ann_lr_decay(pnet, loss);
-
-	real lastMSE = 0.0;
-	// average the last 4 learning rates
-	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
-	{
-		lastMSE += pnet->lastMSE[i];
-	}
-
-	lastMSE /= DEFAULT_MSE_AVG;
-
-	if (lastMSE > 0.0)
-	{
-		if (loss < lastMSE)
-		{
-			pnet->learning_rate += (real)DEFAULT_LEARN_ADD;
-
-			// don't let learning rate go above 1
-			if (pnet->learning_rate > 1.0)
-				pnet->learning_rate = 1.0;
-		}
-		else
-		{
-			pnet->learning_rate -= (real)DEFAULT_LEARN_SUB * pnet->learning_rate;
-
-			// don't let rate go below zero
-			if (pnet->learning_rate <= 0.0)
-				assert(0);
-		}
-	}
-
-	int index = (pnet->mseCounter++) & (DEFAULT_MSE_AVG - 1);
-	pnet->lastMSE[index] = loss;
-}
-
-//-----------------------------------------------
-// Gradient descent with momentum
-//-----------------------------------------------
-static void ann_lr_momentum(PNetwork pnet, real loss)
-{
-
-}
-
-//-----------------------------------------------
-//
-//-----------------------------------------------
-static void ann_lr_adagrad()
-{
-
-}
-
-//-----------------------------------------------
-//
-//-----------------------------------------------
-static void ann_lr_rmsprop()
-{
-
-}
-
-//-----------------------------------------------
-// Adaptive moment estimation
-//-----------------------------------------------
-static void ann_lr_adam(PNetwork pnet, real loss)
-{
-
 }
 
 //------------------------------
@@ -644,28 +679,29 @@ PNetwork ann_make_network(Optimizer_type opt)
 
 	pnet->error_func	= compute_ms_error;
 	pnet->print_func	= ann_puts;
+	pnet->optimizer		= opt;
 
 	switch(opt)
 	{
 	case OPT_ADAM:
-		pnet->optimize_func = ann_lr_adam;
+		pnet->optimize_func = optimize_adam;
 		break;
 
 	case OPT_ADAPT:
-		pnet->optimize_func = ann_lr_adapt;
+		pnet->optimize_func = optimize_sgd;
 		break;
 
 	case OPT_SGD_WITH_DECAY:
-		pnet->optimize_func = ann_lr_decay;
+		pnet->optimize_func = optimize_sgd;
 		break;
 
 	case OPT_MOMENTUM:
-		pnet->optimize_func = ann_lr_momentum;
+		pnet->optimize_func = optimize_momentum;
 		break;
 
 	default:
 	case OPT_SGD:
-		pnet->optimize_func = ann_lr_none;
+		pnet->optimize_func = optimize_sgd;
 	}
 
 	return pnet;
@@ -724,7 +760,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		ann_printf(pnet, "], loss=%3.2g, LR=%3.2g\n", loss, pnet->learning_rate);
 
 		// optimize learning
-		pnet->optimize_func(pnet, loss);
+		if (pnet->optimizer == OPT_SGD_WITH_DECAY)
+			optimize_decay(pnet, loss);
+		else if (pnet->optimizer == OPT_ADAPT)
+			optimize_adapt(pnet, loss);
 
 		// check for no convergence
 		if (epoch >= pnet->epochLimit)
@@ -842,16 +881,18 @@ void ann_free_network(PNetwork pnet)
 	// free layers
 	for (int layer = 0; layer < pnet->layer_count; layer++)
 	{
+		tensor_free(pnet->layers[layer].t_values);
+		tensor_free(pnet->layers[layer].t_weights);
+
 		// free nodes
 		for (int node = 0; node < pnet->layers[layer].node_count; node++)
 		{
-			tensor_free(pnet->layers[layer].t_values);
-			tensor_free(pnet->layers[layer].t_weights);
-
 			if (pnet->layers[layer].layer_type != LAYER_INPUT)
 			{
 				free(pnet->layers[layer].nodes[node].weights);
 				free(pnet->layers[layer].nodes[node].dw);
+				free(pnet->layers[layer].nodes[node].m);
+				free(pnet->layers[layer].nodes[node].v);
 			}
 		}
 

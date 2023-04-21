@@ -102,6 +102,7 @@ int main(int argc, char *argv[])
 	// define our network
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);
 	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
+	//ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
 	pnet->epochLimit = 5;
@@ -116,7 +117,7 @@ int main(int argc, char *argv[])
 	// print_outputs(pnet);
 	int i = 0;
 //	for (; i < 5; i++)
-		print28x28(&x_train->values[i * 784]);
+//		print28x28(&x_train->values[i * 784]);
 
 	// free memory
 	ann_free_network(pnet);

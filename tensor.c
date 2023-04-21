@@ -79,8 +79,11 @@ PTensor tensor_create(size_t rows, size_t cols)
 
 	t->rows = rows;
 	t->cols = cols;
+
+	// make sure each row of tensor is properly aligned
 	t->stride = (cols + TENSOR_ALIGN - 1) & (SIZE_MAX ^ 0x1f);
 
+	// only rank 2 tensors supported now
 	t->rank = 2;
 
 	t->values = tmalloc(rows * cols * sizeof(FLOAT));
@@ -94,22 +97,44 @@ PTensor tensor_create(size_t rows, size_t cols)
 }
 
 //------------------------------
-//
+// create new tensor from array
 //------------------------------
-PTensor tensor_create_from_array(size_t rows, size_t cols, FLOAT *vals)
+PTensor tensor_create_from_array(size_t rows, size_t cols, FLOAT *array)
 {
 	PTensor t = tensor_create(rows, cols);
 
 	assert(t);
-	if (!t)
+	assert(array);
+	if (!t || !array)
 		return NULL;
+
+	tensor_set_from_array(t, rows, cols, array);
+
+	return t;
+}
+
+//------------------------------
+// set tensor values from array
+//------------------------------
+void tensor_set_from_array(PTensor t, size_t rows, size_t cols, FLOAT *array)
+{
+	assert(t);
+	assert(array);
+	if (!t || !array)
+		return;
+
+	if (t->rows != rows || t->cols != cols)
+	{
+		assert(0 && "tensor: invalid shape");
+		return;
+	}
+
+	// TODO - check values alignment?
 
 	size_t limit = t->rows * t->cols;
 
 	for (size_t i = 0; i < limit; i++)
-		t->values[i] = *vals++;
-
-	return t;
+		t->values[i] = *array++;
 }
 
 //------------------------------
@@ -121,7 +146,7 @@ void tensor_free(PTensor t)
 	if (!t)
 		return;
 
-	t->rows = t->cols = -1;
+	t->rows = t->cols = t->stride = -1;
 	tfree(t->values);
 	free(t);
 }

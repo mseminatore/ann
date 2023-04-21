@@ -435,9 +435,6 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 		}
 	}
 
-//	ann_printf(pnet, "Err: %5.2g\n", err);
-	// print_network(pnet);
-
 	return err;
 }
 

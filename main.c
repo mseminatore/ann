@@ -107,14 +107,16 @@ int main(int argc, char *argv[])
 	pnet->epochLimit = 5;
 
 	// train the network
-	ann_train_network(pnet, x_train, y_train, x_train->rows / 20);
+	ann_train_network(pnet, x_train, y_train, x_train->rows /20);
 	
 	// evaluate the network against the test data
 	real acc = ann_evaluate(pnet, x_test, y_test);
 	printf("Test accuracy: %g%%\n", acc * 100);
 
 	// print_outputs(pnet);
-	print28x28(&x_train->values[0 * 784]);
+	int i = 0;
+//	for (; i < 5; i++)
+		print28x28(&x_train->values[i * 784]);
 
 	// free memory
 	ann_free_network(pnet);

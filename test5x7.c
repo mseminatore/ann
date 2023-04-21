@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
 	PTensor x_train = tensor_create_from_array(rows, stride, data);
 	PTensor y_train = tensor_slice_cols(x_train, 35);
 	
-	pnet->learning_rate = 0.35;
+	pnet->learning_rate = (real)0.35;
 
 	// define our network
 	ann_add_layer(pnet, 35, LAYER_INPUT, ACTIVATION_NULL);

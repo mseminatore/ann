@@ -9,8 +9,10 @@
 #include "ann.h"
 
 #if defined(_WIN32) && !defined(_WIN64)
-	#define R_MIN -0.05
-	#define R_MAX 0.05
+	//#define R_MIN -0.05
+	//#define R_MAX 0.05
+#define R_MIN -1
+#define R_MAX 1
 
 #else
 	#define R_MIN -1.0
@@ -209,7 +211,7 @@ static real compute_ms_error(PNetwork pnet, real *outputs)
 
 	assert(pLayer->layer_type == LAYER_OUTPUT);
 
-	real mse = 0.0, diff;
+	real mse = (real)0.0, diff;
 
 	#pragma clang loop vectorize(enable)
 	for (int i = 1; i < pLayer->node_count; i++)
@@ -218,14 +220,13 @@ static real compute_ms_error(PNetwork pnet, real *outputs)
 		mse += diff * diff;
 	}
 
-	mse *= 0.5;
-
 	return mse;
 }
 
-//------------------------------
+//---------------------------------
 // compute the cross entropy error
-//------------------------------
+// TODO this is buggy
+//---------------------------------
 static real compute_cross_entropy(PNetwork pnet, real *outputs)
 {
 	// get the output layer
@@ -244,6 +245,7 @@ static real compute_cross_entropy(PNetwork pnet, real *outputs)
 	return -xe;
 }
 
+#ifndef _WIN32
 #include <time.h>
 
 // call this function to start a nanosecond-resolution timer
@@ -260,6 +262,7 @@ long timer_end(struct timespec start_time){
     long diffInNanos = (end_time.tv_sec - start_time.tv_sec) * (long)1e9 + (end_time.tv_nsec - start_time.tv_nsec);
     return diffInNanos;
 }
+#endif
 
 //------------------------------
 // forward evaluate the network
@@ -345,7 +348,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// forward evaluate the network
 	eval_network(pnet);
 
-	// compute the Mean Squared Error
+	// compute the Loss function
 	real err = pnet->error_func(pnet, outputs);
 
 	//--------------------------------------------------------
@@ -455,7 +458,7 @@ static void shuffle_indices(size_t *input_indices, size_t count)
 }
 
 //[]---------------------------------------------[]
-// Public ANN library interfaces
+//	Public ANN library interfaces
 //[]---------------------------------------------[]
 
 //------------------------------
@@ -468,11 +471,11 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 
 	// check whether we've run out of layers
 	pnet->layer_count++;
-	if (pnet->layer_count > pnet->size)
+	if (pnet->layer_count > pnet->layer_size)
 	{
 		// need to allocate more layers
-		pnet->size <<= 1;
-		pnet->layers = realloc(pnet->layers, pnet->size * (sizeof(Layer)));
+		pnet->layer_size <<= 1;
+		pnet->layers = realloc(pnet->layers, pnet->layer_size * (sizeof(Layer)));
 		if (NULL == pnet->layers)
 			return E_FAIL;
 	}
@@ -481,10 +484,19 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	pnet->layers[cur_layer].layer_type = layer_type;
 	pnet->layers[cur_layer].activation = activation_type;
 
+	//
 	// allocate the nodes
-	
-	// add extra node for bias node
+	//
+
+	// add an extra for bias node
 	node_count++;
+
+	// create the values tensor
+	PTensor t = tensor_zeros(1, node_count);
+	tensor_set(t, 0, 0, 1.0);
+	pnet->layers[cur_layer].t_values = t;
+
+	// TODO - create the weights tensor
 
 	PNode new_nodes = malloc(node_count * sizeof(Node));
 	if (NULL == new_nodes)
@@ -531,7 +543,7 @@ static void ann_lr_none(PNetwork pnet, real loss)
 //-----------------------------------------------
 static void ann_lr_decay(PNetwork pnet, real loss)
 {
-	pnet->learning_rate *= DEFAULT_LEARNING_DECAY;
+	pnet->learning_rate *= (real)DEFAULT_LEARNING_DECAY;
 }
 
 //-----------------------------------------------
@@ -584,6 +596,22 @@ static void ann_lr_momentum(PNetwork pnet, real loss)
 }
 
 //-----------------------------------------------
+//
+//-----------------------------------------------
+static void ann_lr_adagrad()
+{
+
+}
+
+//-----------------------------------------------
+//
+//-----------------------------------------------
+static void ann_lr_rmsprop()
+{
+
+}
+
+//-----------------------------------------------
 // Adaptive moment estimation
 //-----------------------------------------------
 static void ann_lr_adam(PNetwork pnet, real loss)
@@ -601,8 +629,8 @@ PNetwork ann_make_network(Optimizer_type opt)
 		return NULL;
 
 	// set default values
-	pnet->size			= DEFAULT_LAYERS;
-	pnet->layers		= malloc(pnet->size * (sizeof(Layer)));
+	pnet->layer_size	= DEFAULT_LAYERS;
+	pnet->layers		= malloc(pnet->layer_size * (sizeof(Layer)));
 	pnet->layer_count	= 0;
 	pnet->learning_rate = (real)DEFAULT_LEARNING_RATE;
 	pnet->weights_set	= 0;
@@ -623,24 +651,24 @@ PNetwork ann_make_network(Optimizer_type opt)
 	switch(opt)
 	{
 	case OPT_ADAM:
-		pnet->opt_func = ann_lr_adam;
+		pnet->optimize_func = ann_lr_adam;
 		break;
 
 	case OPT_ADAPT:
-		pnet->opt_func = ann_lr_adapt;
+		pnet->optimize_func = ann_lr_adapt;
 		break;
 
 	case OPT_SGD_WITH_DECAY:
-		pnet->opt_func = ann_lr_decay;
+		pnet->optimize_func = ann_lr_decay;
 		break;
 
 	case OPT_MOMENTUM:
-		pnet->opt_func = ann_lr_momentum;
+		pnet->optimize_func = ann_lr_momentum;
 		break;
 
 	default:
 	case OPT_SGD:
-		pnet->opt_func = ann_lr_none;
+		pnet->optimize_func = ann_lr_none;
 	}
 
 	return pnet;
@@ -699,7 +727,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		ann_printf(pnet, "], loss=%3.2g, LR=%3.2g\n", loss, pnet->learning_rate);
 
 		// optimize learning
-		pnet->opt_func(pnet, loss);
+		pnet->optimize_func(pnet, loss);
 
 		// check for no convergence
 		if (epoch >= pnet->epochLimit)
@@ -708,8 +736,6 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 			converged = 1;
 		}
 	}
-
-	//print_network(pnet);
 
 	return loss;
 }
@@ -822,6 +848,9 @@ void ann_free_network(PNetwork pnet)
 		// free nodes
 		for (int node = 0; node < pnet->layers[layer].node_count; node++)
 		{
+			tensor_free(pnet->layers[layer].t_values);
+			tensor_free(pnet->layers[layer].t_weights);
+
 			if (pnet->layers[layer].layer_type != LAYER_INPUT)
 			{
 				free(pnet->layers[layer].nodes[node].weights);

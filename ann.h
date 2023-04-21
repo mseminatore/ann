@@ -84,6 +84,8 @@ typedef enum {
 	OPT_SGD_WITH_DECAY,
 	OPT_ADAPT,
 	OPT_MOMENTUM,
+	OPT_RMSPROP,
+	OPT_ADAGRAD,
 	OPT_ADAM,
 	OPT_DEFAULT = OPT_SGD
 } Optimizer_type;
@@ -95,21 +97,25 @@ typedef struct
 {
 	int node_count;					// number of nodes in layer
 	PNode nodes;					// array of nodes
+
 	Layer_type layer_type;			// type of this layer
 	Activation_type activation;		// type of activation, none, sigmoid, Relu
 
 	// migration to tensor code path
-	PTensor values;
-	PTensor weights;
+	PTensor t_values;
+	PTensor t_weights;
+	PTensor t_v;
+	PTensor t_m;
+	PTensor t_dw;
 } Layer, *PLayer;
 
 // defines an error function
 typedef struct Network Network;
 typedef struct Network *PNetwork;
 
-typedef real (*err_func) (PNetwork pnet, real *outputs);
-typedef void (*output_func) (const char *);
-typedef void (*optimize_func) (PNetwork pnet, real loss);
+typedef real (*Err_func) (PNetwork pnet, real *outputs);
+typedef void (*Output_func) (const char *);
+typedef void (*Optimization_func) (PNetwork pnet, real loss);
 
 //------------------------------
 // Defines a network
@@ -119,7 +125,7 @@ struct Network
 	int layer_count;			// number of layers in network
 	PLayer layers;				// array of layers
 	real learning_rate;			// learning rate of network
-	int size;					// number of layers allocated
+	int layer_size;				// number of layers allocated
 	int weights_set;			// have the weights been initialized?
 	real convergence_epsilon;	// threshold for convergence
 	real lastMSE[DEFAULT_MSE_AVG];			// we average the last 4 MSE values
@@ -127,9 +133,9 @@ struct Network
 	// int adaptiveLearning;		// is adaptive learning enabled?
 	unsigned epochLimit;		// convergence epoch limit
 	Loss_type loss_type;		// type of loss function used
-	err_func error_func;		// the error function
-	output_func print_func;		// print output function
-	optimize_func opt_func;		// learning rate/weight optimizer
+	Err_func error_func;		// the error function
+	Output_func print_func;		// print output function
+	Optimization_func optimize_func;	// learning rate/weight optimizer
 };
 
 //------------------------------

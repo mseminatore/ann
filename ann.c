@@ -493,8 +493,10 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	pnet->layers[cur_layer].nodes		= new_nodes;
 	pnet->layers[cur_layer].node_count	= node_count;
 	
-	// init the nodes
+	// bias node values are always 1
 	pnet->layers[cur_layer].nodes[0].value = 1.0;
+
+	// init the rest of the nodes
 	for (int i = 1; i < node_count; i++)
 	{
 		pnet->layers[cur_layer].nodes[i].value = 0.0;

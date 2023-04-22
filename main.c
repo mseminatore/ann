@@ -106,6 +106,7 @@ int main(int argc, char *argv[])
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
 	pnet->epochLimit = 5;
+//	pnet->learning_rate = 0.15;
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows /20);

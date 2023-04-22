@@ -654,7 +654,7 @@ static void optimize_adagrad(PNetwork pnet, real *inputs, real *outputs)
 static void optimize_rmsprop(PNetwork pnet, real *inputs, real *outputs)
 {
 	real beta = (real)0.9, one_minus_beta = (real)0.1;
-	real epsilon = 1e-6;
+	real epsilon = (real)1e-6;
 	real v;
 
 	//--------------------------------------------------------
@@ -687,7 +687,7 @@ static void optimize_rmsprop(PNetwork pnet, real *inputs, real *outputs)
 
 			v = beta * pnet->layers[output_layer].nodes[node].v[prev_node] + one_minus_beta * gradient * gradient;
 
-			delta_w = pnet->learning_rate * gradient / sqrt(v + epsilon);
+			delta_w = pnet->learning_rate * gradient / (real)sqrt(v + epsilon);
 
 			pnet->layers[output_layer].nodes[node].v[prev_node] = v;
 			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
@@ -727,7 +727,7 @@ static void optimize_rmsprop(PNetwork pnet, real *inputs, real *outputs)
 
 				v = beta * pnet->layers[layer].nodes[node].v[prev_node] + one_minus_beta * gradient * gradient;
 
-				delta_w = pnet->learning_rate * gradient / sqrt(v + epsilon);
+				delta_w = pnet->learning_rate * gradient / (real) sqrt(v + epsilon);
 
 				pnet->layers[layer].nodes[node].v[prev_node] = v;
 				pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
@@ -746,7 +746,105 @@ static void optimize_rmsprop(PNetwork pnet, real *inputs, real *outputs)
 //-----------------------------------------------
 static void optimize_adam(PNetwork pnet, real *inputs, real *outputs)
 {
+	real beta1 = (real)0.9, one_minus_beta1 = (real)0.1;
+	real beta2 = (real)0.999, one_minus_beta2 = (real)0.001;
+	real epsilon = (real)1e-6;
+	real m, v, mhat, vhat;
 
+	real one_minus_beta1_t = (real)1.0 / ((real)1.0 - pow(beta1, pnet->train_iteration));
+	real one_minus_beta2_t = (real)1.0 / ((real)1.0 - pow(beta2, pnet->train_iteration));
+	pnet->train_iteration++;
+
+	//--------------------------------------------------------
+	// compute the delta_w across the net, 
+	// THEN update the weights
+	//--------------------------------------------------------
+
+	// for each node in the output layer, excluding output layer bias node
+	real *expected_values = outputs;
+	int output_layer = pnet->layer_count - 1;
+	real x, z, r, y, dl_dy, dl_dz;
+	real delta_w, gradient;
+
+	//-------------------------------
+	// output layer back-propagation
+	//-------------------------------
+	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
+	{
+		delta_w = (real)0.0;
+
+		// for each incoming input for this node, calculate the change in weight for that node
+		for (int prev_node = 0; prev_node < pnet->layers[output_layer - 1].node_count; prev_node++)
+		{
+			z = pnet->layers[output_layer - 1].nodes[prev_node].value;
+			r = *expected_values;
+			y = pnet->layers[output_layer].nodes[node].value;
+
+			dl_dy = (r - y);
+			gradient = dl_dy * z;
+
+			m = beta1 * pnet->layers[output_layer].nodes[node].m[prev_node] + one_minus_beta1 * gradient;
+			v = beta2 * pnet->layers[output_layer].nodes[node].v[prev_node] + one_minus_beta2 * gradient * gradient;
+			mhat = m * one_minus_beta1_t;
+			vhat = v * one_minus_beta2_t;
+
+			delta_w = pnet->learning_rate * mhat / (real)sqrt(vhat + epsilon);
+
+			pnet->layers[output_layer].nodes[node].v[prev_node] = v;
+			pnet->layers[output_layer].nodes[node].m[prev_node] = m;
+			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
+			pnet->layers[output_layer].nodes[node].dl_dz = dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
+		}
+
+		// get next expected output value
+		expected_values++;
+	}
+
+	//-------------------------------
+	// hidden layer back-propagation
+	// excluding the input layer
+	//-------------------------------
+	for (int layer = output_layer - 1; layer > 0; layer--)
+	{
+		// for each node of this layer
+		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		{
+			delta_w = (real)0.0;
+
+			// for each incoming input to this node, calculate the weight change
+			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			{
+				dl_dz = (real)0.0;
+
+				// for each following node
+				for (int next_node = 1; next_node < pnet->layers[layer + 1].node_count; next_node++)
+				{
+					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
+				}
+
+				x = pnet->layers[layer - 1].nodes[prev_node].value;
+				z = pnet->layers[layer].nodes[node].value;
+
+				gradient = dl_dz * z * ((real)1.0 - z) * x;
+
+				m = beta1 * pnet->layers[layer].nodes[node].m[prev_node] + one_minus_beta1 * gradient;
+				v = beta2 * pnet->layers[layer].nodes[node].v[prev_node] + one_minus_beta2 * gradient * gradient;
+				mhat = m * one_minus_beta1_t;
+				vhat = v * one_minus_beta2_t;
+
+				delta_w = pnet->learning_rate * mhat / (real)sqrt(vhat + epsilon);
+
+				pnet->layers[layer].nodes[node].v[prev_node] = v;
+				pnet->layers[layer].nodes[node].m[prev_node] = m;
+				pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
+				pnet->layers[layer].nodes[node].dl_dz = dl_dz * z * ((real)1.0 - z) * pnet->layers[layer].nodes[node].weights[prev_node];
+			}
+
+		}
+	}
+
+	// update the weights based on calculated changes
+	update_weights(pnet);
 }
 
 //[]---------------------------------------------[]
@@ -855,6 +953,7 @@ PNetwork ann_make_network(Optimizer_type opt)
 
 	pnet->epochLimit	= 10000;
 	pnet->loss_type		= LOSS_MSE;
+	pnet->train_iteration = 0;
 
 	pnet->error_func	= compute_ms_error;
 	pnet->print_func	= ann_puts;
@@ -864,6 +963,7 @@ PNetwork ann_make_network(Optimizer_type opt)
 	{
 	case OPT_ADAM:
 		pnet->optimize_func = optimize_adam;
+		pnet->learning_rate = (real)0.001;
 		break;
 
 	case OPT_ADAPT:
@@ -880,7 +980,7 @@ PNetwork ann_make_network(Optimizer_type opt)
 
 	case OPT_RMSPROP:
 		pnet->optimize_func = optimize_rmsprop;
-		pnet->learning_rate = 0.001;
+		pnet->learning_rate = (real)0.001;
 		break;
 
 	default:
@@ -898,6 +998,8 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 {
 	if (!pnet)
 		return 0.0;
+
+	pnet->train_iteration = 1;
 
 	// initialize weights to random values if not already initialized
 	init_weights(pnet);
@@ -936,6 +1038,8 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 			if (i % inc == 0)
 				putchar('=');
 		}
+
+//		pnet->train_iteration++;
 
 		loss /= (real)rows;
 		if (loss < pnet->convergence_epsilon)

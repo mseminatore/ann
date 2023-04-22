@@ -141,6 +141,7 @@ struct Network
 	unsigned epochLimit;				// convergence epoch limit
 	Loss_type loss_type;				// type of loss function used
 	Optimizer_type optimizer;
+	unsigned train_iteration;
 
 	Err_func error_func;				// the error function
 	Output_func print_func;				// print output function

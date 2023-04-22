@@ -68,7 +68,7 @@ int main(int argc, char *argv[])
 		"Ankle boot"
 	};
 
-	PNetwork pnet = ann_make_network(OPT_RMSPROP);
+	PNetwork pnet = ann_make_network(OPT_ADAM);
 
 	real *data, *test_data;
 	size_t rows, stride, test_rows, test_stride;

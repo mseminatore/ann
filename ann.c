@@ -24,7 +24,8 @@
 #endif
 
 #ifdef __clang__
-#	define CLANG_VECTORIZE #pragma clang loop vectorize(enable)
+#	define CLANG_VECTORIZE 
+//#pragma clang loop vectorize(enable)
 #else
 #	define CLANG_VECTORIZE
 #endif

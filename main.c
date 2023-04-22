@@ -68,7 +68,7 @@ int main(int argc, char *argv[])
 		"Ankle boot"
 	};
 
-	PNetwork pnet = ann_make_network(OPT_ADAPT);
+	PNetwork pnet = ann_make_network(OPT_RMSPROP);
 
 	real *data, *test_data;
 	size_t rows, stride, test_rows, test_stride;
@@ -102,7 +102,7 @@ int main(int argc, char *argv[])
 	// define our network
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);
 	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
-	//ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
+//	ann_add_layer(pnet, 16, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
 	pnet->epochLimit = 5;

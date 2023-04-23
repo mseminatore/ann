@@ -105,7 +105,7 @@ int main(int argc, char *argv[])
 //	ann_add_layer(pnet, 16, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
-	pnet->epochLimit = 5;
+	pnet->epochLimit = 10;
 //	pnet->learning_rate = 0.15;
 
 	// train the network

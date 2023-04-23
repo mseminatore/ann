@@ -753,7 +753,7 @@ static void optimize_adam(PNetwork pnet, real *inputs, real *outputs)
 
 	real one_minus_beta1_t = (real)1.0 / ((real)1.0 - pow(beta1, pnet->train_iteration));
 	real one_minus_beta2_t = (real)1.0 / ((real)1.0 - pow(beta2, pnet->train_iteration));
-	pnet->train_iteration++;
+//	pnet->train_iteration++;
 
 	//--------------------------------------------------------
 	// compute the delta_w across the net, 
@@ -1036,7 +1036,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 			loss += train_pass_network(pnet, ins, outs);
 
 			if (i % inc == 0)
+			{
 				putchar('=');
+				pnet->train_iteration++;
+			}
 		}
 
 //		pnet->train_iteration++;

@@ -23,6 +23,7 @@
 #define DEFAULT_LEARN_ADD		0.01	// adaptive learning rate factors
 #define DEFAULT_LEARN_SUB		0.75
 #define DEFAULT_MSE_AVG			4		// number of prior MSE's to average
+#define DEFAULT_BATCH_SIZE		32
 
 //
 #define CSV_HAS_HEADER 1
@@ -135,6 +136,7 @@ struct Network
 	real learning_rate;					// learning rate of network
 	int layer_size;						// number of layers allocated
 	int weights_set;					// have the weights been initialized?
+	unsigned batchSize;					// size of mini-batches
 
 	real convergence_epsilon;			// threshold for convergence
 

@@ -160,7 +160,10 @@ static void init_weights(PNetwork pnet)
 			for (int weight = 0; weight < weight_count; weight++)
 			{
 				// initialize weights to random values
-				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)R_MIN, (real)R_MAX);
+//				if (node != 0)
+					pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)R_MIN, (real)R_MAX);
+//				else
+//					pnet->layers[layer].nodes[node].weights[weight] = 0;
 			}
 		}
 	}
@@ -991,6 +994,7 @@ PNetwork ann_make_network(Optimizer_type opt)
 	pnet->epochLimit	= 10000;
 	pnet->loss_type		= LOSS_MSE;
 	pnet->train_iteration = 0;
+	pnet->batchSize		= DEFAULT_BATCH_SIZE;
 
 	pnet->error_func	= compute_ms_error;
 	pnet->print_func	= ann_puts;
@@ -1053,8 +1057,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		input_indices[i] = i;
 	}
 
+	// train over epochs until done
 	while (!converged)
 	{
+		// reshuffle the indices
 		shuffle_indices(input_indices, rows);
 		
 		// iterate over all sets of inputs in this epoch/minibatch
@@ -1064,6 +1070,9 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		
 		size_t intput_node_count = (pnet->layers[0].node_count - 1);
 		size_t output_node_count = (pnet->layers[pnet->layer_count - 1].node_count - 1);
+
+		// TODO - split into mini-batches
+		// TODO - submit mini-batches
 
 		for (size_t i = 0; i < rows; i++)
 		{

@@ -68,7 +68,7 @@ int main(int argc, char *argv[])
 		"Ankle boot"
 	};
 
-	PNetwork pnet = ann_make_network(OPT_ADAM);
+	PNetwork pnet = ann_make_network(OPT_ADAPT);
 
 	real *data, *test_data;
 	size_t rows, stride, test_rows, test_stride;
@@ -105,8 +105,9 @@ int main(int argc, char *argv[])
 //	ann_add_layer(pnet, 16, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
-	pnet->epochLimit = 10;
+	pnet->epochLimit = 5;
 //	pnet->learning_rate = 0.15;
+//	ann_set_loss_function(pnet, LOSS_CROSS_ENTROPY);
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows /20);
@@ -115,6 +116,7 @@ int main(int argc, char *argv[])
 	real acc = ann_evaluate(pnet, x_test, y_test);
 	printf("Test accuracy: %g%%\n", acc * 100);
 
+//	softmax(pnet);
 	// print_outputs(pnet);
 	int i = 0;
 //	for (; i < 5; i++)

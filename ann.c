@@ -41,7 +41,7 @@ static void ann_puts(const char *s)
 }
 
 //-----------------------------------------------
-//
+// output
 //-----------------------------------------------
 static void ann_printf(PNetwork pnet, const char *format, ...)
 {
@@ -80,6 +80,23 @@ static real leaky_relu(real x)
 }
 
 //------------------------------
+// compute the tanh activation
+//------------------------------
+static real ann_tanh(real x)
+{
+	return (real)tanh(x);
+}
+
+
+//------------------------------
+// compute the tanh activation
+//------------------------------
+static real softsign(real x)
+{
+	return (real)x / (1.0 + fabs(x));
+}
+
+//------------------------------
 // compute the softmax
 //------------------------------
 void softmax(PNetwork pnet)
@@ -88,17 +105,24 @@ void softmax(PNetwork pnet)
 
 	// find the sum of the output node values, excluding the bias noad
 	int output_layer = pnet->layer_count - 1;
-	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
+	int node_count = pnet->layers[output_layer].node_count;
+	PNode pNode = pnet->layers[output_layer].nodes;
+
+//	putchar('[');
+	for (int node = 1; node < node_count; node++)
 	{
-		sum += (real)exp(pnet->layers[output_layer].nodes[node].value);
+		sum += (real)exp(pNode[node].value);
+//		ann_printf(pnet, "%3.2g ", pNode[node].value);
 	}
 
-	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
+//	puts("");
+//	putchar('[');
+	for (int node = 1; node < node_count; node++)
 	{
-		pnet->layers[output_layer].nodes[node].value = (real)(exp(pnet->layers[output_layer].nodes[node].value) / sum);
-		ann_printf(pnet, "%3.2g ", pnet->layers[output_layer].nodes[node].value);
+		pNode[node].value = (real)(exp(pNode[node].value) / sum);
+//		ann_printf(pnet, "%3.2g ", pNode[node].value);
 	}
-	puts("");
+//	puts("]");
 }
 
 //------------------------------
@@ -225,15 +249,16 @@ static real compute_ms_error(PNetwork pnet, real *outputs)
 	CLANG_VECTORIZE
 	for (int i = 1; i < pLayer->node_count; i++)
 	{
-		diff = pLayer->nodes[i].value - outputs[i - 1];
+//		diff = pLayer->nodes[i].value - outputs[i - 1];
+		diff = outputs[i - 1] - pLayer->nodes[i].value;
 		mse += diff * diff;
 	}
 
 	return mse;
 }
 
-//---------------------------------
-// compute the cross entropy error
+//---------------------------------------------
+// compute the categorical cross entropy error
 // TODO this is buggy
 //---------------------------------
 static real compute_cross_entropy(PNetwork pnet, real *outputs)
@@ -303,6 +328,9 @@ static void eval_network(PNetwork pnet)
 			// update the nodes final value, using the correct activation function
 			switch (pnet->layers[layer].activation)
 			{
+			case ACTIVATION_NULL:
+				break;
+
 			case ACTIVATION_SIGMOID:
 				pnet->layers[layer].nodes[node].value = sigmoid(sum);
 				break;
@@ -313,6 +341,14 @@ static void eval_network(PNetwork pnet)
 
 			case ACTIVATION_LEAKY_RELU:
 				pnet->layers[layer].nodes[node].value = leaky_relu(sum);
+				break;
+
+			case ACTIVATION_TANH:
+				pnet->layers[layer].nodes[node].value = ann_tanh(sum);
+				break;
+
+			case ACTIVATION_SOFTSIGN:
+				pnet->layers[layer].nodes[node].value = softsign(sum);
 				break;
 
 			case ACTIVATION_SOFTMAX:
@@ -349,11 +385,11 @@ static void update_weights(PNetwork pnet)
 		{
 			// for each node in previous layer
 			CLANG_VECTORIZE
-				for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-				{
-					// update the weights by the change
-					pnet->layers[layer].nodes[node].weights[prev_node] += pnet->layers[layer].nodes[node].dw[prev_node];
-				}
+			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			{
+				// update the weights by the change
+				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->layers[layer].nodes[node].dw[prev_node];
+			}
 		}
 	}
 }
@@ -751,8 +787,8 @@ static void optimize_adam(PNetwork pnet, real *inputs, real *outputs)
 	real epsilon = (real)1e-6;
 	real m, v, mhat, vhat;
 
-	real one_minus_beta1_t = (real)1.0 / ((real)1.0 - pow(beta1, pnet->train_iteration));
-	real one_minus_beta2_t = (real)1.0 / ((real)1.0 - pow(beta2, pnet->train_iteration));
+	real one_minus_beta1_t = (real)1.0 / (real)(1.0 - pow(beta1, pnet->train_iteration));
+	real one_minus_beta2_t = (real)1.0 / (real)(1.0 - pow(beta2, pnet->train_iteration));
 //	pnet->train_iteration++;
 
 	//--------------------------------------------------------
@@ -887,6 +923,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	pnet->layers[cur_layer].t_values = t;
 
 	// TODO - create the weights tensor
+	pnet->layers[cur_layer].t_weights = NULL;
 
 	PNode new_nodes = malloc(node_count * sizeof(Node));
 	if (NULL == new_nodes)

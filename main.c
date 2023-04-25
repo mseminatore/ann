@@ -107,8 +107,6 @@ int main(int argc, char *argv[])
 
 	pnet->epochLimit = 5;
 
-	//ann_set_loss_function(pnet, LOSS_CATEGORICAL_CROSS_ENTROPY);
-
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows /20);
 	

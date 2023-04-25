@@ -993,11 +993,9 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	ann_set_loss_function(pnet, loss_type);
 
 	pnet->epochLimit	= 10000;
-//	pnet->loss_type		= loss_type;
 	pnet->train_iteration = 0;
 	pnet->batchSize		= DEFAULT_BATCH_SIZE;
 
-//	pnet->error_func	= compute_ms_error;
 	pnet->print_func	= ann_puts;
 	pnet->optimizer		= opt;
 
@@ -1040,6 +1038,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 {
 	if (!pnet)
 		return 0.0;
+
 
 	pnet->train_iteration = 1;
 

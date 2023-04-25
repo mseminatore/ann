@@ -31,18 +31,18 @@ void print_class_pred(real * data)
 //------------------------------
 // display a 28x28 image from flat data
 //------------------------------
-void print28x28(real *data)
+void print_ascii_art(real *data, int rows, int cols)
 {
 	char c;
 	char *pixels = " `. - ':_,^=;><+!rc*/z?sLTv)J7(|Fi{C}fI31tlu[neoZ5Yxjya]2ESwqkP6h9d4VpOGbUAKXHm8RD#$Bg0MNWQ%&@";
 
 	puts("\nInput image\n");
 
-	for (int row = 0; row < 28; row++)
+	for (int row = 0; row < rows; row++)
 	{
-		for (int col = 0; col< 28; col++)
+		for (int col = 0; col< cols; col++)
 		{
-			c = (int)(94.0  * data[row * 28 + col]);
+			c = (int)(94.0  * data[row * cols + col]);
 			putchar(pixels[c]);
 		}
 		puts("");
@@ -68,7 +68,7 @@ int main(int argc, char *argv[])
 		"Ankle boot"
 	};
 
-	PNetwork pnet = ann_make_network(OPT_ADAPT);
+	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_CATEGORICAL_CROSS_ENTROPY);
 
 	real *data, *test_data;
 	size_t rows, stride, test_rows, test_stride;
@@ -103,11 +103,11 @@ int main(int argc, char *argv[])
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);
 	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
 //	ann_add_layer(pnet, 16, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
-	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 
 	pnet->epochLimit = 5;
-//	pnet->learning_rate = 0.15;
-//	ann_set_loss_function(pnet, LOSS_CROSS_ENTROPY);
+
+	//ann_set_loss_function(pnet, LOSS_CATEGORICAL_CROSS_ENTROPY);
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows /20);
@@ -116,11 +116,9 @@ int main(int argc, char *argv[])
 	real acc = ann_evaluate(pnet, x_test, y_test);
 	printf("Test accuracy: %g%%\n", acc * 100);
 
-//	softmax(pnet);
-	// print_outputs(pnet);
 	int i = 0;
 //	for (; i < 5; i++)
-//		print28x28(&x_train->values[i * 784]);
+//		print_ascii_art(&x_train->values[i * 784], 28, 28);
 
 	// free memory
 	ann_free_network(pnet);

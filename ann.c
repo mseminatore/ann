@@ -331,9 +331,6 @@ static void eval_network(PNetwork pnet)
 			// update the nodes final value, using the correct activation function
 			switch (pnet->layers[layer].activation)
 			{
-			case ACTIVATION_NULL:
-				break;
-
 			case ACTIVATION_SIGMOID:
 				pnet->layers[layer].nodes[node].value = sigmoid(sum);
 				break;
@@ -354,7 +351,9 @@ static void eval_network(PNetwork pnet)
 				pnet->layers[layer].nodes[node].value = softsign(sum);
 				break;
 
+			case ACTIVATION_NULL:
 			case ACTIVATION_SOFTMAX:
+				pnet->layers[layer].nodes[node].value = sum;
 				// handled after full network is evaluated
 				break;
 
@@ -508,12 +507,12 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	eval_network(pnet);
 
 	// compute the Loss function
-	real err = pnet->error_func(pnet, outputs);
+	real loss = pnet->loss_func(pnet, outputs);
 
 	// back propagate error through network and update weights
 	pnet->optimize_func(pnet, inputs, outputs);
 
-	return err;
+	return loss;
 }
 
 //-----------------------------------------------
@@ -971,7 +970,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 //------------------------------
 // make a new network
 //------------------------------
-PNetwork ann_make_network(Optimizer_type opt)
+PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 {
 	PNetwork pnet = malloc(sizeof(Network));
 	if (NULL == pnet)
@@ -991,12 +990,14 @@ PNetwork ann_make_network(Optimizer_type opt)
 		pnet->lastMSE[i] = (real)0.0;
 	}
 
+	ann_set_loss_function(pnet, loss_type);
+
 	pnet->epochLimit	= 10000;
-	pnet->loss_type		= LOSS_MSE;
+//	pnet->loss_type		= loss_type;
 	pnet->train_iteration = 0;
 	pnet->batchSize		= DEFAULT_BATCH_SIZE;
 
-	pnet->error_func	= compute_ms_error;
+//	pnet->error_func	= compute_ms_error;
 	pnet->print_func	= ann_puts;
 	pnet->optimizer		= opt;
 
@@ -1194,13 +1195,13 @@ void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
 
 	switch (loss_type)
 	{
-	case LOSS_CROSS_ENTROPY:
-		pnet->error_func = compute_cross_entropy;
+	case LOSS_CATEGORICAL_CROSS_ENTROPY:
+		pnet->loss_func = compute_cross_entropy;
 		break;
 
 	default:
 	case LOSS_MSE:
-		pnet->error_func = compute_ms_error;
+		pnet->loss_func = compute_ms_error;
 		break;
 	}
 
@@ -1378,7 +1379,7 @@ int ann_save_network(PNetwork pnet, const char *filename)
 //------------------------------
 PNetwork ann_load_network(const char *filename)
 {
-	PNetwork pnet = ann_make_network(OPT_SGD);
+	PNetwork pnet = ann_make_network(OPT_SGD, LOSS_DEFAULT);
 
 	FILE *fptr = fopen(filename, "wt");
 	if (!fptr)

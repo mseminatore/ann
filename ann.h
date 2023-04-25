@@ -20,7 +20,7 @@
 #define DEFAULT_BUFFER_SIZE		8192	// size used for large temp buffers
 #define DEFAULT_LEARNING_RATE 	0.05	// base learning rate
 #define DEFAULT_LEARNING_DECAY	0.95	// decay rate for learning rate
-#define DEFAULT_LEARN_ADD		0.01	// adaptive learning rate factors
+#define DEFAULT_LEARN_ADD		0.005	// adaptive learning rate factors
 #define DEFAULT_LEARN_SUB		0.75
 #define DEFAULT_MSE_AVG			4		// number of prior MSE's to average
 #define DEFAULT_BATCH_SIZE		32
@@ -80,7 +80,8 @@ typedef enum {
 //------------------------------
 typedef enum {
 	LOSS_MSE,
-	LOSS_CROSS_ENTROPY
+	LOSS_CATEGORICAL_CROSS_ENTROPY,
+	LOSS_DEFAULT = LOSS_MSE
 } Loss_type;
 
 //------------------------------
@@ -121,7 +122,7 @@ typedef struct Network Network;
 typedef struct Network *PNetwork;
 
 // function pointers for Network
-typedef real (*Err_func) (PNetwork pnet, real *outputs);
+typedef real (*Loss_func) (PNetwork pnet, real *outputs);
 typedef void (*Output_func) (const char *);
 typedef void (*Optimization_func) (PNetwork pnet, real *inputs, real *outputs);
 
@@ -147,7 +148,7 @@ struct Network
 	Optimizer_type optimizer;
 	unsigned train_iteration;
 
-	Err_func error_func;				// the error function
+	Loss_func loss_func;				// the error function
 	Output_func print_func;				// print output function
 	Optimization_func optimize_func;	// learning rate/weight optimizer
 };
@@ -158,7 +159,7 @@ struct Network
 
 // building/freeing network model
 int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type);
-PNetwork ann_make_network(Optimizer_type opt);
+PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type);
 void ann_free_network(PNetwork pnet);
 int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows, size_t *stride);
 PNetwork ann_load_network(const char *filename);

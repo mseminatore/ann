@@ -53,7 +53,7 @@ void add_noise(real *data, size_t size, int amount)
 //------------------------------
 int main(int argc, char *argv[])
 {
-	PNetwork pnet = ann_make_network(OPT_DEFAULT);
+	PNetwork pnet = ann_make_network(OPT_DEFAULT, LOSS_DEFAULT);
 
 	real *data;
 	size_t rows, stride;

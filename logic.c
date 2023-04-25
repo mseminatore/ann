@@ -16,7 +16,7 @@ int main(int argc, char *argv[])
 	else
 		ann_load_csv("and.csv", CSV_NO_HEADER, &data, &rows, &stride);
 
-	PNetwork pnet = ann_make_network(OPT_SGD);
+	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_MSE);
 
 	PTensor x_train = tensor_create_from_array(rows, stride, data);
 	PTensor y_train = tensor_slice_cols(x_train, 2);

@@ -179,6 +179,5 @@ void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
 // debugging functions
 // void print_network(PNetwork pnet);
 void print_outputs(PNetwork pnet);
-void softmax(PNetwork pnet);
 
 #endif

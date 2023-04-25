@@ -32,6 +32,18 @@
 
 #define TENSOR_PATH 0
 
+//
+static const char *optimizers[] = {
+	"Stochastic Gradient Descent",
+	"Stochastic Gradient Descent with decay",
+	"Adaptive SGD",
+	"SGD with momentum",
+	"RMSPROP",
+	"ADAGRAD",
+	"Adam",
+	"SGD"
+};
+
 //-----------------------------------------------
 //
 //-----------------------------------------------
@@ -99,7 +111,7 @@ static real softsign(real x)
 //------------------------------
 // compute the softmax
 //------------------------------
-void softmax(PNetwork pnet)
+static void softmax(PNetwork pnet)
 {
 	real sum = 0.0;
 
@@ -108,21 +120,34 @@ void softmax(PNetwork pnet)
 	int node_count = pnet->layers[output_layer].node_count;
 	PNode pNode = pnet->layers[output_layer].nodes;
 
-//	putchar('[');
 	for (int node = 1; node < node_count; node++)
 	{
 		sum += (real)exp(pNode[node].value);
-//		ann_printf(pnet, "%3.2g ", pNode[node].value);
 	}
 
-//	puts("");
-//	putchar('[');
 	for (int node = 1; node < node_count; node++)
 	{
 		pNode[node].value = (real)(exp(pNode[node].value) / sum);
-//		ann_printf(pnet, "%3.2g ", pNode[node].value);
 	}
-//	puts("]");
+}
+
+//-----------------------------------------------
+//
+//-----------------------------------------------
+static void print_props(PNetwork pnet)
+{
+	ann_printf(pnet, "Network shape: ");
+	for (int i = 0; i < pnet->layer_count; i++)
+	{
+		if (i != 0)
+			putchar('-');
+		ann_printf(pnet, "%d", pnet->layers[i].node_count - 1);
+	}
+	puts("");
+
+	ann_printf(pnet, "Optimizer: %s\n", optimizers[pnet->optimizer]);
+
+	puts("");
 }
 
 //------------------------------
@@ -252,7 +277,6 @@ static real compute_ms_error(PNetwork pnet, real *outputs)
 	CLANG_VECTORIZE
 	for (int i = 1; i < pLayer->node_count; i++)
 	{
-//		diff = pLayer->nodes[i].value - outputs[i - 1];
 		diff = outputs[i - 1] - pLayer->nodes[i].value;
 		mse += diff * diff;
 	}
@@ -1039,6 +1063,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	if (!pnet)
 		return 0.0;
 
+	print_props(pnet);
 
 	pnet->train_iteration = 1;
 

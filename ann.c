@@ -44,6 +44,13 @@ static const char *optimizers[] = {
 	"SGD"
 };
 
+//
+static const char *loss_types[] = {
+	"Mean squared error",
+	"Categorical cross entropy",
+	"Mean squared error"
+};
+
 //-----------------------------------------------
 //
 //-----------------------------------------------
@@ -136,7 +143,7 @@ static void softmax(PNetwork pnet)
 //-----------------------------------------------
 static void print_props(PNetwork pnet)
 {
-	ann_printf(pnet, "Network shape: ");
+	ann_printf(pnet, "\nNetwork shape: ");
 	for (int i = 0; i < pnet->layer_count; i++)
 	{
 		if (i != 0)
@@ -146,6 +153,7 @@ static void print_props(PNetwork pnet)
 	puts("");
 
 	ann_printf(pnet, "Optimizer: %s\n", optimizers[pnet->optimizer]);
+	ann_printf(pnet, "Loss function: %s\n", loss_types[pnet->loss_type]);
 
 	puts("");
 }

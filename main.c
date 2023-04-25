@@ -112,7 +112,7 @@ int main(int argc, char *argv[])
 	
 	// evaluate the network against the test data
 	real acc = ann_evaluate(pnet, x_test, y_test);
-	printf("Test accuracy: %g%%\n", acc * 100);
+	printf("\nTest accuracy: %g%%\n", acc * 100);
 
 	int i = 0;
 //	for (; i < 5; i++)

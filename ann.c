@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <assert.h>
+#include <time.h>
 #include "ann.h"
 
 #if defined(_WIN32) && !defined(_WIN64)
@@ -150,8 +151,6 @@ static void print_props(PNetwork pnet)
 
 	ann_printf(pnet, "Optimizer: %s\n", optimizers[pnet->optimizer]);
 	ann_printf(pnet, "Loss function: %s\n", loss_types[pnet->loss_type]);
-
-	puts("");
 }
 
 //------------------------------
@@ -452,7 +451,8 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 		delta_w = (real)0.0;
 
 		// for each incoming input for this node, calculate the change in weight for that node
-		for (int prev_node = 0; prev_node < pnet->layers[output_layer - 1].node_count; prev_node++)
+		int node_count = pnet->layers[output_layer - 1].node_count;
+		for (int prev_node = 0; prev_node < node_count; prev_node++)
 		{
 			z = pnet->layers[output_layer - 1].nodes[prev_node].value;
 			r = *expected_values;
@@ -1069,6 +1069,9 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		return 0.0;
 
 	print_props(pnet);
+	ann_printf(pnet, "Training on %u rows\n\n", rows);
+
+	time_t time_start = time(NULL);
 
 	pnet->train_iteration = 1;
 
@@ -1122,7 +1125,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		if (loss < pnet->convergence_epsilon)
 			converged = 1;
 
-		ann_printf(pnet, "], loss=%3.2g, LR=%3.2g\n", loss, pnet->learning_rate);
+		ann_printf(pnet, "] - loss=%3.2g - LR=%3.2g\n", loss, pnet->learning_rate);
 
 		// optimize learning
 		if (pnet->optimizer == OPT_SGD_WITH_DECAY /*|| pnet->optimizer == OPT_MOMENTUM*/)
@@ -1133,10 +1136,15 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		// check for no convergence
 		if (epoch >= pnet->epochLimit)
 		{
-			// puts("Error: network not converged.\n");
 			converged = 1;
 		}
 	}
+
+	time_t time_end = time(NULL);
+	double diff_t = difftime(time_end, time_start);
+	double per_step = 1000.0 * diff_t / (rows * epoch);
+
+	ann_printf(pnet, "\nTraining time %3.0f seconds, %f ms per step\n", diff_t, per_step);
 
 	return loss;
 }

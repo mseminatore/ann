@@ -7,6 +7,10 @@
 
 #define FLOAT float
 
+#ifndef max
+#	define max(a, b) (((a) > (b)) ? (a) : (b))
+#endif
+
 //------------------------------
 // tensor structure
 //------------------------------
@@ -36,9 +40,11 @@ PTensor tensor_add_scalar(PTensor t, FLOAT val);
 PTensor tensor_add(PTensor a, PTensor b);
 PTensor tensor_mul_scalar(PTensor t, FLOAT val);
 PTensor tensor_mul(PTensor a, PTensor b);
+PTensor tensor_div(PTensor a, PTensor b);
 FLOAT tensor_dot(PTensor a, PTensor b);
 PTensor tensor_exp(PTensor t);
 PTensor tensor_argmax(PTensor t);
+PTensor tensor_max(PTensor t);
 
 // manipulation
 FLOAT tensor_get(PTensor t, size_t row, size_t col);

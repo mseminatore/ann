@@ -19,10 +19,6 @@
 	#define R_MAX 1.0
 #endif
 
-#ifndef max
-#	define max(a, b) (((a) > (b)) ? (a) : (b))
-#endif
-
 #ifdef __clang__
 #	define CLANG_VECTORIZE 
 //#pragma clang loop vectorize(enable)
@@ -112,7 +108,7 @@ static real ann_tanh(real x)
 //------------------------------
 static real softsign(real x)
 {
-	return (real)x / (1.0 + fabs(x));
+	return (real)(x / (1.0 + fabs(x)));
 }
 
 //------------------------------
@@ -445,11 +441,13 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 	int output_layer = pnet->layer_count - 1;
 	real x, z, r, y, dl_dy, dl_dz;
 	real delta_w, gradient;
+	real dl_dz_zomz;
 
 	//-------------------------------
 	// output layer back-propagation
 	//-------------------------------
-	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
+	int output_nodes = pnet->layers[output_layer].node_count;
+	for (int node = 1; node < output_nodes; node++)
 	{
 		delta_w = (real)0.0;
 
@@ -497,14 +495,14 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 
 				x = pnet->layers[layer - 1].nodes[prev_node].value;
 				z = pnet->layers[layer].nodes[node].value;
+				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
 
-				gradient = dl_dz * z * ((real)1.0 - z) * x;
+				gradient = dl_dz_zomz * x;
 				delta_w = pnet->learning_rate * gradient;
 
 				pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
-				pnet->layers[layer].nodes[node].dl_dz = dl_dz * z * ((real)1.0 - z) * pnet->layers[layer].nodes[node].weights[prev_node];
+				pnet->layers[layer].nodes[node].dl_dz = dl_dz_zomz * pnet->layers[layer].nodes[node].weights[prev_node];
 			}
-
 		}
 	}
 

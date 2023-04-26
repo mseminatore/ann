@@ -405,6 +405,56 @@ PTensor tensor_mul(PTensor a, PTensor b)
 }
 
 //------------------------------
+// divide tensor a by b
+//------------------------------
+PTensor tensor_div(PTensor a, PTensor b)
+{
+	if (!a || !b)
+		return NULL;
+
+	if (a->cols != b->cols || b->rows != 1)
+	{
+		assert(0 && "tensor: invalid shape");
+		return NULL;
+	}
+
+	for (size_t row = 0; row < a->rows; row++)
+	{
+		for (size_t col = 0; col < a->cols; col++)
+		{
+			FLOAT val = tensor_get(a, row, col) / tensor_get(b, 0, col);
+			tensor_set(a, row, col, val);
+		}
+	}
+
+	return a;
+}
+
+//------------------------------
+// return a tensor containing max col values from each row of t
+//------------------------------
+PTensor tensor_max(PTensor t)
+{
+	if (!t)
+		return NULL;
+
+	PTensor r = tensor_zeros(1, t->cols);
+
+	for (size_t row = 0; row < t->rows; row++)
+	{
+		for (size_t col = 0; col < t->cols; col++)
+		{
+			FLOAT a = tensor_get(r, 0, col);
+			FLOAT b = tensor_get(t, row, col);
+			FLOAT val = max(a, b);
+			tensor_set(r, 0, col, val);
+		}
+	}
+
+	return r;
+}
+
+//------------------------------
 // get a tensor component
 //------------------------------
 FLOAT tensor_get(PTensor t, size_t row, size_t col)
@@ -526,13 +576,17 @@ PTensor tensor_onehot(PTensor t, size_t classes)
 	return r;
 }
 
+//-------------------------------
 //
+//-------------------------------
 PTensor tensor_exp(PTensor t)
 {
 	return NULL;
 }
 
-//
+//-------------------------------
+// return tensor containing argmax of t
+//-------------------------------
 PTensor tensor_argmax(PTensor t)
 {
 	return NULL;

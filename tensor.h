@@ -45,6 +45,7 @@ FLOAT tensor_dot(PTensor a, PTensor b);
 PTensor tensor_exp(PTensor t);
 PTensor tensor_argmax(PTensor t);
 PTensor tensor_max(PTensor t);
+PTensor tensor_exp(PTensor t);
 
 // manipulation
 FLOAT tensor_get(PTensor t, size_t row, size_t col);

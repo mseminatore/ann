@@ -71,6 +71,9 @@ static void ann_printf(PNetwork pnet, const char *format, ...)
 	pnet->print_func(buf);
 }
 
+//
+static real no_activation(real x) { return x; }
+
 //------------------------------
 // compute the sigmoid activation
 //------------------------------
@@ -271,16 +274,16 @@ void print_outputs(PNetwork pnet)
 static real compute_ms_error(PNetwork pnet, real *outputs)
 {
 	// get the output layer
-	PLayer pLayer = &pnet->layers[pnet->layer_count - 1];
+	PLayer poutput_layer = &pnet->layers[pnet->layer_count - 1];
 
-	assert(pLayer->layer_type == LAYER_OUTPUT);
+	assert(poutput_layer->layer_type == LAYER_OUTPUT);
 
 	real mse = (real)0.0, diff;
 
 	CLANG_VECTORIZE
-	for (int i = 1; i < pLayer->node_count; i++)
+	for (int i = 1; i < poutput_layer->node_count; i++)
 	{
-		diff = outputs[i - 1] - pLayer->nodes[i].value;
+		diff = outputs[i - 1] - poutput_layer->nodes[i].value;
 		mse += diff * diff;
 	}
 
@@ -294,39 +297,20 @@ static real compute_ms_error(PNetwork pnet, real *outputs)
 static real compute_cross_entropy(PNetwork pnet, real *outputs)
 {
 	// get the output layer
-	PLayer pLayer = &pnet->layers[pnet->layer_count - 1];
+	PLayer poutput_layer = &pnet->layers[pnet->layer_count - 1];
 
-	assert(pLayer->layer_type == LAYER_OUTPUT);
+	assert(poutput_layer->layer_type == LAYER_OUTPUT);
 
 	real xe = 0.0;
 
 	CLANG_VECTORIZE
-	for (int i = 1; i < pLayer->node_count; i++)
+	for (int i = 1; i < poutput_layer->node_count; i++)
 	{
-		xe += (real)(outputs[i - 1] * log(pLayer->nodes[i].value));
+		xe += (real)(outputs[i - 1] * log(poutput_layer->nodes[i].value));
 	}
 
 	return -xe;
 }
-
-#ifndef _WIN32
-#include <time.h>
-
-// call this function to start a nanosecond-resolution timer
-struct timespec timer_start(){
-    struct timespec start_time;
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start_time);
-    return start_time;
-}
-
-// call this function to end a timer, returning nanoseconds elapsed as a long
-long timer_end(struct timespec start_time){
-    struct timespec end_time;
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end_time);
-    long diffInNanos = (end_time.tv_sec - start_time.tv_sec) * (long)1e9 + (end_time.tv_nsec - start_time.tv_nsec);
-    return diffInNanos;
-}
-#endif
 
 //------------------------------
 // forward evaluate the network
@@ -335,8 +319,6 @@ static void eval_network(PNetwork pnet)
 {
 	if (!pnet)
 		return;
-
-// struct timespec vartime = timer_start();
 
 	// loop over the non-input layers
 	for (int layer = 1; layer < pnet->layer_count; layer++)
@@ -354,51 +336,14 @@ static void eval_network(PNetwork pnet)
 				sum += pnet->layers[layer - 1].nodes[prev_node].value * pnet->layers[layer].nodes[node].weights[prev_node];
 			}
 
-			// TODO - switch to function pointers for perf??
 			// update the nodes final value, using the correct activation function
-			switch (pnet->layers[layer].activation)
-			{
-			case ACTIVATION_SIGMOID:
-				pnet->layers[layer].nodes[node].value = sigmoid(sum);
-				break;
-
-			case ACTIVATION_RELU:
-				pnet->layers[layer].nodes[node].value = relu(sum);
-				break;
-
-			case ACTIVATION_LEAKY_RELU:
-				pnet->layers[layer].nodes[node].value = leaky_relu(sum);
-				break;
-
-			case ACTIVATION_TANH:
-				pnet->layers[layer].nodes[node].value = ann_tanh(sum);
-				break;
-
-			case ACTIVATION_SOFTSIGN:
-				pnet->layers[layer].nodes[node].value = softsign(sum);
-				break;
-
-			case ACTIVATION_NULL:
-			case ACTIVATION_SOFTMAX:
-				pnet->layers[layer].nodes[node].value = sum;
-				// handled after full network is evaluated
-				break;
-
-			default:
-				assert(0);
-				break;
-			}
+			pnet->layers[layer].nodes[node].value = pnet->layers[layer].activation_func(sum);
 		}
 	}
 
 	// apply softmax on output if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
-
-// long time_elapsed_nanos = timer_end(vartime);
-// printf("Network eval, Time taken (nanoseconds): %ld\n", time_elapsed_nanos);
-
-//while(1);
 }
 
 //--------------------------------------------------------
@@ -561,7 +506,9 @@ static void shuffle_indices(size_t *input_indices, size_t count)
 	}
 }
 
+//-----------------------------------------------
 //
+//-----------------------------------------------
 static void optimize_none(PNetwork pnet, real *inputs, real *outputs)
 {
 	// do nothing!
@@ -941,6 +888,39 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	pnet->layers[cur_layer].layer_type = layer_type;
 	pnet->layers[cur_layer].activation = activation_type;
 
+	switch (activation_type)
+	{
+	case ACTIVATION_SIGMOID:
+		pnet->layers[cur_layer].activation_func = sigmoid;
+		break;
+
+	case ACTIVATION_RELU:
+		pnet->layers[cur_layer].activation_func = relu;
+		break;
+
+	case ACTIVATION_LEAKY_RELU:
+		pnet->layers[cur_layer].activation_func = leaky_relu;
+		break;
+
+	case ACTIVATION_TANH:
+		pnet->layers[cur_layer].activation_func = ann_tanh;
+		break;
+
+	case ACTIVATION_SOFTSIGN:
+		pnet->layers[cur_layer].activation_func = softsign;
+		break;
+
+	case ACTIVATION_NULL:
+	case ACTIVATION_SOFTMAX:
+		pnet->layers[cur_layer].activation_func = no_activation;
+		// handled after full network is evaluated
+		break;
+
+	default:
+		assert(0);
+		break;
+	}
+
 	//
 	// allocate the nodes
 	//
@@ -1125,7 +1105,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		if (loss < pnet->convergence_epsilon)
 			converged = 1;
 
-		ann_printf(pnet, "] - loss=%3.2g - LR=%3.2g\n", loss, pnet->learning_rate);
+		ann_printf(pnet, "] - loss: %3.2g - LR: %3.2g\n", loss, pnet->learning_rate);
 
 		// optimize learning
 		if (pnet->optimizer == OPT_SGD_WITH_DECAY /*|| pnet->optimizer == OPT_MOMENTUM*/)
@@ -1144,7 +1124,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	double diff_t = difftime(time_end, time_start);
 	double per_step = 1000.0 * diff_t / (rows * epoch);
 
-	ann_printf(pnet, "\nTraining time %3.0f seconds, %f ms per step\n", diff_t, per_step);
+	ann_printf(pnet, "\nTraining time: %f seconds, %f ms/step\n", diff_t, per_step);
 
 	return loss;
 }

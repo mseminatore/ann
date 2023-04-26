@@ -576,12 +576,22 @@ PTensor tensor_onehot(PTensor t, size_t classes)
 	return r;
 }
 
-//-------------------------------
-//
-//-------------------------------
+//------------------------------
+// return exp of tensor t 
+//------------------------------
 PTensor tensor_exp(PTensor t)
 {
-	return NULL;
+	if (!t)
+		return NULL;
+
+
+	int limit = t->rows * t->cols;
+	int i = 0;
+
+	for (; i < limit; i++)
+		t->values[i] = (FLOAT)exp(t->values[i]);
+
+	return t;
 }
 
 //-------------------------------

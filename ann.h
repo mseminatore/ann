@@ -98,6 +98,8 @@ typedef enum {
 	OPT_DEFAULT = OPT_SGD
 } Optimizer_type;
 
+typedef real(*Activation_func) (real);
+
 //------------------------------
 // Defines a layer in a network
 //------------------------------
@@ -108,6 +110,7 @@ typedef struct
 
 	Layer_type layer_type;			// type of this layer
 	Activation_type activation;		// type of activation, none, sigmoid, Relu
+	Activation_func activation_func;
 
 	// migration to tensor code path
 	PTensor t_values;

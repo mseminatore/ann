@@ -921,9 +921,9 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		break;
 	}
 
-	//
+	//--------------------
 	// allocate the nodes
-	//
+	//--------------------
 
 	// add an extra for bias node
 	node_count++;
@@ -933,8 +933,12 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	tensor_set(t, 0, 0, 1.0);
 	pnet->layers[cur_layer].t_values = t;
 
-	// TODO - create the weights tensor
-	pnet->layers[cur_layer].t_weights = NULL;
+	// create the weights tensor
+	if (cur_layer > 0)
+	{
+		assert(pnet->layers[cur_layer - 1].t_weights == NULL);
+		pnet->layers[cur_layer].t_weights = tensor_zeros(pnet->layers[cur_layer].node_count, node_count);
+	}
 
 	PNode new_nodes = malloc(node_count * sizeof(Node));
 	if (NULL == new_nodes)
@@ -993,6 +997,16 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->weights_set	= 0;
 	pnet->convergence_epsilon = (real)DEFAULT_CONVERGENCE;
 	pnet->mseCounter	= 0;
+
+	for (int i = 0; i < pnet->layer_size; i++)
+	{
+		pnet->layers[i].t_dw = NULL;
+		pnet->layers[i].t_m = NULL;
+		pnet->layers[i].t_v = NULL;
+		pnet->layers[i].t_values = NULL;
+		pnet->layers[i].t_weights = NULL;
+		pnet->layers[i].nodes = NULL;
+	}
 
 	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
 	{

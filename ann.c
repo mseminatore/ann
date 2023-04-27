@@ -122,7 +122,7 @@ static void softmax(PNetwork pnet)
 {
 	real sum = 0.0;
 
-	// find the sum of the output node values, excluding the bias noad
+	// find the sum of the output node values, excluding the bias node
 	int output_layer = pnet->layer_count - 1;
 	int node_count = pnet->layers[output_layer].node_count;
 	PNode pNode = pnet->layers[output_layer].nodes;
@@ -937,7 +937,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	if (cur_layer > 0)
 	{
 		assert(pnet->layers[cur_layer - 1].t_weights == NULL);
-		pnet->layers[cur_layer].t_weights = tensor_zeros(pnet->layers[cur_layer].node_count, node_count);
+		pnet->layers[cur_layer - 1].t_weights = tensor_zeros(pnet->layers[cur_layer].node_count, node_count);
 	}
 
 	PNode new_nodes = malloc(node_count * sizeof(Node));

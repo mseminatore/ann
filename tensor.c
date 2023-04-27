@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
+#include <math.h>
 
 #if defined(_WIN32) || defined(__x86_64__)
 #	include <immintrin.h>

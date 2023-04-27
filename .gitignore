@@ -61,6 +61,8 @@ ann
 .DS_Store
 fashion-mnist_test.csv
 fashion-mnist_train.csv
+mnist_train.csv
+mnist_test.csv
 logic
 test5x7
 pima

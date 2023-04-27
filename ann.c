@@ -928,8 +928,10 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	// add an extra for bias node
 	node_count++;
 
-	// create the values tensor
+	// create the node values tensor
 	PTensor t = tensor_zeros(1, node_count);
+
+	// set the bias node value to 1
 	tensor_set(t, 0, 0, 1.0);
 	pnet->layers[cur_layer].t_values = t;
 
@@ -940,6 +942,11 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		pnet->layers[cur_layer - 1].t_weights = tensor_zeros(pnet->layers[cur_layer].node_count, node_count);
 	}
 
+	pnet->layers[cur_layer - 1].t_v 	= tensor_zeros(1, node_count);
+	pnet->layers[cur_layer - 1].t_m 	= tensor_zeros(1, node_count);;
+	pnet->layers[cur_layer - 1].t_dw 	= tensor_zeros(1, node_count);;
+
+	// create the nodes
 	PNode new_nodes = malloc(node_count * sizeof(Node));
 	if (NULL == new_nodes)
 		return E_FAIL;
@@ -1000,12 +1007,12 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 
 	for (int i = 0; i < pnet->layer_size; i++)
 	{
-		pnet->layers[i].t_dw = NULL;
-		pnet->layers[i].t_m = NULL;
-		pnet->layers[i].t_v = NULL;
-		pnet->layers[i].t_values = NULL;
-		pnet->layers[i].t_weights = NULL;
-		pnet->layers[i].nodes = NULL;
+		pnet->layers[i].t_dw 		= NULL;
+		pnet->layers[i].t_m 		= NULL;
+		pnet->layers[i].t_v 		= NULL;
+		pnet->layers[i].t_values 	= NULL;
+		pnet->layers[i].t_weights 	= NULL;
+		pnet->layers[i].nodes 		= NULL;
 	}
 
 	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
@@ -1250,6 +1257,10 @@ void ann_free_network(PNetwork pnet)
 	{
 		// TODO - free other tensors!!
 		tensor_free(pnet->layers[layer].t_values);
+		tensor_free(pnet->layers[layer].t_m);
+		tensor_free(pnet->layers[layer].t_v);
+		tensor_free(pnet->layers[layer].t_dw);
+
 		if (pnet->layers[layer].t_weights)
 			tensor_free(pnet->layers[layer].t_weights);
 

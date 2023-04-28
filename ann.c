@@ -941,13 +941,12 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	if (cur_layer > 0)
 	{
 		assert(pnet->layers[cur_layer - 1].t_weights == NULL);
-		pnet->layers[cur_layer - 1].t_weights = tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
+		pnet->layers[cur_layer - 1].t_weights	= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
+		pnet->layers[cur_layer - 1].t_v			= tensor_zeros(1, node_count);
+		pnet->layers[cur_layer - 1].t_m			= tensor_zeros(1, node_count);
+		pnet->layers[cur_layer - 1].t_dw		= tensor_zeros(1, node_count);
+		pnet->layers[cur_layer - 1].t_gradients = tensor_zeros(1, node_count);
 	}
-
-	pnet->layers[cur_layer - 1].t_v 		= tensor_zeros(1, node_count);
-	pnet->layers[cur_layer - 1].t_m 		= tensor_zeros(1, node_count);
-	pnet->layers[cur_layer - 1].t_dw 		= tensor_zeros(1, node_count);
-	pnet->layers[cur_layer - 1].t_gradients = tensor_zeros(1, node_count);
 
 	// create the nodes
 	PNode new_nodes = malloc(node_count * sizeof(Node));
@@ -1016,6 +1015,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 		pnet->layers[i].t_v 		= NULL;
 		pnet->layers[i].t_values 	= NULL;
 		pnet->layers[i].t_weights 	= NULL;
+		pnet->layers[i].t_gradients = NULL;
 		pnet->layers[i].nodes 		= NULL;
 	}
 

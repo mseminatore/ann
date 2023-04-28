@@ -607,11 +607,28 @@ PTensor tensor_argmax(PTensor t)
 //-------------------------------
 // compute the tensor dot product
 //-------------------------------
-FLOAT tensor_dot(PTensor a, PTensor b)
+PTensor tensor_dot(PTensor a, PTensor b, PTensor c)
 {
-	FLOAT r = 0.0;
+	if (a->cols != b->cols)
+		return NULL;
 
-	return r;
+	FLOAT sum;
+	for (size_t a_row = 0; a_row < a->rows; a_row++)
+	{
+		for (size_t b_row = 0; b_row < b->rows; b_row++)
+		{
+			sum = (FLOAT)0.0;
+
+			for (size_t col = 0; col < a->cols; col++)
+			{
+				sum += a->values[a_row * a->cols + col] * b->values[b_row * b->cols + col];
+			}
+
+			tensor_set(c, b_row, a_row, sum);
+		}
+	}
+
+	return c;
 }
 
 //------------------------------

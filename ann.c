@@ -405,6 +405,7 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 			dl_dy = (r - y);
 			gradient = dl_dy * z;
 
+			// TODO - this piece happens once per mini-batch
 			delta_w = pnet->learning_rate * gradient;
 
 			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
@@ -442,6 +443,8 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
 
 				gradient = dl_dz_zomz * x;
+
+				// TODO - this piece happens once per mini-batch
 				delta_w = pnet->learning_rate * gradient;
 
 				pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
@@ -938,7 +941,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	if (cur_layer > 0)
 	{
 		assert(pnet->layers[cur_layer - 1].t_weights == NULL);
-		pnet->layers[cur_layer - 1].t_weights = tensor_zeros(pnet->layers[cur_layer - 1].node_count, node_count);
+		pnet->layers[cur_layer - 1].t_weights = tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 	}
 
 	pnet->layers[cur_layer - 1].t_v 	= tensor_zeros(1, node_count);
@@ -1061,6 +1064,62 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 }
 
 //-----------------------------------------------
+//
+//-----------------------------------------------
+void batch_eval_network(PNetwork pnet)
+{
+	if (!pnet)
+		return;
+
+	// loop over the non-input layers
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+	{
+		tensor_dot(pnet->layers[layer - 1].t_weights, pnet->layers[layer - 1].t_values, pnet->layers[layer].t_values);
+
+		// update the nodes final value, using the correct activation function
+//		pnet->layers[layer].nodes[node].value = pnet->layers[layer].activation_func(sum);
+	}
+
+	// apply softmax on output if requested
+	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
+		softmax(pnet);
+}
+
+//-----------------------------------------------
+// Train the network over a mini-batch
+//-----------------------------------------------
+real train_batch(PNetwork pnet, PTensor inputs, PTensor outputs)
+{
+	if (!pnet || !inputs || !outputs)
+		return 0.0;
+
+	assert(pnet->layers[0].layer_type == LAYER_INPUT);
+	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
+
+	// set the input values on the network
+	int node_count = pnet->layers[0].node_count;
+	PLayer player = &pnet->layers[0];
+
+	real loss = (real)0.0;
+
+	for (size_t i = 0; i < pnet->batchSize; i++)
+	{
+		tensor_set_from_array(player->t_values, 1, node_count, inputs->values + i * node_count);
+
+		// forward evaluate the network
+		batch_eval_network(pnet);
+
+		// compute the Loss function
+		loss += pnet->loss_func(pnet, outputs->values);
+	}
+
+	// back propagate error through network and update weights
+	pnet->optimize_func(pnet, inputs->values, outputs->values);
+
+	return loss;
+}
+
+//-----------------------------------------------
 // Train the network for a set of inputs/outputs
 //-----------------------------------------------
 real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t rows)
@@ -1083,7 +1142,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	unsigned epoch = 0;
 	unsigned correct = 0;
 
-	// shuffle the inputs and outputs
+	// create indices for shuffling the inputs and outputs
 	size_t *input_indices = alloca(rows * sizeof(size_t));
 	for (size_t i = 0; i < rows; i++)
 	{
@@ -1094,8 +1153,9 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	size_t input_node_count = (pnet->layers[0].node_count - 1);
 	size_t output_node_count = (pnet->layers[pnet->layer_count - 1].node_count - 1);
 
-	real *input_batch = alloca(input_node_count * sizeof(real));
-	real *output_batch = alloca(output_node_count * sizeof(real));
+	// tensors to hold input/output batches
+	PTensor input_batch		= tensor_create(pnet->batchSize, input_node_count);
+	PTensor output_batch	= tensor_create(pnet->batchSize, output_node_count);
 
 	size_t batch_count = rows / pnet->batchSize;
 
@@ -1107,21 +1167,38 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		
 		// iterate over all sets of inputs in this epoch/minibatch
 		ann_printf(pnet, "Epoch %u/%u\n[", ++epoch, pnet->epochLimit);
-		
-		// TODO - split into mini-batches
-		// for (size_t batch = 0; batch < batch_count; batch++)
-		// {
-		// 	for (int row = 0; row < pnet->batchSize; row++)
-		// 	{
-		// 		for (int col = 0; col < input_node_count; col++)
-		// 		{
-		// 			input_batch[row * input_node_count + col] = 
-		// 		}
-		// 	}
-		// }
-		
-		// TODO - submit mini-batches
 
+#if 0
+		 // split into mini-batches
+		 for (size_t batch = 0; batch < batch_count; batch++)
+		 {
+		 	for (size_t row = 0; row < pnet->batchSize; row++)
+		 	{
+		 		for (size_t col = 0; col < input_node_count; col++)
+		 		{
+					input_batch->values[row * input_node_count + col] = *(inputs->values + input_indices[batch * pnet->batchSize + row] * input_node_count);
+		 		}
+			
+				for (size_t col = 0; col < output_node_count; col++)
+				{
+					output_batch->values[row * output_node_count + col] = *(inputs->values + input_indices[batch * pnet->batchSize + row] * output_node_count);
+				}
+			}
+
+			// submit mini-batch
+			loss += train_batch(pnet, input_batch, output_batch);
+
+			//if (i % inc == 0)
+			//{
+			//	putchar('=');
+			//}
+
+			pnet->train_iteration++;
+		 }
+
+		 loss /= (real)pnet->batchSize;
+
+#else
 		for (size_t i = 0; i < rows; i++)
 		{
 			real *ins = inputs->values + input_indices[i] * input_node_count;
@@ -1137,6 +1214,8 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		}
 
 		loss /= (real)rows;
+#endif
+
 		if (loss < pnet->convergence_epsilon)
 			converged = 1;
 
@@ -1154,6 +1233,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 			converged = 1;
 		}
 	}
+
+	// free up batch tensors
+	tensor_free(input_batch);
+	tensor_free(output_batch);
 
 	time_t time_end = time(NULL);
 	double diff_t = difftime(time_end, time_start);

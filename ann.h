@@ -118,6 +118,7 @@ typedef struct
 	PTensor t_v;
 	PTensor t_m;
 	PTensor t_dw;
+	PTensor t_gradients;
 } Layer, *PLayer;
 
 // forward decls

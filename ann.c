@@ -1368,13 +1368,15 @@ void ann_free_network(PNetwork pnet)
 	{
 		// TODO - free other tensors!!
 		tensor_free(pnet->layers[layer].t_values);
-		tensor_free(pnet->layers[layer].t_m);
-		tensor_free(pnet->layers[layer].t_v);
-		tensor_free(pnet->layers[layer].t_dw);
-		tensor_free(pnet->layers[layer].t_gradients);
 
 		if (pnet->layers[layer].t_weights)
+		{
+			tensor_free(pnet->layers[layer].t_m);
+			tensor_free(pnet->layers[layer].t_v);
+			tensor_free(pnet->layers[layer].t_dw);
+			tensor_free(pnet->layers[layer].t_gradients);
 			tensor_free(pnet->layers[layer].t_weights);
+		}
 
 		// free nodes
 		for (int node = 0; node < pnet->layers[layer].node_count; node++)

@@ -186,15 +186,14 @@ static void init_weights(PNetwork pnet)
 		int weight_count	= pnet->layers[layer - 1].node_count;
 		int node_count		= pnet->layers[layer].node_count;
 
+//		real limit = (real)sqrt(6.0 / (weight_count + node_count));
+
 		for (int node = 0; node < node_count; node++)
 		{
 			for (int weight = 0; weight < weight_count; weight++)
 			{
-				// initialize weights to random values
-//				if (node != 0)
-					pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)R_MIN, (real)R_MAX);
-//				else
-//					pnet->layers[layer].nodes[node].weights[weight] = 0;
+				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)R_MIN, (real)R_MAX);
+//				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-limit, (real)limit);
 			}
 		}
 	}
@@ -939,7 +938,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	if (cur_layer > 0)
 	{
 		assert(pnet->layers[cur_layer - 1].t_weights == NULL);
-		pnet->layers[cur_layer - 1].t_weights = tensor_zeros(pnet->layers[cur_layer].node_count, node_count);
+		pnet->layers[cur_layer - 1].t_weights = tensor_zeros(pnet->layers[cur_layer - 1].node_count, node_count);
 	}
 
 	pnet->layers[cur_layer - 1].t_v 	= tensor_zeros(1, node_count);

@@ -49,6 +49,7 @@ typedef struct
 	real *dw;			// change in weights
 	real *m;			// momentum
 	real *v;			// velocity
+	real *gradients;	// gradients
 	real value;			// node value
 	real dl_dz;			// gradient term for this node
 } Node, *PNode;

@@ -944,9 +944,10 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		pnet->layers[cur_layer - 1].t_weights = tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 	}
 
-	pnet->layers[cur_layer - 1].t_v 	= tensor_zeros(1, node_count);
-	pnet->layers[cur_layer - 1].t_m 	= tensor_zeros(1, node_count);;
-	pnet->layers[cur_layer - 1].t_dw 	= tensor_zeros(1, node_count);;
+	pnet->layers[cur_layer - 1].t_v 		= tensor_zeros(1, node_count);
+	pnet->layers[cur_layer - 1].t_m 		= tensor_zeros(1, node_count);
+	pnet->layers[cur_layer - 1].t_dw 		= tensor_zeros(1, node_count);
+	pnet->layers[cur_layer - 1].t_gradients = tensor_zeros(1, node_count);
 
 	// create the nodes
 	PNode new_nodes = malloc(node_count * sizeof(Node));
@@ -977,6 +978,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 			pnet->layers[cur_layer].nodes[i].dw			= malloc(node_weights * sizeof(real));
 			pnet->layers[cur_layer].nodes[i].m			= malloc(node_weights * sizeof(real));
 			pnet->layers[cur_layer].nodes[i].v			= malloc(node_weights * sizeof(real));
+			pnet->layers[cur_layer].nodes[i].gradients	= malloc(node_weights * sizeof(real));
 
 			for (int j = 0; j < node_weights; j++)
 			{
@@ -1342,6 +1344,18 @@ void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
 }
 
 //------------------------------
+//
+//------------------------------
+static void free_node(PNode pnode)
+{
+	free(pnode->weights);
+	free(pnode->dw);
+	free(pnode->m);
+	free(pnode->v);
+	free(pnode->gradients);
+}
+
+//------------------------------
 // free a network
 //------------------------------
 void ann_free_network(PNetwork pnet)
@@ -1357,6 +1371,7 @@ void ann_free_network(PNetwork pnet)
 		tensor_free(pnet->layers[layer].t_m);
 		tensor_free(pnet->layers[layer].t_v);
 		tensor_free(pnet->layers[layer].t_dw);
+		tensor_free(pnet->layers[layer].t_gradients);
 
 		if (pnet->layers[layer].t_weights)
 			tensor_free(pnet->layers[layer].t_weights);
@@ -1366,10 +1381,7 @@ void ann_free_network(PNetwork pnet)
 		{
 			if (pnet->layers[layer].layer_type != LAYER_INPUT)
 			{
-				free(pnet->layers[layer].nodes[node].weights);
-				free(pnet->layers[layer].nodes[node].dw);
-				free(pnet->layers[layer].nodes[node].m);
-				free(pnet->layers[layer].nodes[node].v);
+				free_node(&pnet->layers[layer].nodes[node]);
 			}
 		}
 

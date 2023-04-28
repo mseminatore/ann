@@ -1091,6 +1091,15 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		input_indices[i] = i;
 	}
 
+	size_t inc = max(1, rows / 20);
+	size_t input_node_count = (pnet->layers[0].node_count - 1);
+	size_t output_node_count = (pnet->layers[pnet->layer_count - 1].node_count - 1);
+
+	real *input_batch = alloca(input_node_count * sizeof(real));
+	real *output_batch = alloca(output_node_count * sizeof(real));
+
+	size_t batch_count = rows / pnet->batchSize;
+
 	// train over epochs until done
 	while (!converged)
 	{
@@ -1100,17 +1109,23 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		// iterate over all sets of inputs in this epoch/minibatch
 		ann_printf(pnet, "Epoch %u/%u\n[", ++epoch, pnet->epochLimit);
 		
-		size_t inc = max(1, rows / 20);
-		
-		size_t intput_node_count = (pnet->layers[0].node_count - 1);
-		size_t output_node_count = (pnet->layers[pnet->layer_count - 1].node_count - 1);
-
 		// TODO - split into mini-batches
+		// for (size_t batch = 0; batch < batch_count; batch++)
+		// {
+		// 	for (int row = 0; row < pnet->batchSize; row++)
+		// 	{
+		// 		for (int col = 0; col < input_node_count; col++)
+		// 		{
+		// 			input_batch[row * input_node_count + col] = 
+		// 		}
+		// 	}
+		// }
+		
 		// TODO - submit mini-batches
 
 		for (size_t i = 0; i < rows; i++)
 		{
-			real *ins = inputs->values + input_indices[i] * intput_node_count;
+			real *ins = inputs->values + input_indices[i] * input_node_count;
 			real *outs = outputs->values + input_indices[i] * output_node_count;
 
 			loss += train_pass_network(pnet, ins, outs);

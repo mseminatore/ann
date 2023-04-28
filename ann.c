@@ -1140,7 +1140,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	init_weights(pnet);
 
 	int converged = 0;
-	real loss = 0.0;
+	real loss;
 	unsigned epoch = 0;
 	unsigned correct = 0;
 
@@ -1169,6 +1169,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		
 		// iterate over all sets of inputs in this epoch/minibatch
 		ann_printf(pnet, "Epoch %u/%u\n[", ++epoch, pnet->epochLimit);
+		loss = (real)0.0;
 
 #if 0
 		 // split into mini-batches

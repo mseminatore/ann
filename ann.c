@@ -170,38 +170,6 @@ static real get_rand(real min, real max)
 }
 
 //------------------------------
-// initialize the weights
-//------------------------------
-static void init_weights(PNetwork pnet)
-{
-	if (!pnet || pnet->weights_set)
-		return;
-
-	for (int layer = 0; layer < pnet->layer_count; layer++)
-	{
-		// input layers don't have weights
-		if (pnet->layers[layer].layer_type == LAYER_INPUT)
-			continue;
-
-		int weight_count	= pnet->layers[layer - 1].node_count;
-		int node_count		= pnet->layers[layer].node_count;
-
-//		real limit = (real)sqrt(6.0 / (weight_count + node_count));
-
-		for (int node = 0; node < node_count; node++)
-		{
-			for (int weight = 0; weight < weight_count; weight++)
-			{
-				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)R_MIN, (real)R_MAX);
-//				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-limit, (real)limit);
-			}
-		}
-	}
-
-	pnet->weights_set = 1;
-}
-
-//------------------------------
 // print the network
 //------------------------------
 static void print_network(PNetwork pnet)
@@ -233,6 +201,39 @@ static void print_network(PNetwork pnet)
 
 		puts("]");
 	}
+}
+
+//------------------------------
+// initialize the weights
+//------------------------------
+static void init_weights(PNetwork pnet)
+{
+	if (!pnet || pnet->weights_set)
+		return;
+
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		// input layers don't have weights
+		if (pnet->layers[layer].layer_type == LAYER_INPUT)
+			continue;
+
+		int weight_count	= pnet->layers[layer - 1].node_count;
+		int node_count		= pnet->layers[layer].node_count;
+
+//		real limit = (real)sqrt(6.0 / (weight_count + node_count));
+
+		for (int node = 0; node < node_count; node++)
+		{
+			for (int weight = 0; weight < weight_count; weight++)
+			{
+				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)R_MIN, (real)R_MAX);
+//				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-limit, (real)limit);
+			}
+		}
+	}
+
+	pnet->weights_set = 1;
+	print_network(pnet);
 }
 
 //--------------------------------
@@ -1007,6 +1008,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->weights_set	= 0;
 	pnet->convergence_epsilon = (real)DEFAULT_CONVERGENCE;
 	pnet->mseCounter	= 0;
+	pnet->dbg			= NULL;
 
 	for (int i = 0; i < pnet->layer_size; i++)
 	{

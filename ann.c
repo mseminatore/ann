@@ -513,6 +513,9 @@ static void back_propagate(PNetwork pnet, real *outputs)
 
 			dl_dy = (r - y);
 			gradient = dl_dy * z;
+
+//			printf("%g, ", gradient);
+
 			pnet->layers[output_layer].nodes[node].gradients[prev_node] += gradient;
 			pnet->layers[output_layer].nodes[node].dl_dz += dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
 		}
@@ -546,6 +549,8 @@ static void back_propagate(PNetwork pnet, real *outputs)
 				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
 
 				gradient = dl_dz_zomz * x;
+				printf("%g, ", gradient);
+
 				pnet->layers[layer].nodes[node].gradients[prev_node] += gradient;
 				pnet->layers[layer].nodes[node].dl_dz += dl_dz_zomz * pnet->layers[layer].nodes[node].weights[prev_node];
 			}

@@ -233,7 +233,7 @@ static void init_weights(PNetwork pnet)
 	}
 
 	pnet->weights_set = 1;
-	print_network(pnet);
+//	print_network(pnet);
 }
 
 //--------------------------------
@@ -405,6 +405,7 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 
 			dl_dy = (r - y);
 			gradient = dl_dy * z;
+			printf("%g, ", gradient);
 
 			// TODO - this piece happens once per mini-batch
 			delta_w = pnet->learning_rate * gradient;
@@ -475,6 +476,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	for (int node = 1; node < node_count; node++)
 	{
 		player->nodes[node].value = *inputs++;
+//		printf("%g, ", player->nodes[node].value);
 	}
 
 #if TENSOR_PATH

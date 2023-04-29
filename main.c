@@ -107,7 +107,7 @@ int main(int argc, char *argv[])
 	tensor_mul_scalar(x_test, (real)(1.0 / 255.0));
 
 	pnet->epochLimit = 5;
-//	pnet->learning_rate = 0.15;
+//	pnet->learning_rate = 0.01;
 	pnet->batchSize = 1;
 
 	// train the network

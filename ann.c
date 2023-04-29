@@ -517,7 +517,7 @@ static void back_propagate(PNetwork pnet, real *outputs)
 //			printf("%g, ", gradient);
 
 			pnet->layers[output_layer].nodes[node].gradients[prev_node] += gradient;
-			pnet->layers[output_layer].nodes[node].dl_dz += dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
+			pnet->layers[output_layer].nodes[node].dl_dz = dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
 		}
 
 		// get next expected output value
@@ -541,7 +541,7 @@ static void back_propagate(PNetwork pnet, real *outputs)
 				// for each following node
 				for (int next_node = 1; next_node < pnet->layers[layer + 1].node_count; next_node++)
 				{
-					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz / pnet->batchSize;
+					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
 				}
 
 				x = pnet->layers[layer - 1].nodes[prev_node].value;
@@ -549,10 +549,10 @@ static void back_propagate(PNetwork pnet, real *outputs)
 				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
 
 				gradient = dl_dz_zomz * x;
-				printf("%g, ", gradient);
+//				printf("%g, ", gradient);
 
 				pnet->layers[layer].nodes[node].gradients[prev_node] += gradient;
-				pnet->layers[layer].nodes[node].dl_dz += dl_dz_zomz * pnet->layers[layer].nodes[node].weights[prev_node];
+				pnet->layers[layer].nodes[node].dl_dz = dl_dz_zomz * pnet->layers[layer].nodes[node].weights[prev_node];
 			}
 		}
 	}
@@ -1322,6 +1322,8 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 					}
 				}
 			}
+
+			loss = (real)0.0;
 
 			for (size_t batch_index = 0; batch_index < pnet->batchSize; batch_index++)
 			{

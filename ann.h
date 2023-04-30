@@ -129,7 +129,7 @@ typedef struct Network *PNetwork;
 // function pointers for Network
 typedef real (*Loss_func) (PNetwork pnet, real *outputs);
 typedef void (*Output_func) (const char *);
-typedef void (*Optimization_func) (PNetwork pnet, real *inputs, real *outputs);
+typedef void (*Optimization_func) (PNetwork pnet);
 
 //------------------------------
 // Defines a network

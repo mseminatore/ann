@@ -44,7 +44,7 @@ static const char *optimizers[] = {
 //
 static const char *loss_types[] = {
 	"Mean squared error",
-	"Categorical cross entropy",
+	"Categorical cross-entropy",
 	"Mean squared error"
 };
 
@@ -370,128 +370,11 @@ static void update_weights(PNetwork pnet)
 	}
 }
 
-//--------------------------------------------------------
-// Stochastic Gradient Descent (SGD)
-//
-// back propagate and adjust weights
-//--------------------------------------------------------
-static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
-{
-	//--------------------------------------------------------
-	// compute the delta_w across the net, 
-	// THEN update the weights
-	//--------------------------------------------------------
-
-	// for each node in the output layer, excluding output layer bias node
-	real *expected_values = outputs;
-	int output_layer = pnet->layer_count - 1;
-	real x, z, r, y, dl_dy, dl_dz;
-	real delta_w, gradient;
-	real dl_dz_zomz;
-
-	//-------------------------------
-	// output layer back-propagation
-	//-------------------------------
-	int output_nodes = pnet->layers[output_layer].node_count;
-	for (int node = 1; node < output_nodes; node++)
-	{
-		delta_w = (real)0.0;
-
-		// for each incoming input for this node, calculate the change in weight for that node
-		int node_count = pnet->layers[output_layer - 1].node_count;
-		for (int prev_node = 0; prev_node < node_count; prev_node++)
-		{
-			z = pnet->layers[output_layer - 1].nodes[prev_node].value;
-			r = *expected_values;
-			y = pnet->layers[output_layer].nodes[node].value;
-
-			dl_dy = (r - y);
-			gradient = dl_dy * z;
-
-			// TODO - this piece happens once per mini-batch
-			delta_w = pnet->learning_rate * gradient;
-
-			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
-			pnet->layers[output_layer].nodes[node].dl_dz = dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
-		}
-
-		// get next expected output value
-		expected_values++;
-	}
-	
-	//-------------------------------
-	// hidden layer back-propagation
-	// excluding the input layer
-	//-------------------------------
-	for (int layer = output_layer - 1; layer > 0; layer--)
-	{
-		// for each node of this layer
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
-		{
-			delta_w = (real)0.0;
-
-			// for each incoming input to this node, calculate the weight change
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-			{
-				dl_dz = (real)0.0;
-
-				// for each following node
-				for (int next_node = 1; next_node < pnet->layers[layer + 1].node_count; next_node++)
-				{
-					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
-				}
-
-				x = pnet->layers[layer - 1].nodes[prev_node].value;
-				z = pnet->layers[layer].nodes[node].value;
-				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
-
-				gradient = dl_dz_zomz * x;
-
-				// TODO - this piece happens once per mini-batch
-				delta_w = pnet->learning_rate * gradient;
-
-				pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
-				pnet->layers[layer].nodes[node].dl_dz = dl_dz_zomz * pnet->layers[layer].nodes[node].weights[prev_node];
-			}
-		}
-	}
-
-	// update the weights based on calculated changes
-	update_weights(pnet);
-}
-
-
-//--------------------------------------------------------
-// update the weights based on calculated changes
-//--------------------------------------------------------
-static void optimize(PNetwork pnet)
-{
-	// for each layer after input
-	for (int layer = 1; layer < pnet->layer_count; layer++)
-	{
-		// for each node in the layer
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
-		{
-			// for each node in previous layer
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-			{
-				// update the weights by the change
-				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * pnet->layers[layer].nodes[node].gradients[prev_node] / pnet->batchSize;
-			}
-		}
-	}
-}
-
-//------------------------------
-//
-//------------------------------
+//-------------------------------------------
+// compute the gradients via back propagation
+//-------------------------------------------
 static void back_propagate(PNetwork pnet, real *outputs)
 {
-	//--------------------------------------------------------
-	// compute the delta_w across the net, 
-	// THEN update the weights
-	//--------------------------------------------------------
-
 	// for each node in the output layer, excluding output layer bias node
 	real *expected_values = outputs;
 	int output_layer = pnet->layer_count - 1;
@@ -531,15 +414,18 @@ static void back_propagate(PNetwork pnet, real *outputs)
 	for (int layer = output_layer - 1; layer > 0; layer--)
 	{
 		// for each node of this layer
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		int node_count = pnet->layers[layer].node_count;
+		for (int node = 1; node < node_count; node++)
 		{
 			// for each incoming input to this node, calculate the weight change
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			int prev_node_count = pnet->layers[layer - 1].node_count;
+			for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
 			{
 				dl_dz = (real)0.0;
 
 				// for each following node
-				for (int next_node = 1; next_node < pnet->layers[layer + 1].node_count; next_node++)
+				int next_node_count = pnet->layers[layer + 1].node_count;
+				for (int next_node = 1; next_node < next_node_count; next_node++)
 				{
 					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
 				}
@@ -589,8 +475,6 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// back propagate error through network to compute gradients
 	back_propagate(pnet, outputs);
 
-//	pnet->optimize_func(pnet, inputs, outputs);
-
 	return loss;
 }
 
@@ -613,7 +497,7 @@ static void shuffle_indices(size_t *input_indices, size_t count)
 //-----------------------------------------------
 //
 //-----------------------------------------------
-static void optimize_none(PNetwork pnet, real *inputs, real *outputs)
+static void optimize_none(PNetwork pnet)
 {
 	// do nothing!
 }
@@ -667,102 +551,63 @@ static void optimize_adapt(PNetwork pnet, real loss)
 	pnet->lastMSE[index] = loss;
 }
 
+//--------------------------------------------------------
+// Stochastic Gradient Descent (SGD)
+//
+// update the weights based on gradients
+//--------------------------------------------------------
+static void optimize_sgd(PNetwork pnet)
+{
+	// for each layer after input
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+	{
+		// for each node in the layer
+		int node_count = pnet->layers[layer].node_count;
+		for (int node = 1; node < node_count; node++)
+		{
+			// for each node in previous layer
+			int prev_node_count = pnet->layers[layer - 1].node_count;
+			for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
+			{
+				// update the weights by the change
+				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * pnet->layers[layer].nodes[node].gradients[prev_node] / pnet->batchSize;
+			}
+		}
+	}
+}
+
 //-----------------------------------------------
 // Gradient descent with momentum
 //-----------------------------------------------
-static void optimize_momentum(PNetwork pnet, real *inputs, real *outputs)
+static void optimize_momentum(PNetwork pnet)
 {
 	real beta = (real)0.9, one_minus_beta = (real)0.1;
 	real m;
 
-	//--------------------------------------------------------
-	// compute the delta_w across the net, 
-	// THEN update the weights
-	//--------------------------------------------------------
-
-	// for each node in the output layer, excluding output layer bias node
-	real *expected_values = outputs;
-	int output_layer = pnet->layer_count - 1;
-	real x, z, r, y, dl_dy, dl_dz;
-	real delta_w, gradient;
-
-	//-------------------------------
-	// output layer back-propagation
-	//-------------------------------
-	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
+	// for each layer after input
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		delta_w = (real)0.0;
-
-		// for each incoming input for this node, calculate the change in weight for that node
-		for (int prev_node = 0; prev_node < pnet->layers[output_layer - 1].node_count; prev_node++)
+		// for each node in the layer
+		int node_count = pnet->layers[layer].node_count;
+		for (int node = 1; node < node_count; node++)
 		{
-			z = pnet->layers[output_layer - 1].nodes[prev_node].value;
-			r = *expected_values;
-			y = pnet->layers[output_layer].nodes[node].value;
-
-			dl_dy = (r - y);
-			gradient = dl_dy * z;
-
-			m = beta * pnet->layers[output_layer].nodes[node].m[prev_node] + one_minus_beta * gradient;
-
-			delta_w = pnet->learning_rate * m;
-
-			pnet->layers[output_layer].nodes[node].m[prev_node] = m;
-			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
-			pnet->layers[output_layer].nodes[node].dl_dz = dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
-		}
-
-		// get next expected output value
-		expected_values++;
-	}
-
-	//-------------------------------
-	// hidden layer back-propagation
-	// excluding the input layer
-	//-------------------------------
-	for (int layer = output_layer - 1; layer > 0; layer--)
-	{
-		// for each node of this layer
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
-		{
-			delta_w = (real)0.0;
-
-			// for each incoming input to this node, calculate the weight change
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			// for each node in previous layer
+			int prev_node_count = pnet->layers[layer - 1].node_count;
+			for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
 			{
-				dl_dz = (real)0.0;
-
-				// for each following node
-				for (int next_node = 1; next_node < pnet->layers[layer + 1].node_count; next_node++)
-				{
-					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
-				}
-
-				x = pnet->layers[layer - 1].nodes[prev_node].value;
-				z = pnet->layers[layer].nodes[node].value;
-
-				gradient = dl_dz * z * ((real)1.0 - z) * x;
-
-				m = beta * pnet->layers[layer].nodes[node].m[prev_node] + one_minus_beta * gradient;
-
-				delta_w = pnet->learning_rate * m;
-
+				// update the weights by the change
+				m = beta * pnet->layers[layer].nodes[node].m[prev_node] + one_minus_beta * pnet->layers[layer].nodes[node].gradients[prev_node] / pnet->batchSize;
 				pnet->layers[layer].nodes[node].m[prev_node] = m;
-				pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
-				pnet->layers[layer].nodes[node].dl_dz = dl_dz * z * ((real)1.0 - z) * pnet->layers[layer].nodes[node].weights[prev_node];
+				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * m;
 			}
-
 		}
 	}
-
-	// update the weights based on calculated changes
-	update_weights(pnet);
 }
 
 //-----------------------------------------------
-//
+// Adaptive gradient descent
 //-----------------------------------------------
-static void optimize_adagrad(PNetwork pnet, real *inputs, real *outputs)
+static void optimize_adagrad(PNetwork pnet)
 {
 
 }
@@ -770,199 +615,70 @@ static void optimize_adagrad(PNetwork pnet, real *inputs, real *outputs)
 //-----------------------------------------------
 //
 //-----------------------------------------------
-static void optimize_rmsprop(PNetwork pnet, real *inputs, real *outputs)
+static void optimize_rmsprop(PNetwork pnet)
 {
 	real beta = (real)0.9, one_minus_beta = (real)0.1;
 	real epsilon = (real)1e-6;
-	real v;
+	real v, gradient;
 
-	//--------------------------------------------------------
-	// compute the delta_w across the net, 
-	// THEN update the weights
-	//--------------------------------------------------------
-
-	// for each node in the output layer, excluding output layer bias node
-	real *expected_values = outputs;
-	int output_layer = pnet->layer_count - 1;
-	real x, z, r, y, dl_dy, dl_dz;
-	real delta_w, gradient;
-
-	//-------------------------------
-	// output layer back-propagation
-	//-------------------------------
-	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
+	// for each layer after input
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		delta_w = (real)0.0;
-
-		// for each incoming input for this node, calculate the change in weight for that node
-		for (int prev_node = 0; prev_node < pnet->layers[output_layer - 1].node_count; prev_node++)
+		// for each node in the layer
+		int node_count = pnet->layers[layer].node_count;
+		for (int node = 1; node < node_count; node++)
 		{
-			z = pnet->layers[output_layer - 1].nodes[prev_node].value;
-			r = *expected_values;
-			y = pnet->layers[output_layer].nodes[node].value;
-
-			dl_dy = (r - y);
-			gradient = dl_dy * z;
-
-			v = beta * pnet->layers[output_layer].nodes[node].v[prev_node] + one_minus_beta * gradient * gradient;
-
-			delta_w = pnet->learning_rate * gradient / (real)sqrt(v + epsilon);
-
-			pnet->layers[output_layer].nodes[node].v[prev_node] = v;
-			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
-			pnet->layers[output_layer].nodes[node].dl_dz = dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
-		}
-
-		// get next expected output value
-		expected_values++;
-	}
-
-	//-------------------------------
-	// hidden layer back-propagation
-	// excluding the input layer
-	//-------------------------------
-	for (int layer = output_layer - 1; layer > 0; layer--)
-	{
-		// for each node of this layer
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
-		{
-			delta_w = (real)0.0;
-
-			// for each incoming input to this node, calculate the weight change
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			// for each node in previous layer
+			int prev_node_count = pnet->layers[layer - 1].node_count;
+			for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
 			{
-				dl_dz = (real)0.0;
-
-				// for each following node
-				for (int next_node = 1; next_node < pnet->layers[layer + 1].node_count; next_node++)
-				{
-					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
-				}
-
-				x = pnet->layers[layer - 1].nodes[prev_node].value;
-				z = pnet->layers[layer].nodes[node].value;
-
-				gradient = dl_dz * z * ((real)1.0 - z) * x;
-
+				// update the weights by the change
+				gradient = pnet->layers[layer].nodes[node].gradients[prev_node] / pnet->batchSize;
 				v = beta * pnet->layers[layer].nodes[node].v[prev_node] + one_minus_beta * gradient * gradient;
-
-				delta_w = pnet->learning_rate * gradient / (real) sqrt(v + epsilon);
-
 				pnet->layers[layer].nodes[node].v[prev_node] = v;
-				pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
-				pnet->layers[layer].nodes[node].dl_dz = dl_dz * z * ((real)1.0 - z) * pnet->layers[layer].nodes[node].weights[prev_node];
+				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * gradient / (real)sqrt(v + epsilon);
 			}
-
 		}
 	}
-
-	// update the weights based on calculated changes
-	update_weights(pnet);
 }
 
 //-----------------------------------------------
 // Adaptive moment estimation
 //-----------------------------------------------
-static void optimize_adam(PNetwork pnet, real *inputs, real *outputs)
+static void optimize_adam(PNetwork pnet)
 {
 	real beta1 = (real)0.9, one_minus_beta1 = (real)0.1;
 	real beta2 = (real)0.999, one_minus_beta2 = (real)0.001;
 	real epsilon = (real)1e-6;
-	real m, v, mhat, vhat;
+	real m, v, mhat, vhat, gradient;
 
 	real one_minus_beta1_t = (real)1.0 / (real)(1.0 - pow(beta1, pnet->train_iteration));
 	real one_minus_beta2_t = (real)1.0 / (real)(1.0 - pow(beta2, pnet->train_iteration));
 
-	//--------------------------------------------------------
-	// compute the delta_w across the net, 
-	// THEN update the weights
-	//--------------------------------------------------------
-
-	// for each node in the output layer, excluding output layer bias node
-	real *expected_values = outputs;
-	int output_layer = pnet->layer_count - 1;
-	real x, z, r, y, dl_dy, dl_dz;
-	real delta_w, gradient;
-
-	//-------------------------------
-	// output layer back-propagation
-	//-------------------------------
-	for (int node = 1; node < pnet->layers[output_layer].node_count; node++)
+	// for each layer after input
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		delta_w = (real)0.0;
-
-		// for each incoming input for this node, calculate the change in weight for that node
-		for (int prev_node = 0; prev_node < pnet->layers[output_layer - 1].node_count; prev_node++)
+		// for each node in the layer
+		int node_count = pnet->layers[layer].node_count;
+		for (int node = 1; node < node_count; node++)
 		{
-			z = pnet->layers[output_layer - 1].nodes[prev_node].value;
-			r = *expected_values;
-			y = pnet->layers[output_layer].nodes[node].value;
-
-			dl_dy = (r - y);
-			gradient = dl_dy * z;
-
-			m = beta1 * pnet->layers[output_layer].nodes[node].m[prev_node] + one_minus_beta1 * gradient;
-			v = beta2 * pnet->layers[output_layer].nodes[node].v[prev_node] + one_minus_beta2 * gradient * gradient;
-			mhat = m * one_minus_beta1_t;
-			vhat = v * one_minus_beta2_t;
-
-			delta_w = pnet->learning_rate * mhat / (real)sqrt(vhat + epsilon);
-
-			pnet->layers[output_layer].nodes[node].v[prev_node] = v;
-			pnet->layers[output_layer].nodes[node].m[prev_node] = m;
-			pnet->layers[output_layer].nodes[node].dw[prev_node] = delta_w;
-			pnet->layers[output_layer].nodes[node].dl_dz = dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
-		}
-
-		// get next expected output value
-		expected_values++;
-	}
-
-	//-------------------------------
-	// hidden layer back-propagation
-	// excluding the input layer
-	//-------------------------------
-	for (int layer = output_layer - 1; layer > 0; layer--)
-	{
-		// for each node of this layer
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
-		{
-			delta_w = (real)0.0;
-
-			// for each incoming input to this node, calculate the weight change
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			// for each node in previous layer
+			int prev_node_count = pnet->layers[layer - 1].node_count;
+			for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
 			{
-				dl_dz = (real)0.0;
-
-				// for each following node
-				for (int next_node = 1; next_node < pnet->layers[layer + 1].node_count; next_node++)
-				{
-					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
-				}
-
-				x = pnet->layers[layer - 1].nodes[prev_node].value;
-				z = pnet->layers[layer].nodes[node].value;
-
-				gradient = dl_dz * z * ((real)1.0 - z) * x;
-
+				// update the weights by the change
+				gradient = pnet->layers[layer].nodes[node].gradients[prev_node] / pnet->batchSize;
 				m = beta1 * pnet->layers[layer].nodes[node].m[prev_node] + one_minus_beta1 * gradient;
 				v = beta2 * pnet->layers[layer].nodes[node].v[prev_node] + one_minus_beta2 * gradient * gradient;
 				mhat = m * one_minus_beta1_t;
 				vhat = v * one_minus_beta2_t;
 
-				delta_w = pnet->learning_rate * mhat / (real)sqrt(vhat + epsilon);
-
-				pnet->layers[layer].nodes[node].v[prev_node] = v;
 				pnet->layers[layer].nodes[node].m[prev_node] = m;
-				pnet->layers[layer].nodes[node].dw[prev_node] = delta_w;
-				pnet->layers[layer].nodes[node].dl_dz = dl_dz * z * ((real)1.0 - z) * pnet->layers[layer].nodes[node].weights[prev_node];
+				pnet->layers[layer].nodes[node].v[prev_node] = v;
+				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * mhat / (real)sqrt(vhat + epsilon);
 			}
-
 		}
 	}
-
-	// update the weights based on calculated changes
-	update_weights(pnet);
 }
 
 //[]---------------------------------------------[]
@@ -1219,7 +935,7 @@ real train_batch(PNetwork pnet, PTensor inputs, PTensor outputs)
 	}
 
 	// back propagate error through network and update weights
-	pnet->optimize_func(pnet, inputs->values, outputs->values);
+	pnet->optimize_func(pnet);
 
 	return loss;
 }
@@ -1246,6 +962,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	real loss;
 	unsigned epoch = 0;
 	unsigned correct = 0;
+	size_t row;
 
 	// create indices for shuffling the inputs and outputs
 	size_t *input_indices = alloca(rows * sizeof(size_t));
@@ -1267,14 +984,14 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	// train over epochs until done
 	while (!converged)
 	{
-		// reshuffle the indices
+		// re-shuffle the indices for this epoch
 		shuffle_indices(input_indices, rows);
 		
 		// iterate over all sets of inputs in this epoch/minibatch
 		ann_printf(pnet, "Epoch %u/%u\n[", ++epoch, pnet->epochLimit);
 		loss = (real)0.0;
 
-		size_t row;
+		// iterate over all batches
 		for (size_t batch = 0; batch < batch_count; batch++)
 		{
 			// zero the gradients and dLdZ
@@ -1305,16 +1022,19 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 				if (row % inc == 0)
 				{
 					putchar('=');
-					pnet->train_iteration++;
 				}
 			}
 
+			// average loss over batch-size
 			loss /= (real)pnet->batchSize;
 
-			// update weights based on batched gradients using the optimization function
-			// TODO - call pnet->optimize-func() here
-			optimize(pnet);
+			// update weights based on batched gradients
+			// using the chosen optimization function
+			pnet->optimize_func(pnet);
+			// pnet->train_iteration++;
 		}
+
+		pnet->train_iteration++;
 
 		if (loss < pnet->convergence_epsilon)
 			converged = 1;

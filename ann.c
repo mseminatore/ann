@@ -143,7 +143,8 @@ static void softmax(PNetwork pnet)
 //-----------------------------------------------
 static void print_props(PNetwork pnet)
 {
-	ann_printf(pnet, "\nNetwork shape: ");
+	ann_printf(pnet, "ANN\n---\n\n");
+	ann_printf(pnet, "Network shape: ");
 	for (int i = 0; i < pnet->layer_count; i++)
 	{
 		if (i != 0)
@@ -154,6 +155,7 @@ static void print_props(PNetwork pnet)
 
 	ann_printf(pnet, "Optimizer: %s\n", optimizers[pnet->optimizer]);
 	ann_printf(pnet, "Loss function: %s\n", loss_types[pnet->loss_type]);
+	ann_printf(pnet, "Batch size: %u\n", pnet->batchSize);
 }
 
 //------------------------------
@@ -221,6 +223,7 @@ static void init_weights(PNetwork pnet)
 		int node_count		= pnet->layers[layer].node_count;
 
 //		real limit = (real)sqrt(6.0 / (weight_count + node_count));
+//		real limit = (real)sqrt(1.0 / (weight_count));
 
 		for (int node = 0; node < node_count; node++)
 		{
@@ -362,7 +365,6 @@ static void update_weights(PNetwork pnet)
 			{
 				// update the weights by the change
 				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->layers[layer].nodes[node].dw[prev_node];
-//				printf("%g, ", pnet->layers[layer].nodes[node].weights[prev_node]);
 			}
 		}
 	}
@@ -405,7 +407,6 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 
 			dl_dy = (r - y);
 			gradient = dl_dy * z;
-//			printf("%g, ", gradient);
 
 			// TODO - this piece happens once per mini-batch
 			delta_w = pnet->learning_rate * gradient;
@@ -445,7 +446,6 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
 
 				gradient = dl_dz_zomz * x;
-//				printf("%g, ", gradient);
 
 				// TODO - this piece happens once per mini-batch
 				delta_w = pnet->learning_rate * gradient;
@@ -516,8 +516,6 @@ static void back_propagate(PNetwork pnet, real *outputs)
 			dl_dy = (r - y);
 			gradient = dl_dy * z;
 
-//			printf("%g, ", gradient);
-
 			pnet->layers[output_layer].nodes[node].gradients[prev_node] += gradient;
 			pnet->layers[output_layer].nodes[node].dl_dz = dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
 		}
@@ -551,7 +549,6 @@ static void back_propagate(PNetwork pnet, real *outputs)
 				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
 
 				gradient = dl_dz_zomz * x;
-//				printf("%g, ", gradient);
 
 				pnet->layers[layer].nodes[node].gradients[prev_node] += gradient;
 				pnet->layers[layer].nodes[node].dl_dz = dl_dz_zomz * pnet->layers[layer].nodes[node].weights[prev_node];
@@ -577,7 +574,6 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	for (int node = 1; node < node_count; node++)
 	{
 		player->nodes[node].value = *inputs++;
-//		printf("%g, ", player->nodes[node].value);
 	}
 
 #if TENSOR_PATH
@@ -1237,7 +1233,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		return 0.0;
 
 	print_props(pnet);
-	ann_printf(pnet, "Training on %u rows\n\n", rows);
+	ann_printf(pnet, "Training on: %u rows\n\n", rows);
 
 	time_t time_start = time(NULL);
 
@@ -1278,37 +1274,6 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		ann_printf(pnet, "Epoch %u/%u\n[", ++epoch, pnet->epochLimit);
 		loss = (real)0.0;
 
-#if 0
-		 // split into mini-batches
-		 for (size_t batch = 0; batch < batch_count; batch++)
-		 {
-		 	for (size_t row = 0; row < pnet->batchSize; row++)
-		 	{
-		 		for (size_t col = 0; col < input_node_count; col++)
-		 		{
-					input_batch->values[row * input_node_count + col] = *(inputs->values + input_indices[batch * pnet->batchSize + row] * input_node_count);
-		 		}
-			
-				for (size_t col = 0; col < output_node_count; col++)
-				{
-					output_batch->values[row * output_node_count + col] = *(inputs->values + input_indices[batch * pnet->batchSize + row] * output_node_count);
-				}
-			}
-
-			// submit mini-batch
-			loss += train_batch(pnet, input_batch, output_batch);
-
-			//if (i % inc == 0)
-			//{
-			//	putchar('=');
-			//}
-
-			pnet->train_iteration++;
-		 }
-
-		 loss /= (real)pnet->batchSize;
-
-#else
 		size_t row;
 		for (size_t batch = 0; batch < batch_count; batch++)
 		{
@@ -1347,10 +1312,9 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 			loss /= (real)pnet->batchSize;
 
 			// update weights based on batched gradients using the optimization function
+			// TODO - call pnet->optimize-func() here
 			optimize(pnet);
 		}
-
-#endif
 
 		if (loss < pnet->convergence_epsilon)
 			converged = 1;

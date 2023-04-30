@@ -343,31 +343,9 @@ static void eval_network(PNetwork pnet)
 		}
 	}
 
-	// apply softmax on output if requested
+	// apply softmax on output, if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
-}
-
-//--------------------------------------------------------
-// update the weights based on calculated changes
-//--------------------------------------------------------
-static void update_weights(PNetwork pnet)
-{
-	// for each layer after input
-	for (int layer = 1; layer < pnet->layer_count; layer++)
-	{
-		// for each node in the layer
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
-		{
-			// for each node in previous layer
-			CLANG_VECTORIZE
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-			{
-				// update the weights by the change
-				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->layers[layer].nodes[node].dw[prev_node];
-			}
-		}
-	}
 }
 
 //-------------------------------------------
@@ -762,7 +740,6 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		pnet->layers[cur_layer - 1].t_weights	= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 		pnet->layers[cur_layer - 1].t_v			= tensor_zeros(1, node_count);
 		pnet->layers[cur_layer - 1].t_m			= tensor_zeros(1, node_count);
-		pnet->layers[cur_layer - 1].t_dw		= tensor_zeros(1, node_count);
 		pnet->layers[cur_layer - 1].t_gradients = tensor_zeros(1, node_count);
 	}
 
@@ -792,7 +769,6 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		for (int i = 0; i < node_count; i++)
 		{
 			pnet->layers[cur_layer].nodes[i].weights	= malloc(node_weights * sizeof(real));
-			pnet->layers[cur_layer].nodes[i].dw			= malloc(node_weights * sizeof(real));
 			pnet->layers[cur_layer].nodes[i].m			= malloc(node_weights * sizeof(real));
 			pnet->layers[cur_layer].nodes[i].v			= malloc(node_weights * sizeof(real));
 			pnet->layers[cur_layer].nodes[i].gradients	= malloc(node_weights * sizeof(real));
@@ -830,7 +806,6 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 
 	for (int i = 0; i < pnet->layer_size; i++)
 	{
-		pnet->layers[i].t_dw 		= NULL;
 		pnet->layers[i].t_m 		= NULL;
 		pnet->layers[i].t_v 		= NULL;
 		pnet->layers[i].t_values 	= NULL;
@@ -1173,7 +1148,6 @@ void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
 static void free_node(PNode pnode)
 {
 	free(pnode->weights);
-	free(pnode->dw);
 	free(pnode->m);
 	free(pnode->v);
 	free(pnode->gradients);
@@ -1190,14 +1164,12 @@ void ann_free_network(PNetwork pnet)
 	// free layers
 	for (int layer = 0; layer < pnet->layer_count; layer++)
 	{
-		// TODO - free other tensors!!
 		tensor_free(pnet->layers[layer].t_values);
 
 		if (pnet->layers[layer].t_weights)
 		{
 			tensor_free(pnet->layers[layer].t_m);
 			tensor_free(pnet->layers[layer].t_v);
-			tensor_free(pnet->layers[layer].t_dw);
 			tensor_free(pnet->layers[layer].t_gradients);
 			tensor_free(pnet->layers[layer].t_weights);
 		}

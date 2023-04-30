@@ -46,7 +46,6 @@ typedef FLOAT real;
 typedef struct
 {
 	real *weights;		// array of node weights
-	real *dw;			// change in weights
 	real *m;			// momentum
 	real *v;			// velocity
 	real *gradients;	// gradients
@@ -118,7 +117,7 @@ typedef struct
 	PTensor t_weights;
 	PTensor t_v;
 	PTensor t_m;
-	PTensor t_dw;
+//	PTensor t_dw;
 	PTensor t_gradients;
 } Layer, *PLayer;
 

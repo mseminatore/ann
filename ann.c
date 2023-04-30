@@ -233,7 +233,6 @@ static void init_weights(PNetwork pnet)
 	}
 
 	pnet->weights_set = 1;
-//	print_network(pnet);
 }
 
 //--------------------------------
@@ -461,6 +460,106 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 	update_weights(pnet);
 }
 
+
+//--------------------------------------------------------
+// update the weights based on calculated changes
+//--------------------------------------------------------
+static void optimize(PNetwork pnet)
+{
+	// for each layer after input
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+	{
+		// for each node in the layer
+		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		{
+			// for each node in previous layer
+			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			{
+				// update the weights by the change
+				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * pnet->layers[layer].nodes[node].gradients[prev_node] / pnet->batchSize;
+			}
+		}
+	}
+}
+
+//------------------------------
+//
+//------------------------------
+static void back_propagate(PNetwork pnet, real *outputs)
+{
+	//--------------------------------------------------------
+	// compute the delta_w across the net, 
+	// THEN update the weights
+	//--------------------------------------------------------
+
+	// for each node in the output layer, excluding output layer bias node
+	real *expected_values = outputs;
+	int output_layer = pnet->layer_count - 1;
+	real x, z, r, y, dl_dy, dl_dz;
+	real gradient;
+	real dl_dz_zomz;
+
+	//-------------------------------
+	// output layer back-propagation
+	//-------------------------------
+	int output_nodes = pnet->layers[output_layer].node_count;
+	for (int node = 1; node < output_nodes; node++)
+	{
+		// for each incoming input for this node, calculate the change in weight for that node
+		int node_count = pnet->layers[output_layer - 1].node_count;
+		for (int prev_node = 0; prev_node < node_count; prev_node++)
+		{
+			z = pnet->layers[output_layer - 1].nodes[prev_node].value;
+			r = *expected_values;
+			y = pnet->layers[output_layer].nodes[node].value;
+
+			dl_dy = (r - y);
+			gradient = dl_dy * z;
+
+//			printf("%g, ", gradient);
+
+			pnet->layers[output_layer].nodes[node].gradients[prev_node] += gradient;
+			pnet->layers[output_layer].nodes[node].dl_dz = dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
+		}
+
+		// get next expected output value
+		expected_values++;
+	}
+
+	//-------------------------------
+	// hidden layer back-propagation
+	// excluding the input layer
+	//-------------------------------
+	for (int layer = output_layer - 1; layer > 0; layer--)
+	{
+		// for each node of this layer
+		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		{
+			// for each incoming input to this node, calculate the weight change
+			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			{
+				dl_dz = (real)0.0;
+
+				// for each following node
+				for (int next_node = 1; next_node < pnet->layers[layer + 1].node_count; next_node++)
+				{
+					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
+				}
+
+				x = pnet->layers[layer - 1].nodes[prev_node].value;
+				z = pnet->layers[layer].nodes[node].value;
+				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
+
+				gradient = dl_dz_zomz * x;
+//				printf("%g, ", gradient);
+
+				pnet->layers[layer].nodes[node].gradients[prev_node] += gradient;
+				pnet->layers[layer].nodes[node].dl_dz = dl_dz_zomz * pnet->layers[layer].nodes[node].weights[prev_node];
+			}
+		}
+	}
+}
+
 //------------------------------
 // train the network over 
 //------------------------------
@@ -472,7 +571,7 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	assert(pnet->layers[0].layer_type == LAYER_INPUT);
 	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
 
-	// set the input values on the network
+	// set the input values on the network, skipping the bias node
 	int node_count = pnet->layers[0].node_count;
 	PLayer player = &pnet->layers[0];
 	for (int node = 1; node < node_count; node++)
@@ -491,8 +590,10 @@ static real train_pass_network(PNetwork pnet, real *inputs, real *outputs)
 	// compute the Loss function
 	real loss = pnet->loss_func(pnet, outputs);
 
-	// back propagate error through network and update weights
-	pnet->optimize_func(pnet, inputs, outputs);
+	// back propagate error through network to compute gradients
+	back_propagate(pnet, outputs);
+
+//	pnet->optimize_func(pnet, inputs, outputs);
 
 	return loss;
 }
@@ -1208,21 +1309,47 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		 loss /= (real)pnet->batchSize;
 
 #else
-		for (size_t i = 0; i < rows; i++)
+		size_t row;
+		for (size_t batch = 0; batch < batch_count; batch++)
 		{
-			real *ins = inputs->values + input_indices[i] * input_node_count;
-			real *outs = outputs->values + input_indices[i] * output_node_count;
-
-			loss += train_pass_network(pnet, ins, outs);
-
-			if (i % inc == 0)
+			// zero the gradients and dLdZ
+			for (int layer = 1; layer < pnet->layer_count; layer++)
 			{
-				putchar('=');
-				pnet->train_iteration++;
+				for (int node = 0; node < pnet->layers[layer].node_count; node++)
+				{
+					pnet->layers[layer].nodes[node].dl_dz = (real)0.0;
+
+					for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+					{
+						pnet->layers[layer].nodes[node].gradients[prev_node] = (real)0.0;
+					}
+				}
 			}
+
+			loss = (real)0.0;
+
+			for (size_t batch_index = 0; batch_index < pnet->batchSize; batch_index++)
+			{
+				row = batch * pnet->batchSize + batch_index;
+
+				real *ins = inputs->values + input_indices[row] * input_node_count;
+				real *outs = outputs->values + input_indices[row] * output_node_count;
+
+				loss += train_pass_network(pnet, ins, outs);
+
+				if (row % inc == 0)
+				{
+					putchar('=');
+					pnet->train_iteration++;
+				}
+			}
+
+			loss /= (real)pnet->batchSize;
+
+			// update weights based on batched gradients using the optimization function
+			optimize(pnet);
 		}
 
-		loss /= (real)rows;
 #endif
 
 		if (loss < pnet->convergence_epsilon)

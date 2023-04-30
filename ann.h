@@ -139,6 +139,7 @@ struct Network
 	int layer_count;					// number of layers in network
 	PLayer layers;						// array of layers
 
+	FILE *dbg;
 	real learning_rate;					// learning rate of network
 	int layer_size;						// number of layers allocated
 	int weights_set;					// have the weights been initialized?

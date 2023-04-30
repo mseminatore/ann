@@ -233,7 +233,6 @@ static void init_weights(PNetwork pnet)
 	}
 
 	pnet->weights_set = 1;
-	//print_network(pnet);
 }
 
 //--------------------------------
@@ -363,6 +362,7 @@ static void update_weights(PNetwork pnet)
 			{
 				// update the weights by the change
 				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->layers[layer].nodes[node].dw[prev_node];
+//				printf("%g, ", pnet->layers[layer].nodes[node].weights[prev_node]);
 			}
 		}
 	}
@@ -405,6 +405,7 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 
 			dl_dy = (r - y);
 			gradient = dl_dy * z;
+//			printf("%g, ", gradient);
 
 			// TODO - this piece happens once per mini-batch
 			delta_w = pnet->learning_rate * gradient;
@@ -444,6 +445,7 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
 
 				gradient = dl_dz_zomz * x;
+//				printf("%g, ", gradient);
 
 				// TODO - this piece happens once per mini-batch
 				delta_w = pnet->learning_rate * gradient;
@@ -1111,6 +1113,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->weights_set	= 0;
 	pnet->convergence_epsilon = (real)DEFAULT_CONVERGENCE;
 	pnet->mseCounter	= 0;
+	pnet->dbg			= NULL;
 
 	for (int i = 0; i < pnet->layer_size; i++)
 	{

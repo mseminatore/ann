@@ -363,7 +363,7 @@ static void update_weights(PNetwork pnet)
 			{
 				// update the weights by the change
 				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->layers[layer].nodes[node].dw[prev_node];
-				printf("%g, ", pnet->layers[layer].nodes[node].weights[prev_node]);
+//				printf("%g, ", pnet->layers[layer].nodes[node].weights[prev_node]);
 			}
 		}
 	}
@@ -446,7 +446,7 @@ static void optimize_sgd(PNetwork pnet, real *inputs, real *outputs)
 				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
 
 				gradient = dl_dz_zomz * x;
-				printf("%g, ", gradient);
+//				printf("%g, ", gradient);
 
 				// TODO - this piece happens once per mini-batch
 				delta_w = pnet->learning_rate * gradient;

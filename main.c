@@ -108,7 +108,7 @@ int main(int argc, char *argv[])
 
 	pnet->epochLimit = 5;
 //	pnet->convergence_epsilon = 0.016;
-//	pnet->learning_rate = 0.0015;
+//	pnet->learning_rate = 0.015;
 	pnet->batchSize = 1;
 
 	// train the network

@@ -222,7 +222,7 @@ static void init_weights(PNetwork pnet)
 		int weight_count	= pnet->layers[layer - 1].node_count;
 		int node_count		= pnet->layers[layer].node_count;
 
-//		real limit = (real)sqrt(6.0 / (weight_count + node_count));
+		// real limit = (real)sqrt(6.0 / (weight_count + node_count));
 //		real limit = (real)sqrt(1.0 / (weight_count));
 
 		for (int node = 0; node < node_count; node++)
@@ -230,7 +230,7 @@ static void init_weights(PNetwork pnet)
 			for (int weight = 0; weight < weight_count; weight++)
 			{
 				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)R_MIN, (real)R_MAX);
-//				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-limit, (real)limit);
+				// pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-limit, (real)limit);
 			}
 		}
 	}
@@ -801,6 +801,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 			{
 				pnet->layers[cur_layer].nodes[i].m[j] = (real)0.0;
 				pnet->layers[cur_layer].nodes[i].v[j] = (real)0.0;
+				pnet->layers[cur_layer].nodes[i].gradients[j] = (real)0.0;
 			}
 		}
 	}
@@ -949,7 +950,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		return 0.0;
 
 	print_props(pnet);
-	ann_printf(pnet, "Training on: %u rows\n\n", rows);
+	ann_printf(pnet, "Training size: %u rows\n\n", rows);
 
 	time_t time_start = time(NULL);
 
@@ -997,11 +998,13 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 			// zero the gradients and dLdZ
 			for (int layer = 1; layer < pnet->layer_count; layer++)
 			{
-				for (int node = 0; node < pnet->layers[layer].node_count; node++)
+				int node_count = pnet->layers[layer].node_count;
+				for (int node = 0; node < node_count; node++)
 				{
 					pnet->layers[layer].nodes[node].dl_dz = (real)0.0;
 
-					for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+					int prev_node_count = pnet->layers[layer - 1].node_count;
+					for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
 					{
 						pnet->layers[layer].nodes[node].gradients[prev_node] = (real)0.0;
 					}
@@ -1036,9 +1039,6 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 
 		pnet->train_iteration++;
 
-		if (loss < pnet->convergence_epsilon)
-			converged = 1;
-
 		ann_printf(pnet, "] - loss: %3.2g - LR: %3.2g\n", loss, pnet->learning_rate);
 
 		// optimize learning
@@ -1046,6 +1046,12 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 			optimize_decay(pnet, loss);
 		else if (pnet->optimizer == OPT_ADAPT)
 			optimize_adapt(pnet, loss);
+
+		if (loss < pnet->convergence_epsilon)
+		{
+			ann_printf(pnet, "Network converged with loss: %3.2g out of %3.2g\n", loss, pnet->convergence_epsilon);
+			converged = 1;
+		}		
 
 		// check for no convergence
 		if (epoch >= pnet->epochLimit)

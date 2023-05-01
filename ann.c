@@ -354,11 +354,11 @@ static void eval_network(PNetwork pnet)
 static void back_propagate(PNetwork pnet, real *outputs)
 {
 	// for each node in the output layer, excluding output layer bias node
-	real *expected_values = outputs;
 	int output_layer = pnet->layer_count - 1;
 	real x, z, r, y, dl_dy, dl_dz;
 	real gradient;
 	real dl_dz_zomz;
+	PNode pnode;
 
 	//-------------------------------
 	// output layer back-propagation
@@ -368,21 +368,22 @@ static void back_propagate(PNetwork pnet, real *outputs)
 	{
 		// for each incoming input for this node, calculate the change in weight for that node
 		int node_count = pnet->layers[output_layer - 1].node_count;
+		pnode = &pnet->layers[output_layer].nodes[node];
 		for (int prev_node = 0; prev_node < node_count; prev_node++)
 		{
 			z = pnet->layers[output_layer - 1].nodes[prev_node].value;
-			r = *expected_values;
-			y = pnet->layers[output_layer].nodes[node].value;
+			r = *outputs;
+			y = pnode->value;
 
 			dl_dy = (r - y);
 			gradient = dl_dy * z;
 
-			pnet->layers[output_layer].nodes[node].gradients[prev_node] += gradient;
-			pnet->layers[output_layer].nodes[node].dl_dz = dl_dy * pnet->layers[output_layer].nodes[node].weights[prev_node];
+			pnode->gradients[prev_node] += gradient;
+			pnode->dl_dz = dl_dy * pnode->weights[prev_node];
 		}
 
 		// get next expected output value
-		expected_values++;
+		outputs++;
 	}
 
 	//-------------------------------
@@ -403,19 +404,20 @@ static void back_propagate(PNetwork pnet, real *outputs)
 
 				// for each following node
 				int next_node_count = pnet->layers[layer + 1].node_count;
+				pnode = &pnet->layers[layer].nodes[node];
 				for (int next_node = 1; next_node < next_node_count; next_node++)
 				{
 					dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
 				}
 
 				x = pnet->layers[layer - 1].nodes[prev_node].value;
-				z = pnet->layers[layer].nodes[node].value;
+				z = pnode->value;
 				dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
 
 				gradient = dl_dz_zomz * x;
 
-				pnet->layers[layer].nodes[node].gradients[prev_node] += gradient;
-				pnet->layers[layer].nodes[node].dl_dz = dl_dz_zomz * pnet->layers[layer].nodes[node].weights[prev_node];
+				pnode->gradients[prev_node] += gradient;
+				pnode->dl_dz = dl_dz_zomz * pnode->weights[prev_node];
 			}
 		}
 	}
@@ -627,7 +629,7 @@ static void optimize_adam(PNetwork pnet)
 {
 	real beta1 = (real)0.9, one_minus_beta1 = (real)0.1;
 	real beta2 = (real)0.999, one_minus_beta2 = (real)0.001;
-	real epsilon = (real)1e-6;
+	real epsilon = (real)1e-8;
 	real m, v, mhat, vhat, gradient;
 
 	real one_minus_beta1_t = (real)1.0 / (real)(1.0 - pow(beta1, pnet->train_iteration));
@@ -927,7 +929,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	print_props(pnet);
 	ann_printf(pnet, "Training size: %u rows\n\n", rows);
 
-	time_t time_start = time(NULL);
+	clock_t time_start = clock();
 
 	pnet->train_iteration = 1;
 
@@ -1001,6 +1003,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 				{
 					putchar('=');
 				}
+			pnet->train_iteration++;
 			}
 
 			// average loss over batch-size
@@ -1012,12 +1015,12 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 			// pnet->train_iteration++;
 		}
 
-		pnet->train_iteration++;
+		// pnet->train_iteration++;
 
 		ann_printf(pnet, "] - loss: %3.2g - LR: %3.2g\n", loss, pnet->learning_rate);
 
 		// optimize learning
-		if (pnet->optimizer == OPT_SGD_WITH_DECAY /*|| pnet->optimizer == OPT_MOMENTUM*/)
+		if (pnet->optimizer == OPT_SGD_WITH_DECAY || pnet->optimizer == OPT_MOMENTUM)
 			optimize_decay(pnet, loss);
 		else if (pnet->optimizer == OPT_ADAPT)
 			optimize_adapt(pnet, loss);
@@ -1039,8 +1042,8 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	tensor_free(input_batch);
 	tensor_free(output_batch);
 
-	time_t time_end = time(NULL);
-	double diff_t = difftime(time_end, time_start);
+	clock_t time_end = clock();
+	double diff_t = (time_end - time_start) / CLOCKS_PER_SEC;
 	double per_step = 1000.0 * diff_t / (rows * epoch);
 
 	ann_printf(pnet, "\nTraining time: %f seconds, %f ms/step\n", diff_t, per_step);

@@ -172,7 +172,6 @@ int main(int argc, char *argv[])
 
 	pnet->epochLimit = 5;
 	pnet->convergence_epsilon = (real)1e-5;
-	//pnet->learning_rate = 0.05;
 	pnet->batchSize = 1;
 
 //	hypertune(pnet, x_train, y_train, x_train->rows / 20);

@@ -230,7 +230,10 @@ static void init_weights(PNetwork pnet)
 		{
 			for (int weight = 0; weight < weight_count; weight++)
 			{
-				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-pnet->weight_limit , (real)pnet->weight_limit);
+				// if (weight == 0)
+				// 	pnet->layers[layer].nodes[node].weights[weight] = pnet->init_bias;
+				// else
+					pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-pnet->weight_limit , (real)pnet->weight_limit);
 				 //pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-limit, (real)limit);
 			}
 		}
@@ -809,6 +812,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->mseCounter	= 0;
 	pnet->dbg			= NULL;
 	pnet->weight_limit	= R_MAX;
+	pnet->init_bias		= (real)1.0;
 
 	for (int i = 0; i < pnet->layer_size; i++)
 	{

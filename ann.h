@@ -145,6 +145,7 @@ struct Network
 	unsigned batchSize;					// size of mini-batches
 
 	real convergence_epsilon;			// threshold for convergence
+	real weight_limit;
 
 	real lastMSE[DEFAULT_MSE_AVG];		// for averaging the last X MSE values
 	unsigned mseCounter;

@@ -52,6 +52,70 @@ void print_ascii_art(real *data, int rows, int cols)
 }
 
 //------------------------------
+//
+//------------------------------
+void hypertune(PNetwork pnet, PTensor x_train, PTensor y_train, size_t rows)
+{
+	real loss, minLoss;
+	real opt_lr, opt_weights;
+
+	pnet->epochLimit = 1;
+
+	// optimize for learning rate
+	puts("Optimizing LR\n");
+
+	minLoss = 100.0;
+	real dl_dr = (real)0.1;
+	pnet->learning_rate = (real)0.01;
+	loss = ann_train_network(pnet, x_train, y_train, rows);
+
+	while (dl_dr > 1e-3)
+	{
+		loss -= ann_train_network(pnet, x_train, y_train, rows);
+//		dl_dr = loss / 
+
+		pnet->learning_rate -= dl_dr;
+	}
+
+	for (real lr = 0.001; lr < 1.1; lr += 0.0)
+	{
+		pnet->learning_rate = lr;
+
+		// train the network
+		loss = ann_train_network(pnet, x_train, y_train, rows);
+		if (loss < minLoss)
+		{
+			minLoss = loss;
+			opt_lr = lr;
+		}
+	}
+
+//	printf("Optimal LR was: %f\n", opt_lr);
+
+	// optimize for initial weights
+	puts("Optimizing weights\n");
+
+	minLoss = 100.0;
+	for (real w = 0.001; w < 1.1; w *= 10.0)
+	{
+		pnet->weight_limit = w;
+		pnet->learning_rate = opt_lr;
+
+		// train the network
+		loss = ann_train_network(pnet, x_train, y_train, rows);
+		if (loss < minLoss)
+		{
+			minLoss = loss;
+			opt_weights = w;
+		}
+	}
+
+	printf("Optimal LR was: %f\n", opt_lr);
+	printf("Optimal weight was: %f\n", opt_weights);
+
+}
+
+//------------------------------
 // main program start
 //------------------------------
 int main(int argc, char *argv[])
@@ -107,9 +171,11 @@ int main(int argc, char *argv[])
 	tensor_mul_scalar(x_test, (real)(1.0 / 255.0));
 
 	pnet->epochLimit = 5;
-//	pnet->convergence_epsilon = 0.016;
-//	pnet->learning_rate = 0.015;
+	pnet->convergence_epsilon = (real)1e-5;
+	//pnet->learning_rate = 0.05;
 	pnet->batchSize = 1;
+
+//	hypertune(pnet, x_train, y_train, x_train->rows / 20);
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows /20);

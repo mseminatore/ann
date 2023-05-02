@@ -143,7 +143,8 @@ static void softmax(PNetwork pnet)
 //-----------------------------------------------
 static void print_props(PNetwork pnet)
 {
-	ann_printf(pnet, "ANN\n---\n\n");
+	ann_printf(pnet,	"Training ANN\n"
+						"------------\n");
 	ann_printf(pnet, "Network shape: ");
 	for (int i = 0; i < pnet->layer_count; i++)
 	{
@@ -210,7 +211,7 @@ static void print_network(PNetwork pnet)
 //------------------------------
 static void init_weights(PNetwork pnet)
 {
-	if (!pnet || pnet->weights_set)
+	if (!pnet)
 		return;
 
 	for (int layer = 0; layer < pnet->layer_count; layer++)
@@ -222,15 +223,15 @@ static void init_weights(PNetwork pnet)
 		int weight_count	= pnet->layers[layer - 1].node_count;
 		int node_count		= pnet->layers[layer].node_count;
 
-		// real limit = (real)sqrt(6.0 / (weight_count + node_count));
+//		real limit = (real)sqrt(6.0 / (weight_count + node_count));
 //		real limit = (real)sqrt(1.0 / (weight_count));
 
 		for (int node = 0; node < node_count; node++)
 		{
 			for (int weight = 0; weight < weight_count; weight++)
 			{
-				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)R_MIN, (real)R_MAX);
-				// pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-limit, (real)limit);
+				pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-pnet->weight_limit , (real)pnet->weight_limit);
+				 //pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-limit, (real)limit);
 			}
 		}
 	}
@@ -550,7 +551,7 @@ static void optimize_sgd(PNetwork pnet)
 			for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
 			{
 				// update the weights by the change
-				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * pnet->layers[layer].nodes[node].gradients[prev_node] / pnet->batchSize;
+				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * pnet->layers[layer].nodes[node].gradients[prev_node];
 			}
 		}
 	}
@@ -576,7 +577,7 @@ static void optimize_momentum(PNetwork pnet)
 			for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
 			{
 				// update the weights by the change
-				m = beta * pnet->layers[layer].nodes[node].m[prev_node] + one_minus_beta * pnet->layers[layer].nodes[node].gradients[prev_node] / pnet->batchSize;
+				m = beta * pnet->layers[layer].nodes[node].m[prev_node] + one_minus_beta * pnet->layers[layer].nodes[node].gradients[prev_node];
 				pnet->layers[layer].nodes[node].m[prev_node] = m;
 				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * m;
 			}
@@ -613,10 +614,10 @@ static void optimize_rmsprop(PNetwork pnet)
 			for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
 			{
 				// update the weights by the change
-				gradient = pnet->layers[layer].nodes[node].gradients[prev_node] / pnet->batchSize;
+				gradient = pnet->layers[layer].nodes[node].gradients[prev_node];
 				v = beta * pnet->layers[layer].nodes[node].v[prev_node] + one_minus_beta * gradient * gradient;
 				pnet->layers[layer].nodes[node].v[prev_node] = v;
-				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * gradient / (real)sqrt(v + epsilon);
+				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * gradient / (real)(sqrt(v) + epsilon);
 			}
 		}
 	}
@@ -631,6 +632,8 @@ static void optimize_adam(PNetwork pnet)
 	real beta2 = (real)0.999, one_minus_beta2 = (real)0.001;
 	real epsilon = (real)1e-8;
 	real m, v, mhat, vhat, gradient;
+
+	pnet->train_iteration++;
 
 	real one_minus_beta1_t = (real)1.0 / (real)(1.0 - pow(beta1, pnet->train_iteration));
 	real one_minus_beta2_t = (real)1.0 / (real)(1.0 - pow(beta2, pnet->train_iteration));
@@ -647,7 +650,7 @@ static void optimize_adam(PNetwork pnet)
 			for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
 			{
 				// update the weights by the change
-				gradient = pnet->layers[layer].nodes[node].gradients[prev_node] / pnet->batchSize;
+				gradient = pnet->layers[layer].nodes[node].gradients[prev_node];
 				m = beta1 * pnet->layers[layer].nodes[node].m[prev_node] + one_minus_beta1 * gradient;
 				v = beta2 * pnet->layers[layer].nodes[node].v[prev_node] + one_minus_beta2 * gradient * gradient;
 				mhat = m * one_minus_beta1_t;
@@ -655,7 +658,7 @@ static void optimize_adam(PNetwork pnet)
 
 				pnet->layers[layer].nodes[node].m[prev_node] = m;
 				pnet->layers[layer].nodes[node].v[prev_node] = v;
-				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * mhat / (real)sqrt(vhat + epsilon);
+				pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * mhat / (real)(sqrt(vhat) + epsilon);
 			}
 		}
 	}
@@ -805,6 +808,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->convergence_epsilon = (real)DEFAULT_CONVERGENCE;
 	pnet->mseCounter	= 0;
 	pnet->dbg			= NULL;
+	pnet->weight_limit	= R_MAX;
 
 	for (int i = 0; i < pnet->layer_size; i++)
 	{
@@ -931,7 +935,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 
 	clock_t time_start = clock();
 
-	pnet->train_iteration = 1;
+	pnet->train_iteration = 0;
 
 	// initialize weights to random values if not already initialized
 	init_weights(pnet);
@@ -978,8 +982,6 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 				int node_count = pnet->layers[layer].node_count;
 				for (int node = 0; node < node_count; node++)
 				{
-					pnet->layers[layer].nodes[node].dl_dz = (real)0.0;
-
 					int prev_node_count = pnet->layers[layer - 1].node_count;
 					for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
 					{
@@ -1003,7 +1005,6 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 				{
 					putchar('=');
 				}
-			pnet->train_iteration++;
 			}
 
 			// average loss over batch-size
@@ -1012,14 +1013,11 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 			// update weights based on batched gradients
 			// using the chosen optimization function
 			pnet->optimize_func(pnet);
-			// pnet->train_iteration++;
 		}
-
-		// pnet->train_iteration++;
 
 		ann_printf(pnet, "] - loss: %3.2g - LR: %3.2g\n", loss, pnet->learning_rate);
 
-		// optimize learning
+		// optimize learning once per epoch
 		if (pnet->optimizer == OPT_SGD_WITH_DECAY || pnet->optimizer == OPT_MOMENTUM)
 			optimize_decay(pnet, loss);
 		else if (pnet->optimizer == OPT_ADAPT)

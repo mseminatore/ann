@@ -935,7 +935,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		return 0.0;
 
 	print_props(pnet);
-	ann_printf(pnet, "Training size: %u rows\n\n", rows);
+	ann_printf(pnet, "  Training size: %u rows\n\n", rows);
 
 	clock_t time_start = clock();
 

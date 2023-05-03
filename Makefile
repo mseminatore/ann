@@ -3,7 +3,7 @@ OBJS = ann.o tensor.o
 DEPS = ann.h tensor.h
 CFLAGS = -g -mavx -O3
 
-all: ann logic test5x7 pima
+all: ann logic test5x7 pima save_test
 
 $(TARGET):	$(OBJS) main.o
 	$(CC) $(CFLAGS) -o $@ $^
@@ -15,6 +15,9 @@ test5x7: $(OBJS) test5x7.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 pima: $(OBJS) pima.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+save_test: $(OBJS) save_test.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 %.o: %.c $(DEPS)

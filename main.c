@@ -172,12 +172,12 @@ int main(int argc, char *argv[])
 
 	pnet->epochLimit = 5;
 	pnet->convergence_epsilon = (real)1e-5;
-	pnet->batchSize = 1;
-
+	pnet->batchSize = 32;
+	pnet->learning_rate = 0.015;
 //	hypertune(pnet, x_train, y_train, x_train->rows / 20);
 
 	// train the network
-	ann_train_network(pnet, x_train, y_train, x_train->rows /20);
+	ann_train_network(pnet, x_train, y_train, x_train->rows);
 	
 	// evaluate the network against the test data
 	real acc = ann_evaluate(pnet, x_test, y_test);

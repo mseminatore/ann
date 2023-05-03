@@ -961,6 +961,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	size_t input_node_count = (pnet->layers[0].node_count - 1);
 	size_t output_node_count = (pnet->layers[pnet->layer_count - 1].node_count - 1);
 
+	// validation data
+	//PTensor x_valid = tensor_slice_rows(inputs, 50000);
+	//PTensor y_valid = tensor_slice_rows(outputs, 50000);
+
 	// tensors to hold input/output batches
 	PTensor input_batch		= tensor_create(pnet->batchSize, input_node_count);
 	PTensor output_batch	= tensor_create(pnet->batchSize, output_node_count);
@@ -1044,6 +1048,9 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	tensor_free(input_batch);
 	tensor_free(output_batch);
 
+	//tensor_free(x_valid);
+	//tensor_free(y_valid);
+
 	clock_t time_end = clock();
 	double diff_t = (time_end - time_start) / CLOCKS_PER_SEC;
 	double per_step = 1000.0 * diff_t / (rows * epoch);
@@ -1088,7 +1095,7 @@ real ann_evaluate(PNetwork pnet, PTensor inputs, PTensor outputs)
 int ann_class_prediction(real *outputs, int classes)
 {
 	int class = -1;
-	real prob = 0.0;
+	real prob = -1.0;
 
 	for (int i = 0; i < classes; i++)
 	{
@@ -1319,10 +1326,40 @@ int ann_save_network(PNetwork pnet, const char *filename)
 	if (!fptr)
 		return E_FAIL;
 
-	// TODO - save out network
-	// TODO - save network props
-	// TODO - save layer details
-	// TODO - save node weights
+	// save out network
+	// save optimizer
+	fprintf(fptr, "%d\n", pnet->optimizer);
+
+	// save loss
+	fprintf(fptr, "%d\n", pnet->loss_type);
+
+	// save network props
+	fprintf(fptr, "%d\n", pnet->layer_count);
+
+	// save layer details
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		// node count
+		fprintf(fptr, "%d\n", pnet->layers[layer].node_count - 1);
+
+		// layer type
+		fprintf(fptr, "%d\n", pnet->layers[layer].layer_type);
+
+		// activation type
+		fprintf(fptr, "%d\n", pnet->layers[layer].activation);
+
+		// save node weights
+		if (layer == 0)
+			continue;
+
+		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		{
+			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			{
+				fprintf(fptr, "%f\n", pnet->layers[layer].nodes[node].weights[prev_node]);
+			}
+		}
+	}
 
 	fclose(fptr);
 	return E_OK;
@@ -1333,15 +1370,43 @@ int ann_save_network(PNetwork pnet, const char *filename)
 //------------------------------
 PNetwork ann_load_network(const char *filename)
 {
-	PNetwork pnet = ann_make_network(OPT_SGD, LOSS_DEFAULT);
-
-	FILE *fptr = fopen(filename, "wt");
+	FILE *fptr = fopen(filename, "rt");
 	if (!fptr)
 		return NULL;
 
-	// TODO - load network props
-	// TODO - create layers
-	// TODO - set node weights
+	// load network
+	int optimizer, loss_type, layer_count, node_count, layer_type, activation;
+	fscanf(fptr, "%d", &optimizer);
+	fscanf(fptr, "%d", &loss_type);
+	fscanf(fptr, "%d", &layer_count);
+
+	PNetwork pnet = ann_make_network(optimizer, loss_type);
+	if (!pnet)
+		return NULL;
+
+	// create layers
+	for (int layer = 0; layer < layer_count; layer++)
+	{
+		fscanf(fptr, "%d", &node_count);
+		fscanf(fptr, "%d", &layer_type);
+		fscanf(fptr, "%d", &activation);
+
+		ann_add_layer(pnet, node_count, layer_type, activation);
+
+		// set node weights
+		if (layer == 0)
+			continue;
+
+		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		{
+			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			{
+				fscanf(fptr, "%f", &pnet->layers[layer].nodes[node].weights[prev_node]);
+			}
+		}
+	}
+
+	print_props(pnet);
 
 	fclose(fptr);
 	return pnet;

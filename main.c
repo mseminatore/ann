@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #include <time.h>
 #include "ann.h"
@@ -49,6 +50,45 @@ void print_ascii_art(real *data, int rows, int cols)
 		}
 		puts("");
 	}
+}
+
+//
+void class_histogram(PTensor outputs)
+{
+	int pred;
+
+	int classes = outputs->cols;
+	size_t *histo = alloca(classes * sizeof(size_t));
+	size_t sum = 0;
+
+	memset(histo, 0, classes * sizeof(size_t));
+
+	printf("\nClass Histogram\n");
+
+	for (size_t row = 0; row < outputs->rows; row++)
+	{
+		pred = ann_class_prediction(&outputs->values[row * classes], classes);
+		histo[pred]++;
+	}
+
+	for (int i = 0; i < classes; i++)
+		sum += histo[i];
+
+	for (int i = 0; i < classes; i++)
+		histo[i] = 40 * histo[i] / sum;
+
+	for (int i = 0; i < classes; i++)
+	{
+		printf("%3d|", i);
+		for (size_t j = 0; j < histo[i]; j++)
+			putchar('*');
+		puts("");
+	}
+
+	printf("   +");
+	for (int i = 0; i < 40; i++)
+		putchar('-');
+	puts("");
 }
 
 //------------------------------
@@ -170,18 +210,21 @@ int main(int argc, char *argv[])
 	tensor_mul_scalar(x_train, (real)(1.0 / 255.0));
 	tensor_mul_scalar(x_test, (real)(1.0 / 255.0));
 
-	pnet->epochLimit = 10;
+	pnet->epochLimit = 5;
 	pnet->convergence_epsilon = (real)1e-5;
 	pnet->batchSize = 64;
-	pnet->learning_rate = 0.015;
+	pnet->learning_rate = (real)0.015;
+
 //	hypertune(pnet, x_train, y_train, x_train->rows / 20);
 
 	// train the network
-	ann_train_network(pnet, x_train, y_train, x_train->rows);
+	ann_train_network(pnet, x_train, y_train, x_train->rows / 20);
 	
 	// evaluate the network against the test data
 	real acc = ann_evaluate(pnet, x_test, y_test);
 	printf("\nTest accuracy: %g%%\n", acc * 100);
+
+//	ann_save_network(pnet, "mnist-fashion.nn");
 
 	int i = 0;
 //	for (; i < 5; i++)
@@ -189,6 +232,12 @@ int main(int argc, char *argv[])
 
 	// free memory
 	ann_free_network(pnet);
+
+	//pnet = ann_load_network("mnist-fashion.nn");
+	//acc = ann_evaluate(pnet, x_test, y_test);
+	//printf("\nTest accuracy: %g%%\n", acc * 100);
+
+	//ann_free_network(pnet);
 
 	tensor_free(y_labels);
 	tensor_free(x_train);

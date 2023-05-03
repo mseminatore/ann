@@ -145,7 +145,7 @@ static void print_props(PNetwork pnet)
 {
 	ann_printf(pnet,	"Training ANN\n"
 						"------------\n");
-	ann_printf(pnet, "Network shape: ");
+	ann_printf(pnet, "  Network shape: ");
 	for (int i = 0; i < pnet->layer_count; i++)
 	{
 		if (i != 0)
@@ -154,9 +154,9 @@ static void print_props(PNetwork pnet)
 	}
 	puts("");
 
-	ann_printf(pnet, "Optimizer: %s\n", optimizers[pnet->optimizer]);
-	ann_printf(pnet, "Loss function: %s\n", loss_types[pnet->loss_type]);
-	ann_printf(pnet, "Batch size: %u\n", pnet->batchSize);
+	ann_printf(pnet, "      Optimizer: %s\n", optimizers[pnet->optimizer]);
+	ann_printf(pnet, "  Loss function: %s\n", loss_types[pnet->loss_type]);
+	ann_printf(pnet, "Mini-batch size: %u\n", pnet->batchSize);
 }
 
 //------------------------------

@@ -170,9 +170,9 @@ int main(int argc, char *argv[])
 	tensor_mul_scalar(x_train, (real)(1.0 / 255.0));
 	tensor_mul_scalar(x_test, (real)(1.0 / 255.0));
 
-	pnet->epochLimit = 5;
+	pnet->epochLimit = 10;
 	pnet->convergence_epsilon = (real)1e-5;
-	pnet->batchSize = 32;
+	pnet->batchSize = 64;
 	pnet->learning_rate = 0.015;
 //	hypertune(pnet, x_train, y_train, x_train->rows / 20);
 

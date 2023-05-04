@@ -213,7 +213,7 @@ int main(int argc, char *argv[])
 	pnet->epochLimit = 5;
 	pnet->convergence_epsilon = (real)1e-5;
 	pnet->batchSize = 64;
-	pnet->learning_rate = (real)0.015;
+//	pnet->learning_rate = (real)0.015;
 
 //	hypertune(pnet, x_train, y_train, x_train->rows / 20);
 
@@ -225,6 +225,7 @@ int main(int argc, char *argv[])
 	printf("\nTest accuracy: %g%%\n", acc * 100);
 
 //	ann_save_network(pnet, "mnist-fashion.nn");
+//	ann_save_network_binary(pnet, "mnist-fashion.bnn");
 
 	int i = 0;
 //	for (; i < 5; i++)
@@ -232,12 +233,6 @@ int main(int argc, char *argv[])
 
 	// free memory
 	ann_free_network(pnet);
-
-	//pnet = ann_load_network("mnist-fashion.nn");
-	//acc = ann_evaluate(pnet, x_test, y_test);
-	//printf("\nTest accuracy: %g%%\n", acc * 100);
-
-	//ann_free_network(pnet);
 
 	tensor_free(y_labels);
 	tensor_free(x_train);

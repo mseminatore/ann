@@ -171,6 +171,7 @@ void ann_free_network(PNetwork pnet);
 int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows, size_t *stride);
 PNetwork ann_load_network(const char *filename);
 int ann_save_network(PNetwork pnet, const char *filename);
+int ann_save_network_binary(PNetwork pnet, const char *filename);
 
 // training/evaluating
 real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t rows);

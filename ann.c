@@ -1314,8 +1314,66 @@ int ann_predict(PNetwork pnet, real *inputs, real *outputs)
 	return E_OK;
 }
 
+//-----------------------------------
+// save network to a binary file
+//-----------------------------------
+int ann_save_network_binary(PNetwork pnet, const char *filename)
+{
+	if (!pnet || !filename)
+		return E_FAIL;
+
+	FILE *fptr = fopen(filename, "wb");
+	if (!fptr)
+		return E_FAIL;
+
+	// save out network
+	// save optimizer
+	fwrite(&pnet->optimizer, sizeof(size_t), 1, fptr);
+
+	// save loss
+	fwrite(&pnet->loss_type, sizeof(size_t), 1, fptr);
+
+	// save network props
+	fwrite(&pnet->layer_count, sizeof(size_t), 1, fptr);
+
+	// save layer details
+	int val;
+	real w;
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		// node count
+		val = pnet->layers[layer].node_count - 1;
+		fwrite(&val, sizeof(val), 1, fptr);
+
+		// layer type
+		val = pnet->layers[layer].layer_type;
+		fwrite(&val, sizeof(val), 1, fptr);
+
+		// activation type
+		val = pnet->layers[layer].activation;
+		fwrite(&val, sizeof(val), 1, fptr);
+
+		// input node has no weights vector
+		if (layer == 0)
+			continue;
+
+		// save node weights
+		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		{
+			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
+			{
+				w = pnet->layers[layer].nodes[node].weights[prev_node];
+				fwrite(&w, sizeof(w), 1, fptr);
+			}
+		}
+	}
+
+	fclose(fptr);
+	return E_OK;
+}
+
 //------------------------------
-// save out a network
+// save network to a text file
 //------------------------------
 int ann_save_network(PNetwork pnet, const char *filename)
 {

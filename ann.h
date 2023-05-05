@@ -180,9 +180,10 @@ int ann_predict(PNetwork pnet, real *inputs, real *outputs);
 int ann_class_prediction(real *outputs, int classes);
 real ann_evaluate(PNetwork pnet, PTensor inputs, PTensor outputs);
 
-// get/set network properties
+// get/set/show network properties
 void ann_set_learning_rate(PNetwork pnet, real rate);
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
+void ann_print_props(PNetwork pnet);
 
 // debugging functions
 // void print_network(PNetwork pnet);

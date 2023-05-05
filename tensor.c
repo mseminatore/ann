@@ -1,8 +1,12 @@
 #include <assert.h>
 #include <stdio.h>
 #include <math.h>
+#include "config.h"
+
+#if defined(USE_BLAS)
 #include <cblas.h>
 //#include "mkl.h"
+#endif
 
 #if defined(_WIN32) || defined(__x86_64__)
 #	include <immintrin.h>

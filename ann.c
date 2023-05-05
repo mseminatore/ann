@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <assert.h>
 #include <time.h>
+#include "config.h"
 #include "ann.h"
 
 #if defined(_WIN32) && !defined(_WIN64)
@@ -136,25 +137,6 @@ static void softmax(PNetwork pnet)
 	{
 		pNode[node].value = (real)(exp(pNode[node].value) / sum);
 	}
-}
-
-//-----------------------------------------------
-//
-//-----------------------------------------------
-static void print_props(PNetwork pnet)
-{
-	ann_printf(pnet, "  Network shape: ");
-	for (int i = 0; i < pnet->layer_count; i++)
-	{
-		if (i != 0)
-			ann_printf(pnet, "-");
-		ann_printf(pnet, "%d", pnet->layers[i].node_count - 1);
-	}
-	ann_printf(pnet, "\n");
-
-	ann_printf(pnet, "      Optimizer: %s\n", optimizers[pnet->optimizer]);
-	ann_printf(pnet, "  Loss function: %s\n", loss_types[pnet->loss_type]);
-	ann_printf(pnet, "Mini-batch size: %u\n", pnet->batchSize);
 }
 
 //------------------------------
@@ -934,7 +916,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 
 	ann_printf(pnet,	"Training ANN\n"
 						"------------\n");
-	print_props(pnet);
+	ann_print_props(pnet);
 	ann_printf(pnet, "  Training size: %u rows\n\n", rows);
 
 	clock_t time_start = clock();
@@ -1464,8 +1446,25 @@ PNetwork ann_load_network(const char *filename)
 		}
 	}
 
-	print_props(pnet);
-
 	fclose(fptr);
 	return pnet;
+}
+
+//-----------------------------------------------
+// display the network properties
+//-----------------------------------------------
+void ann_print_props(PNetwork pnet)
+{
+	ann_printf(pnet, "  Network shape: ");
+	for (int i = 0; i < pnet->layer_count; i++)
+	{
+		if (i != 0)
+			ann_printf(pnet, "-");
+		ann_printf(pnet, "%d", pnet->layers[i].node_count - 1);
+	}
+	ann_printf(pnet, "\n");
+
+	ann_printf(pnet, "      Optimizer: %s\n", optimizers[pnet->optimizer]);
+	ann_printf(pnet, "  Loss function: %s\n", loss_types[pnet->loss_type]);
+	ann_printf(pnet, "Mini-batch size: %u\n", pnet->batchSize);
 }

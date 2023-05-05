@@ -191,7 +191,10 @@ int main(int argc, char *argv[])
 		ann_load_csv("fashion-mnist_train.csv", CSV_HAS_HEADER, &data, &rows, &stride);
 
 	// load the test data
-	ann_load_csv("fashion-mnist_test.csv", CSV_HAS_HEADER, &test_data, &test_rows, &test_stride);
+	if (argc > 2)
+		ann_load_csv(argv[2], CSV_HAS_HEADER, &test_data, &test_rows, &test_stride);
+	else
+		ann_load_csv("fashion-mnist_test.csv", CSV_HAS_HEADER, &test_data, &test_rows, &test_stride);
 
 	// convert outputs to onehot code
 	PTensor y_labels = tensor_create_from_array(rows, stride, data);
@@ -212,7 +215,7 @@ int main(int argc, char *argv[])
 
 	pnet->epochLimit = 5;
 	pnet->convergence_epsilon = (real)1e-5;
-	pnet->batchSize = 64;
+	pnet->batchSize = 32;
 //	pnet->learning_rate = (real)0.015;
 
 //	hypertune(pnet, x_train, y_train, x_train->rows / 20);

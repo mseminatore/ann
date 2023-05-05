@@ -1424,6 +1424,8 @@ PNetwork ann_load_network(const char *filename)
 	if (!pnet)
 		return NULL;
 
+	ann_printf(pnet, "loading network %s...", filename);
+
 	// create layers
 	for (int layer = 0; layer < layer_count; layer++)
 	{
@@ -1445,6 +1447,8 @@ PNetwork ann_load_network(const char *filename)
 			}
 		}
 	}
+
+	ann_printf(pnet, "done.\n");
 
 	fclose(fptr);
 	return pnet;

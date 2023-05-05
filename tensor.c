@@ -364,7 +364,7 @@ PTensor tensor_mul_scalar(PTensor t, FLOAT val)
 #endif
 
 	for (; i < limit; i++)
-		t->values[i] += val;
+		t->values[i] *= val;
 
 	return t;
 
@@ -605,9 +605,9 @@ PTensor tensor_exp(PTensor t)
 	return t;
 }
 
-//-------------------------------
+//--------------------------------------
 // return tensor containing argmax of t
-//-------------------------------
+//--------------------------------------
 PTensor tensor_argmax(PTensor t)
 {
 	return NULL;

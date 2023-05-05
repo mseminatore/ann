@@ -8,6 +8,7 @@ include_directories(${PROJECT_SOURCE_DIR})
 
 # add the library
 add_library(libann STATIC ann.c tensor.c)
+target_link_libraries(ann libann openblas)
 
 # add the executables
 add_executable(ann main.c)

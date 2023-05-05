@@ -1,6 +1,8 @@
 #include <assert.h>
 #include <stdio.h>
 #include <math.h>
+#include <cblas.h>
+//#include "mkl.h"
 
 #if defined(_WIN32) || defined(__x86_64__)
 #	include <immintrin.h>
@@ -32,8 +34,10 @@
 //------------------------------
 // aligned alloc where needed
 //------------------------------
-void *tmalloc(size_t size)
+static void *tmalloc(size_t size)
 {
+//	return mkl_malloc(size, TENSOR_ALIGN);
+
 	#if defined(_WIN32) && !defined(_WIN64)
 		return _aligned_malloc(size, TENSOR_ALIGN);
 	#else
@@ -44,7 +48,7 @@ void *tmalloc(size_t size)
 //------------------------------
 // aligned free where needed
 //------------------------------
-void tfree(void *block)
+static void tfree(void *block)
 {
 	#if defined(_WIN32) && !defined(_WIN64)
 		_aligned_free(block);
@@ -56,7 +60,7 @@ void tfree(void *block)
 //------------------------------
 // aligned realloc where needed
 //------------------------------
-void* trealloc(void *block, size_t size)
+static void *trealloc(void *block, size_t size)
 {
 	#if defined(_WIN32) && !defined(_WIN64)
 		return _aligned_realloc(block, size, TENSOR_ALIGN);

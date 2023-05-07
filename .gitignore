@@ -69,3 +69,5 @@ pima
 save_test
 mnist-fashion.bnn
 .vscode
+blas_test
+build/

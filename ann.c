@@ -219,6 +219,7 @@ static void init_weights(PNetwork pnet)
 				// else
 					pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-pnet->weight_limit , (real)pnet->weight_limit);
 				 //pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-limit, (real)limit);
+					printf("%3.2f ", pnet->layers[layer].nodes[node].weights[weight]);
 			}
 		}
 	}
@@ -239,12 +240,12 @@ void print_outputs(PNetwork pnet)
 	putchar('[');
 
 	PLayer pLayer = &pnet->layers[0];
-	for (int node = 1; node < pLayer->node_count; node++)
-	{
-		ann_printf(pnet, "%3.2g, ", pLayer->nodes[node].value);
-	}
+	//for (int node = 1; node < pLayer->node_count; node++)
+	//{
+	//	ann_printf(pnet, "%3.2g, ", pLayer->nodes[node].value);
+	//}
 
-	puts("]");
+	//puts("]");
 
 	putchar('[');
 
@@ -334,6 +335,8 @@ static void eval_network(PNetwork pnet)
 	// apply softmax on output, if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
+
+	print_outputs(pnet);
 }
 
 //-------------------------------------------

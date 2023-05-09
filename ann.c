@@ -219,7 +219,6 @@ static void init_weights(PNetwork pnet)
 				// else
 					pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-pnet->weight_limit , (real)pnet->weight_limit);
 				 //pnet->layers[layer].nodes[node].weights[weight] = get_rand((real)-limit, (real)limit);
-					printf("%3.2f ", pnet->layers[layer].nodes[node].weights[weight]);
 			}
 		}
 	}

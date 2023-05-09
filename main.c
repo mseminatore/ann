@@ -4,6 +4,7 @@
 #include <math.h>
 #include <time.h>
 #include "ann.h"
+#include <cblas.h>
 
 //------------------------------
 //
@@ -117,7 +118,7 @@ void hypertune(PNetwork pnet, PTensor x_train, PTensor y_train, size_t rows)
 		pnet->learning_rate -= dl_dr;
 	}
 
-	for (real lr = 0.001; lr < 1.1; lr += 0.0)
+	for (real lr = (real)0.001; lr < 1.1; lr += 0.0)
 	{
 		pnet->learning_rate = lr;
 
@@ -136,7 +137,7 @@ void hypertune(PNetwork pnet, PTensor x_train, PTensor y_train, size_t rows)
 	puts("Optimizing weights\n");
 
 	minLoss = 100.0;
-	for (real w = 0.001; w < 1.1; w *= 10.0)
+	for (real w = (real)0.001; w < 1.1; w *= 10.0)
 	{
 		pnet->weight_limit = w;
 		pnet->learning_rate = opt_lr;
@@ -173,6 +174,8 @@ int main(int argc, char *argv[])
 		"Bag",
 		"Ankle boot"
 	};
+
+	printf("%s\n", openblas_get_config());
 
 	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_CATEGORICAL_CROSS_ENTROPY);
 
@@ -215,7 +218,7 @@ int main(int argc, char *argv[])
 
 	pnet->epochLimit = 5;
 	pnet->convergence_epsilon = (real)1e-5;
-	pnet->batchSize = 32;
+	pnet->batchSize = 1;
 //	pnet->learning_rate = (real)0.015;
 
 //	hypertune(pnet, x_train, y_train, x_train->rows / 20);

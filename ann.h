@@ -32,13 +32,8 @@
 //------------------------------
 // Error values
 //------------------------------
-#define E_FAIL -1
-#define E_OK 0
-
-//------------------------------
-// Note: change to float if desired
-//------------------------------
-typedef FLOAT real;
+#define ERR_FAIL -1
+#define ERR_OK 0
 
 //------------------------------
 // Defines a node
@@ -98,6 +93,15 @@ typedef enum {
 	OPT_DEFAULT = OPT_SGD
 } Optimizer_type;
 
+
+// forward decls
+typedef struct Network Network;
+typedef struct Network *PNetwork;
+
+// function pointers for Network
+typedef real(*Loss_func) (PNetwork pnet, PTensor outputs);
+typedef void(*Output_func) (const char *);
+typedef void(*Optimization_func) (PNetwork pnet);
 typedef real(*Activation_func) (real);
 
 //------------------------------
@@ -105,30 +109,21 @@ typedef real(*Activation_func) (real);
 //------------------------------
 typedef struct
 {
-	int node_count;					// number of nodes in layer
-	PNode nodes;					// array of nodes
+	int node_count;						// number of nodes in layer
+//	PNode nodes;						// array of nodes
 
-	Layer_type layer_type;			// type of this layer
-	Activation_type activation;		// type of activation, none, sigmoid, Relu
-	Activation_func activation_func;
+	Layer_type layer_type;				// type of this layer
+	Activation_type activation;			// type of activation, none, sigmoid, Relu
+	Activation_func activation_func;	// node activation function
 
 	// migration to tensor code path
-	PTensor t_values;
-	PTensor t_weights;
-	PTensor t_v;
-	PTensor t_m;
-//	PTensor t_dw;
-	PTensor t_gradients;
+	PTensor t_values;				// tensor of node values for the layer
+	PTensor t_weights;				// tensor of weights for the layer
+	PTensor t_v;					// tensor of velocities for optimizer
+	PTensor t_m;					// tensor of momentums for optimizer
+	PTensor t_gradients;			// tensor of gradients for back propagation
+	PTensor t_dl_dz;				// tensor of dL_dz
 } Layer, *PLayer;
-
-// forward decls
-typedef struct Network Network;
-typedef struct Network *PNetwork;
-
-// function pointers for Network
-typedef real (*Loss_func) (PNetwork pnet, real *outputs);
-typedef void (*Output_func) (const char *);
-typedef void (*Optimization_func) (PNetwork pnet);
 
 //------------------------------
 // Defines a network
@@ -143,6 +138,8 @@ struct Network
 	int layer_size;						// number of layers allocated
 	int weights_set;					// have the weights been initialized?
 	unsigned batchSize;					// size of mini-batches
+
+	PTensor t_out_diff;
 
 	real convergence_epsilon;			// threshold for convergence
 	real weight_limit;					// range limit for initial weights

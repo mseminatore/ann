@@ -291,8 +291,11 @@ static void eval_network(PNetwork pnet)
 		for (int i = 1; i < pnet->layers[layer + 1].node_count; i++)
 		{
 			pnet->layers[layer + 1].t_values->values[i] = pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values->values[i]);
-			printf("%3.2f ", pnet->layers[layer + 1].t_weights->values[i]);
+			//printf("%3.2f ", pnet->layers[layer + 1].t_values->values[i]);
 		}
+
+		// ensure bias node is always 1
+		pnet->layers[layer + 1].t_values->values[0] = 1.0;
 	}
 
 #if 0
@@ -317,11 +320,11 @@ static void eval_network(PNetwork pnet)
 	}
 #endif
 
+	print_outputs(pnet);
+
 	// apply softmax on output, if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
-
-	print_outputs(pnet);
 }
 
 //-------------------------------------------

@@ -287,11 +287,12 @@ static void eval_network(PNetwork pnet)
 		// y = W x
 		tensor_dot(pnet->layers[layer].t_weights, pnet->layers[layer].t_values, pnet->layers[layer + 1].t_values);
 
+		// apply activation function to values
 		for (int i = 1; i < pnet->layers[layer + 1].node_count; i++)
+		{
 			pnet->layers[layer + 1].t_values->values[i] = pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values->values[i]);
-
-		// TODO - apply activation function to values
-//		pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values);
+			printf("%3.2f ", pnet->layers[layer + 1].t_weights->values[i]);
+		}
 	}
 
 #if 0

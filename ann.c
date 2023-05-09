@@ -225,7 +225,7 @@ void print_outputs(PNetwork pnet)
 	putchar('[');
 
 	PLayer pLayer = &pnet->layers[0];
-	tensor_print(pLayer->t_values);
+	//tensor_print(pLayer->t_values);
 
 	// print nodes in the output layer
 	pLayer = &pnet->layers[pnet->layer_count - 1];
@@ -287,6 +287,9 @@ static void eval_network(PNetwork pnet)
 		// y = W x
 		tensor_dot(pnet->layers[layer].t_weights, pnet->layers[layer].t_values, pnet->layers[layer + 1].t_values);
 
+		for (int i = 1; i < pnet->layers[layer + 1].node_count; i++)
+			pnet->layers[layer + 1].t_values->values[i] = pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values->values[i]);
+
 		// TODO - apply activation function to values
 //		pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values);
 	}
@@ -316,6 +319,8 @@ static void eval_network(PNetwork pnet)
 	// apply softmax on output, if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
+
+	print_outputs(pnet);
 }
 
 //-------------------------------------------

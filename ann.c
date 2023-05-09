@@ -331,11 +331,11 @@ static void eval_network(PNetwork pnet)
 		}
 	}
 
+	print_outputs(pnet);
+
 	// apply softmax on output, if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
-
-	print_outputs(pnet);
 }
 
 //-------------------------------------------

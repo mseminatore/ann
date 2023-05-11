@@ -139,8 +139,6 @@ struct Network
 	int weights_set;					// have the weights been initialized?
 	unsigned batchSize;					// size of mini-batches
 
-	PTensor t_out_diff;
-
 	real convergence_epsilon;			// threshold for convergence
 	real weight_limit;					// range limit for initial weights
 	real init_bias;						// initial bias node values

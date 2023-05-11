@@ -126,16 +126,25 @@ static real softsign(real x)
 static void softmax(PNetwork pnet)
 {
 	real one_over_sum = 0.0;
+	real sum = 0.0;
 
 	// find the sum of the output node values, excluding the bias node
 	int output_layer = pnet->layer_count - 1;
 	int node_count = pnet->layers[output_layer].node_count;
 	
-	tensor_exp(pnet->layers[output_layer].t_values);
+	//tensor_exp(pnet->layers[output_layer].t_values);
+	//one_over_sum = (real)1.0 / (tensor_sum(pnet->layers[output_layer].t_values) - 1.0);
+	//tensor_mul_scalar(pnet->layers[output_layer].t_values, one_over_sum);
 
-	one_over_sum = (real)1.0 / tensor_sum(pnet->layers[output_layer].t_values);
+	for (int node = 1; node < node_count; node++)
+	{
+		sum += (real)exp(pnet->layers[output_layer].t_values->values[node]);
+	}
 
-	tensor_mul_scalar(pnet->layers[output_layer].t_values, one_over_sum);
+	for (int node = 1; node < node_count; node++)
+	{
+		pnet->layers[output_layer].t_values->values[node] = (real)(exp(pnet->layers[output_layer].t_values->values[node]) / sum);
+	}
 }
 
 //------------------------------
@@ -294,37 +303,20 @@ static void eval_network(PNetwork pnet)
 			//printf("%3.2f ", pnet->layers[layer + 1].t_values->values[i]);
 		}
 
-		// ensure bias node is always 1
-		pnet->layers[layer + 1].t_values->values[0] = 1.0;
+		// ensure bias node is always 1 for non-output layers
+		if (pnet->layers[layer + 1].layer_type == LAYER_OUTPUT)
+			pnet->layers[layer + 1].t_values->values[0] = 0.0;
+		else
+			pnet->layers[layer + 1].t_values->values[0] = 1.0;
 	}
 
-#if 0
-	// loop over the non-input layers
-	for (int layer = 1; layer < pnet->layer_count; layer++)
-	{
-		// loop over each node in the layer, skipping the bias node
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
-		{
-			real sum = 0.0;
-
-			// loop over nodes in previous layer, including the bias node
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-			{
-				// accumulate sum of prev nodes value times this nodes weight for that value
-				sum += pnet->layers[layer - 1].nodes[prev_node].value * pnet->layers[layer].nodes[node].weights[prev_node];
-			}
-
-			// update the nodes final value, using the correct activation function
-			pnet->layers[layer].nodes[node].value = pnet->layers[layer].activation_func(sum);
-		}
-	}
-#endif
-
-	print_outputs(pnet);
+//	print_outputs(pnet);
 
 	// apply softmax on output, if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
+
+//	print_outputs(pnet);
 }
 
 //-------------------------------------------
@@ -342,19 +334,20 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	//-------------------------------
 	// output layer back-propagation
 	//-------------------------------
+	PLayer pLayer = &pnet->layers[output_layer];
 
 	// compute -y
-	tensor_mul_scalar(pnet->layers[output_layer].t_values, -1.0);
+	tensor_mul_scalar(pLayer->t_values, -1.0);
 
 	// compute dL_dy = (r - y)
-	tensor_axpy(1.0, outputs, pnet->layers[output_layer].t_values);
+	tensor_axpy(1.0, outputs, pLayer->t_values);
 
 	// gradient = dL_dy * z
 	// TODO - accumulate gradients here for batches
-	tensor_dot(pnet->layers[output_layer].t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
+	tensor_dot(pLayer->t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
 
 	// dL_dz = dL_dy * weights
-	tensor_dot(pnet->layers[output_layer].t_values, pnet->layers[output_layer - 1].t_weights, pnet->layers[output_layer - 1].t_dl_dz);
+	tensor_dot(pLayer->t_values, pnet->layers[output_layer - 1].t_weights, pnet->layers[output_layer - 1].t_dl_dz);
 
 	//-------------------------------
 	// output layer back-propagation
@@ -738,14 +731,19 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	// allocate the nodes
 	//--------------------
 
-	// add an extra for bias node
-	node_count++;
+	// add an extra for bias node for non-output layers
+//	if (layer_type != LAYER_OUTPUT)
+		node_count++;
 
 	// create the node values tensor
 	PTensor t = tensor_zeros(1, node_count);
 
 	// set the bias node value to 1
-	tensor_set_element(t, 0, 0, 1.0);
+	if (layer_type != LAYER_OUTPUT)
+	{
+		tensor_set_element(t, 0, 0, 1.0);
+	}
+
 	pnet->layers[cur_layer].t_values = t;
 
 	pnet->layers[cur_layer].node_count	= node_count;
@@ -758,14 +756,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		pnet->layers[cur_layer - 1].t_v			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 		pnet->layers[cur_layer - 1].t_m			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 		pnet->layers[cur_layer - 1].t_gradients = tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-		pnet->layers[cur_layer - 1].t_dl_dz = tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-	}
-
-	// create output node scratch tensor
-	if (pnet->layers[cur_layer].layer_type == LAYER_OUTPUT)
-	{
-		assert(NULL == pnet->t_out_diff);
-		pnet->t_out_diff = tensor_zeros(1, node_count);
+		pnet->layers[cur_layer - 1].t_dl_dz		= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 	}
 
 	// create the nodes
@@ -829,7 +820,6 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->dbg			= NULL;
 	pnet->weight_limit	= R_MAX;
 	pnet->init_bias		= (real)1.0;
-	pnet->t_out_diff	= NULL;
 
 	for (int i = 0; i < pnet->layer_size; i++)
 	{
@@ -1203,7 +1193,6 @@ void ann_free_network(PNetwork pnet)
 	}
 
 	free(pnet->layers);
-	tensor_free(pnet->t_out_diff);
 
 	// free network
 	free(pnet);

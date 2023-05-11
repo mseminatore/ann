@@ -72,7 +72,7 @@ static void *trealloc(void *block, size_t size)
 //------------------------------
 // create a new tensor
 //
-// Note: tensors are COL major
+// Note: tensors are ROW major
 //------------------------------
 PTensor tensor_create(size_t rows, size_t cols)
 {
@@ -249,6 +249,11 @@ PTensor tensor_axpy(real a, PTensor x, PTensor y)
 	}
 
 	size_t limit = x->rows * x->cols;
+
+//#ifdef USE_BLAS
+//	cblas_saxpy(limit, a, x->values, 1, y->values, 1);
+//#else
+
 	size_t i = 0;
 
 	if (a == 1.0)
@@ -261,6 +266,7 @@ PTensor tensor_axpy(real a, PTensor x, PTensor y)
 		for (; i < limit; i++)
 			y->values[i] += a * x->values[i];
 	}
+//#endif
 
 	return y;
 }
@@ -640,6 +646,10 @@ PTensor tensor_dot(PTensor a, PTensor b, PTensor dest)
 		return NULL;
 	}
 
+#ifdef USE_BLAS
+	cblas_sgemv(CblasRowMajor, CblasNoTrans, a->rows, a->cols, 1.0, a->values, a->cols, b->values, 1, 0.0, dest->values, 1);
+#else
+
 	real sum;
 	for (size_t a_row = 0; a_row < a->rows; a_row++)
 	{
@@ -655,6 +665,7 @@ PTensor tensor_dot(PTensor a, PTensor b, PTensor dest)
 			dest->values[b_row * b->cols + a_row] = sum;
 		}
 	}
+#endif
 
 	return dest;
 }
@@ -686,7 +697,7 @@ void tensor_print(PTensor t)
 			if (col != 0)
 				putchar(',');
 
-			printf(" %g", *v++);
+			printf(" %3.2g", *v++);
 		}
 
 		putchar(']');

@@ -326,10 +326,6 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 {
 	// for each node in the output layer, excluding output layer bias node
 	int output_layer = pnet->layer_count - 1;
-//	real x, z, r, y, dl_dy, dl_dz;
-//	real gradient;
-//	real dl_dz_zomz;
-//	PNode pnode;
 
 	//-------------------------------
 	// output layer back-propagation
@@ -342,8 +338,8 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	// compute dL_dy = (r - y)
 	tensor_axpy(1.0, outputs, pLayer->t_values);
 
-	// gradient = dL_dy * z
 	// TODO - accumulate gradients here for batches
+	// gradient = dL_dy * z
 	tensor_dot(pLayer->t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
 
 	// dL_dz = dL_dy * weights

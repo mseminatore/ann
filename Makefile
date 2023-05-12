@@ -16,16 +16,16 @@ $(TARGET):	$(OBJS) main.o
 	$(CC) $(LFLAGS) -o $@ $^
 
 logic: $(OBJS) logic.o
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(LFLAGS) -o $@ $^
 
 test5x7: $(OBJS) test5x7.o
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(LFLAGS) -o $@ $^
 
 pima: $(OBJS) pima.o
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(LFLAGS) -o $@ $^
 
 save_test: $(OBJS) save_test.o
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(LFLAGS) -o $@ $^
 
 blas_test: blas_test.o
 	$(CC) $(LFLAGS) -o $@ $^

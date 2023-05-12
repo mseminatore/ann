@@ -136,12 +136,12 @@ static void softmax(PNetwork pnet)
 	//one_over_sum = (real)1.0 / (tensor_sum(pnet->layers[output_layer].t_values) - 1.0);
 	//tensor_mul_scalar(pnet->layers[output_layer].t_values, one_over_sum);
 
-	for (int node = 1; node < node_count; node++)
+	for (int node = 0; node < node_count; node++)
 	{
 		sum += (real)exp(pnet->layers[output_layer].t_values->values[node]);
 	}
 
-	for (int node = 1; node < node_count; node++)
+	for (int node = 0; node < node_count; node++)
 	{
 		pnet->layers[output_layer].t_values->values[node] = (real)(exp(pnet->layers[output_layer].t_values->values[node]) / sum);
 	}
@@ -177,7 +177,7 @@ static void print_network(PNetwork pnet)
 		putchar('[');
 
 		// print nodes in the layer
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		for (int node = 0; node < pnet->layers[layer].node_count; node++)
 		{
 //			ann_printf(pnet, "(%3.2g, ", pnet->layers[layer].nodes[node].value);
 
@@ -208,13 +208,13 @@ static void init_weights(PNetwork pnet)
 		//if (pnet->layers[layer].layer_type == LAYER_OUTPUT)
 		//	continue;
 
-		int weight_count	= pnet->layers[layer - 1].node_count;
-		int node_count		= pnet->layers[layer].node_count;
+		// int weight_count	= pnet->layers[layer - 1].node_count;
+		// int node_count		= pnet->layers[layer].node_count;
 
 		// TODO - glorot uniform limits
 		//		real limit = (real)sqrt(6.0 / (weight_count + node_count));
 		//		real limit = (real)sqrt(1.0 / (weight_count));
-
+		tensor_random_uniform(pnet->layers[layer - 1].t_bias, (real)-pnet->weight_limit, (real)pnet->weight_limit);
 		tensor_random_uniform(pnet->layers[layer - 1].t_weights, (real)-pnet->weight_limit, (real)pnet->weight_limit);
 	}
 
@@ -253,9 +253,9 @@ static real compute_ms_error(PNetwork pnet, PTensor outputs)
 
 	real mse = (real)0.0, diff;
 
-	for (int i = 1; i < poutput_layer->node_count; i++)
+	for (int i = 0; i < poutput_layer->node_count; i++)
 	{
-		diff = outputs->values[i - 1] - poutput_layer->t_values->values[i];
+		diff = outputs->values[i] - poutput_layer->t_values->values[i];
 		mse += diff * diff;
 	}
 
@@ -272,11 +272,11 @@ static real compute_cross_entropy(PNetwork pnet, PTensor outputs)
 
 	assert(poutput_layer->layer_type == LAYER_OUTPUT);
 
-	real xe = 0.0;
+	real xe = (real)0.0;
 
-	for (int i = 1; i < poutput_layer->node_count; i++)
+	for (int i = 0; i < poutput_layer->node_count; i++)
 	{
-		xe += (real)(outputs->values[i - 1] * log(poutput_layer->t_values->values[i]));
+		xe += (real)(outputs->values[i] * log(poutput_layer->t_values->values[i]));
 	}
 
 	return -xe;
@@ -295,19 +295,20 @@ static void eval_network(PNetwork pnet)
 	{
 		// y = W x
 		tensor_dot(pnet->layers[layer].t_weights, pnet->layers[layer].t_values, pnet->layers[layer + 1].t_values);
+		tensor_add(pnet->layers[layer + 1].t_values, pnet->layers[layer].t_bias);
 
 		// apply activation function to values
-		for (int i = 1; i < pnet->layers[layer + 1].node_count; i++)
+		for (int i = 0; i < pnet->layers[layer + 1].node_count; i++)
 		{
 			pnet->layers[layer + 1].t_values->values[i] = pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values->values[i]);
 			//printf("%3.2f ", pnet->layers[layer + 1].t_values->values[i]);
 		}
 
 		// ensure bias node is always 1 for non-output layers
-		if (pnet->layers[layer + 1].layer_type == LAYER_OUTPUT)
-			pnet->layers[layer + 1].t_values->values[0] = 0.0;
-		else
-			pnet->layers[layer + 1].t_values->values[0] = 1.0;
+		// if (pnet->layers[layer + 1].layer_type == LAYER_OUTPUT)
+		// 	pnet->layers[layer + 1].t_values->values[0] = 0.0;
+		// else
+		// 	pnet->layers[layer + 1].t_values->values[0] = 1.0;
 	}
 
 //	print_outputs(pnet);
@@ -429,12 +430,12 @@ static real train_pass_network(PNetwork pnet, PTensor inputs, PTensor outputs)
 	assert(pnet->layers[0].layer_type == LAYER_INPUT);
 	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
 
-	// set the input values on the network, skipping the bias node
+	// set the input values on the network
 	int node_count = pnet->layers[0].node_count;
 	PLayer pLayer = &pnet->layers[0];
-	for (int node = 1; node < node_count; node++)
+	for (int node = 0; node < node_count; node++)
 	{
-		pLayer->t_values->values[node] = inputs->values[node - 1];
+		pLayer->t_values->values[node] = inputs->values[node];
 	}
 
 #if TENSOR_PATH
@@ -535,7 +536,10 @@ static void optimize_sgd(PNetwork pnet)
 {
 	for (int layer = 0; layer < pnet->layer_count; layer++)
 	{
+		// W = W + n * gradients
 		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_gradients, pnet->layers[layer].t_weights);
+
+		// TODO - update bias vector here?
 	}
 
 	// for each layer after input
@@ -727,21 +731,8 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	// allocate the nodes
 	//--------------------
 
-	// add an extra for bias node for non-output layers
-//	if (layer_type != LAYER_OUTPUT)
-		node_count++;
-
 	// create the node values tensor
-	PTensor t = tensor_zeros(1, node_count);
-
-	// set the bias node value to 1
-	if (layer_type != LAYER_OUTPUT)
-	{
-		tensor_set_element(t, 0, 0, 1.0);
-	}
-
-	pnet->layers[cur_layer].t_values = t;
-
+	pnet->layers[cur_layer].t_values 	= tensor_zeros(1, node_count);
 	pnet->layers[cur_layer].node_count	= node_count;
 
 	// create the tensors
@@ -753,45 +744,8 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		pnet->layers[cur_layer - 1].t_m			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 		pnet->layers[cur_layer - 1].t_gradients = tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 		pnet->layers[cur_layer - 1].t_dl_dz		= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
+		pnet->layers[cur_layer - 1].t_bias		= tensor_zeros(1, node_count);
 	}
-
-	// create the nodes
-	//PNode new_nodes = malloc(node_count * sizeof(Node));
-	//if (NULL == new_nodes)
-	//	return ERR_FAIL;
-
-	//pnet->layers[cur_layer].nodes		= new_nodes;
-	//
-	//// bias node values are always 1
-	//pnet->layers[cur_layer].nodes[0].value = 1.0;
-
-	//// init the rest of the nodes
-	//for (int i = 1; i < node_count; i++)
-	//{
-	//	pnet->layers[cur_layer].nodes[i].value = 0.0;
-	//}
-
-	//// get node count from previous layer
-	//if (pnet->layer_count > 1)
-	//{
-	//	int node_weights = pnet->layers[cur_layer - 1].node_count;
-
-	//	// allocate array of weights for every node in the current layer
-	//	for (int i = 0; i < node_count; i++)
-	//	{
-	//		pnet->layers[cur_layer].nodes[i].weights	= malloc(node_weights * sizeof(real));
-	//		pnet->layers[cur_layer].nodes[i].m			= malloc(node_weights * sizeof(real));
-	//		pnet->layers[cur_layer].nodes[i].v			= malloc(node_weights * sizeof(real));
-	//		pnet->layers[cur_layer].nodes[i].gradients	= malloc(node_weights * sizeof(real));
-
-	//		for (int j = 0; j < node_weights; j++)
-	//		{
-	//			pnet->layers[cur_layer].nodes[i].m[j] = (real)0.0;
-	//			pnet->layers[cur_layer].nodes[i].v[j] = (real)0.0;
-	//			pnet->layers[cur_layer].nodes[i].gradients[j] = (real)0.0;
-	//		}
-	//	}
-	//}
 
 	return ERR_OK;
 }
@@ -825,6 +779,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 		pnet->layers[i].t_weights 	= NULL;
 		pnet->layers[i].t_gradients = NULL;
 		pnet->layers[i].t_dl_dz		= NULL;
+		pnet->layers[i].t_bias		= NULL;
 	}
 
 	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
@@ -834,12 +789,11 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 
 	ann_set_loss_function(pnet, loss_type);
 
-	pnet->epochLimit	= 10000;
-	pnet->train_iteration = 0;
-	pnet->batchSize		= DEFAULT_BATCH_SIZE;
-
-	pnet->print_func	= ann_puts;
-	pnet->optimizer		= opt;
+	pnet->epochLimit		= 10000;
+	pnet->train_iteration 	= 0;
+	pnet->batchSize			= DEFAULT_BATCH_SIZE;
+	pnet->print_func		= ann_puts;
+	pnet->optimizer			= opt;
 
 	switch(opt)
 	{
@@ -876,58 +830,58 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 //-----------------------------------------------
 //
 //-----------------------------------------------
-void batch_eval_network(PNetwork pnet)
-{
-	if (!pnet)
-		return;
+// void batch_eval_network(PNetwork pnet)
+// {
+// 	if (!pnet)
+// 		return;
 
-	// loop over the non-input layers
-	for (int layer = 1; layer < pnet->layer_count; layer++)
-	{
-		tensor_dot(pnet->layers[layer - 1].t_weights, pnet->layers[layer - 1].t_values, pnet->layers[layer].t_values);
+// 	// loop over the non-input layers
+// 	for (int layer = 1; layer < pnet->layer_count; layer++)
+// 	{
+// 		tensor_dot(pnet->layers[layer - 1].t_weights, pnet->layers[layer - 1].t_values, pnet->layers[layer].t_values);
 
-		// update the nodes final value, using the correct activation function
-//		pnet->layers[layer].nodes[node].value = pnet->layers[layer].activation_func(sum);
-	}
+// 		// update the nodes final value, using the correct activation function
+// //		pnet->layers[layer].nodes[node].value = pnet->layers[layer].activation_func(sum);
+// 	}
 
-	// apply softmax on output if requested
-	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
-		softmax(pnet);
-}
+// 	// apply softmax on output if requested
+// 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
+// 		softmax(pnet);
+// }
 
 //-----------------------------------------------
 // Train the network over a mini-batch
 //-----------------------------------------------
-real train_batch(PNetwork pnet, PTensor inputs, PTensor outputs)
-{
-	if (!pnet || !inputs || !outputs)
-		return 0.0;
+// real train_batch(PNetwork pnet, PTensor inputs, PTensor outputs)
+// {
+// 	if (!pnet || !inputs || !outputs)
+// 		return 0.0;
 
-	assert(pnet->layers[0].layer_type == LAYER_INPUT);
-	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
+// 	assert(pnet->layers[0].layer_type == LAYER_INPUT);
+// 	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
 
-	// set the input values on the network
-	int node_count = pnet->layers[0].node_count;
-	PLayer player = &pnet->layers[0];
+// 	// set the input values on the network
+// 	int node_count = pnet->layers[0].node_count;
+// 	PLayer player = &pnet->layers[0];
 
-	real loss = (real)0.0;
+// 	real loss = (real)0.0;
 
-	for (size_t i = 0; i < pnet->batchSize; i++)
-	{
-		tensor_set_from_array(player->t_values, 1, node_count, inputs->values + i * node_count);
+// 	for (size_t i = 0; i < pnet->batchSize; i++)
+// 	{
+// 		tensor_set_from_array(player->t_values, 1, node_count, inputs->values + i * node_count);
 
-		// forward evaluate the network
-		batch_eval_network(pnet);
+// 		// forward evaluate the network
+// 		batch_eval_network(pnet);
 
-		// compute the Loss function
-		loss += pnet->loss_func(pnet, outputs);
-	}
+// 		// compute the Loss function
+// 		loss += pnet->loss_func(pnet, outputs);
+// 	}
 
-	// back propagate error through network and update weights
-	pnet->optimize_func(pnet);
+// 	// back propagate error through network and update weights
+// 	pnet->optimize_func(pnet);
 
-	return loss;
-}
+// 	return loss;
+// }
 
 //-----------------------------------------------
 // Train the network for a set of inputs/outputs
@@ -1185,6 +1139,7 @@ void ann_free_network(PNetwork pnet)
 			tensor_free(pnet->layers[layer].t_gradients);
 			tensor_free(pnet->layers[layer].t_weights);
 			tensor_free(pnet->layers[layer].t_dl_dz);
+			tensor_free(pnet->layers[layer].t_bias);
 		}
 	}
 
@@ -1286,7 +1241,7 @@ int ann_predict(PNetwork pnet, real *inputs, real *outputs)
 
 	// set inputs
 	int node_count = pnet->layers[0].node_count;
-	for (int node = 1; node < node_count; node++)
+	for (int node = 0; node < node_count; node++)
 	{
 		pnet->layers[0].t_values->values[node] = *inputs++;
 	}
@@ -1296,7 +1251,7 @@ int ann_predict(PNetwork pnet, real *inputs, real *outputs)
 
 	// get the outputs
 	node_count = pnet->layers[pnet->layer_count - 1].node_count;
-	for (int node = 1; node < node_count; node++)
+	for (int node = 0; node < node_count; node++)
 	{
 		*outputs++ = pnet->layers[pnet->layer_count - 1].t_values->values[node];
 	}
@@ -1397,10 +1352,11 @@ int ann_save_network(PNetwork pnet, const char *filename)
 		fprintf(fptr, "%d\n", pnet->layers[layer].activation);
 
 		// save node weights
+		// TODO - skip the output layer NOT the inputs layer
 		if (layer == 0)
 			continue;
 
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		for (int node = 0; node < pnet->layers[layer].node_count; node++)
 		{
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 			{
@@ -1444,10 +1400,11 @@ PNetwork ann_load_network(const char *filename)
 		ann_add_layer(pnet, node_count, layer_type, activation);
 
 		// set node weights
+		// TODO - skip the output layer NOT the inputs layer
 		if (layer == 0)
 			continue;
 
-		for (int node = 1; node < pnet->layers[layer].node_count; node++)
+		for (int node = 0; node < pnet->layers[layer].node_count; node++)
 		{
 			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
 			{

@@ -123,6 +123,7 @@ typedef struct
 	PTensor t_m;					// tensor of momentums for optimizer
 	PTensor t_gradients;			// tensor of gradients for back propagation
 	PTensor t_dl_dz;				// tensor of dL_dz
+	PTensor t_bias;					// bias vector
 } Layer, *PLayer;
 
 //------------------------------

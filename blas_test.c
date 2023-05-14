@@ -22,6 +22,8 @@ int main(int argc, char *argv[])
     init_rand(a, SIZE);
 	init_rand(b, SIZE);
 
+    printf("%s\n", openblas_get_config());
+
     a[1023] = 100.0f;
 
     cblas_sgemv(CblasColMajor, CblasNoTrans, 1, SIZE, 1.0f, a, 1, b, 1, 0.0f, c, 1);

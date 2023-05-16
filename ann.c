@@ -293,7 +293,7 @@ static void eval_network(PNetwork pnet)
 	// loop over the non-output layers
 	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
 	{
-		// y = W x
+		// y = Wx + b
 		tensor_dot(pnet->layers[layer].t_weights, pnet->layers[layer].t_values, pnet->layers[layer + 1].t_values);
 		tensor_add(pnet->layers[layer + 1].t_values, pnet->layers[layer].t_bias);
 
@@ -303,12 +303,6 @@ static void eval_network(PNetwork pnet)
 			pnet->layers[layer + 1].t_values->values[i] = pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values->values[i]);
 			//printf("%3.2f ", pnet->layers[layer + 1].t_values->values[i]);
 		}
-
-		// ensure bias node is always 1 for non-output layers
-		// if (pnet->layers[layer + 1].layer_type == LAYER_OUTPUT)
-		// 	pnet->layers[layer + 1].t_values->values[0] = 0.0;
-		// else
-		// 	pnet->layers[layer + 1].t_values->values[0] = 1.0;
 	}
 
 //	print_outputs(pnet);
@@ -333,14 +327,15 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	//-------------------------------
 	PLayer pLayer = &pnet->layers[output_layer];
 
-	// compute -y
-	tensor_mul_scalar(pLayer->t_values, -1.0);
-
 	// compute dL_dy = (r - y)
-	tensor_axpy(1.0, outputs, pLayer->t_values);
+	tensor_axpby(1.0, outputs, -1.0, pLayer->t_values);
+
+	// bias = bias + n * dL_dy
+	tensor_axpy(pnet->learning_rate, pLayer->t_values, pnet->layers[output_layer - 1].t_bias);
 
 	// TODO - accumulate gradients here for batches
-	// gradient = dL_dy * z
+	// TODO - use cblas_sdger for tensor outer product
+	// gradient += dL_dy * z
 	tensor_dot(pLayer->t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
 
 	// dL_dz = dL_dy * weights
@@ -378,7 +373,18 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	//-------------------------------
 	for (int layer = output_layer - 1; layer > 0; layer--)
 	{
-		// gradient = dl_dz_zomz * x
+		// gradient = dl_dz_zomz * x = dl_dz * z * (1 - z) * x
+
+		// dl_dz = dl_dz * z
+		tensor_dot(pnet->layers[layer].t_dl_dz, pnet->layers[layer].t_values, pnet->layers[layer].t_dl_dz);
+
+		// z = 1 - z
+//		tensor_sub
+
+		// dl_dz = dl_dz * (1 - z)
+		tensor_dot(pnet->layers[layer].t_dl_dz, pnet->layers[layer].t_values, pnet->layers[layer].t_dl_dz);
+
+		// 
 		// dl_dz = dl_dz_zomz * weights
 	}
 
@@ -458,13 +464,13 @@ static real train_pass_network(PNetwork pnet, PTensor inputs, PTensor outputs)
 // shuffle the indices
 // https://en.wikipedia.org/wiki/Fisher–Yates_shuffle
 //-----------------------------------------------
-static void shuffle_indices(size_t *input_indices, size_t count)
+static void shuffle_indices(int *input_indices, int count)
 {
 	// Knuth's algorithm to shuffle an array a of n elements (indices 0..n-1):
-	for (size_t i = 0; i < count - 2; i++)
+	for (int i = 0; i < count - 2; i++)
 	{
-		size_t j = i + (rand() % (count - i));
-		size_t val = input_indices[i];
+		int j = i + (rand() % (count - i));
+		int val = input_indices[i];
 		input_indices[i] = input_indices[j];
 		input_indices[j] = val;
 	}
@@ -866,7 +872,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 
 // 	real loss = (real)0.0;
 
-// 	for (size_t i = 0; i < pnet->batchSize; i++)
+// 	for (int i = 0; i < pnet->batchSize; i++)
 // 	{
 // 		tensor_set_from_array(player->t_values, 1, node_count, inputs->values + i * node_count);
 
@@ -886,7 +892,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 //-----------------------------------------------
 // Train the network for a set of inputs/outputs
 //-----------------------------------------------
-real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t rows)
+real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 {
 	if (!pnet)
 		return 0.0;
@@ -907,18 +913,18 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	real loss;
 	unsigned epoch = 0;
 	unsigned correct = 0;
-	size_t row;
+	int row;
 
 	// create indices for shuffling the inputs and outputs
-	size_t *input_indices = alloca(rows * sizeof(size_t));
-	for (size_t i = 0; i < rows; i++)
+	int *input_indices = alloca(rows * sizeof(int));
+	for (int i = 0; i < rows; i++)
 	{
 		input_indices[i] = i;
 	}
 
-	size_t inc = max(1, rows / 20);
-	size_t input_node_count = (pnet->layers[0].node_count - 1);
-	size_t output_node_count = (pnet->layers[pnet->layer_count - 1].node_count - 1);
+	int inc = max(1, rows / 20);
+	int input_node_count = (pnet->layers[0].node_count);
+	int output_node_count = (pnet->layers[pnet->layer_count - 1].node_count);
 
 	// validation data
 	//PTensor x_valid = tensor_slice_rows(inputs, 50000);
@@ -928,7 +934,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 	PTensor input_batch		= tensor_create(pnet->batchSize, input_node_count);
 	PTensor output_batch	= tensor_create(pnet->batchSize, output_node_count);
 
-	size_t batch_count = rows / pnet->batchSize;
+	int batch_count = rows / pnet->batchSize;
 
 	// train over epochs until done
 	while (!converged)
@@ -941,7 +947,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 		loss = (real)0.0;
 
 		// iterate over all batches
-		for (size_t batch = 0; batch < batch_count; batch++)
+		for (int batch = 0; batch < batch_count; batch++)
 		{
 			// zero the gradients
 			for (int layer = 0; layer < pnet->layer_count; layer++)
@@ -951,7 +957,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 
 			loss = (real)0.0;
 
-			for (size_t batch_index = 0; batch_index < pnet->batchSize; batch_index++)
+			for (int batch_index = 0; batch_index < pnet->batchSize; batch_index++)
 			{
 				row = batch * pnet->batchSize + batch_index;
 
@@ -1019,7 +1025,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, size_t ro
 //------------------------------
 real ann_evaluate(PNetwork pnet, PTensor inputs, PTensor outputs)
 {
-	size_t correct = 0;
+	int correct = 0;
 
 	if (!pnet || !inputs || !outputs)
 	{
@@ -1030,7 +1036,7 @@ real ann_evaluate(PNetwork pnet, PTensor inputs, PTensor outputs)
 	real *pred = alloca(classes * sizeof(real));
 	int pred_class, act_class;
 
-	for (size_t i = 0; i < inputs->rows; i++)
+	for (int i = 0; i < inputs->rows; i++)
 	{
 		ann_predict(pnet, &inputs->values[i * inputs->cols], pred);
 		pred_class = ann_class_prediction(pred, classes);
@@ -1152,15 +1158,15 @@ void ann_free_network(PNetwork pnet)
 //------------------------------
 // load data from a csv file
 //------------------------------
-int ann_load_csv(const char *filename, int has_header, real **data, size_t *rows, size_t *stride)
+int ann_load_csv(const char *filename, int has_header, real **data, int *rows, int *stride)
 {
 	FILE *f;
 	char *s, buf[DEFAULT_BUFFER_SIZE];
-	size_t size = DEFAULT_BUFFER_SIZE;
+	int size = DEFAULT_BUFFER_SIZE;
 	real *dbuf;
-	size_t lastStride = 0;
+	int lastStride = 0;
 	uint32_t lineno = 0;
-	size_t count = 0;
+	int count = 0;
 
 	f = fopen(filename, "rt");
 	if (!f)
@@ -1273,13 +1279,13 @@ int ann_save_network_binary(PNetwork pnet, const char *filename)
 
 	//// save out network
 	//// save optimizer
-	//fwrite(&pnet->optimizer, sizeof(size_t), 1, fptr);
+	//fwrite(&pnet->optimizer, sizeof(int), 1, fptr);
 
 	//// save loss
-	//fwrite(&pnet->loss_type, sizeof(size_t), 1, fptr);
+	//fwrite(&pnet->loss_type, sizeof(int), 1, fptr);
 
 	//// save network props
-	//fwrite(&pnet->layer_count, sizeof(size_t), 1, fptr);
+	//fwrite(&pnet->layer_count, sizeof(int), 1, fptr);
 
 	//// save layer details
 	//int val;

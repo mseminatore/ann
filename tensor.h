@@ -11,6 +11,12 @@
 //----------------------------------
 typedef float real;
 
+#ifdef _M_AMD64
+	typedef int tsize;
+#else
+	typedef int tsize;
+#endif
+
 #ifndef max
 #	define max(a, b) (((a) > (b)) ? (a) : (b))
 #endif
@@ -20,9 +26,9 @@ typedef float real;
 //------------------------------
 typedef struct
 {
-	size_t rows, cols, stride;
+	int rows, cols, stride;
 	real *values;
-	size_t rank;
+	int rank;
 } Tensor, *PTensor;
 
 //------------------------------
@@ -30,14 +36,14 @@ typedef struct
 //------------------------------
 
 // creation/destruction
-PTensor tensor_create(size_t rows, size_t cols);
-PTensor tensor_create_from_array(size_t rows, size_t cols, real *vals);
-void tensor_set_from_array(PTensor t, size_t rows, size_t cols, real *array);
+PTensor tensor_create(int rows, int cols);
+PTensor tensor_create_from_array(int rows, int cols, real *vals);
+void tensor_set_from_array(PTensor t, int rows, int cols, real *array);
 void tensor_free(PTensor t);
-PTensor tensor_ones(size_t rows, size_t cols);
-PTensor tensor_zeros(size_t rows, size_t cols);
-PTensor tensor_create_random_uniform(size_t rows, size_t cols, real min, real max);
-PTensor tensor_onehot(PTensor t, size_t classes);
+PTensor tensor_ones(int rows, int cols);
+PTensor tensor_zeros(int rows, int cols);
+PTensor tensor_create_random_uniform(int rows, int cols, real min, real max);
+PTensor tensor_onehot(PTensor t, int classes);
 
 // math ops
 PTensor tensor_add_scalar(PTensor t, real val);
@@ -55,14 +61,15 @@ PTensor tensor_exp(PTensor t);
 real tensor_sum(PTensor t);
 PTensor tensor_axpy(real a, PTensor x, PTensor y);
 PTensor tensor_gemm(real alpha, PTensor A, PTensor B, real beta, PTensor C);
+PTensor tensor_axpby(real a, PTensor x, real b, PTensor y);
 
 // manipulation
-real tensor_get_element(PTensor t, size_t row, size_t col);
-void tensor_set_element(PTensor t, size_t row, size_t col, real val);
+real tensor_get_element(PTensor t, int row, int col);
+void tensor_set_element(PTensor t, int row, int col, real val);
 void tensor_set_all(PTensor, real val);
 
-PTensor tensor_slice_rows(PTensor t, size_t rows);
-PTensor tensor_slice_cols(PTensor t, size_t cols);
+PTensor tensor_slice_rows(PTensor t, int rows);
+PTensor tensor_slice_cols(PTensor t, int cols);
 void tensor_fill(PTensor t, real val);
 void tensor_random_uniform(PTensor t, real min, real max);
 

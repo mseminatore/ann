@@ -36,7 +36,7 @@
 //------------------------------
 // aligned alloc where needed
 //------------------------------
-static void *tmalloc(size_t size)
+static void *tmalloc(int size)
 {
 	#if defined(_WIN32) && !defined(_WIN64)
 		return _aligned_malloc(size, TENSOR_ALIGN);
@@ -60,7 +60,7 @@ static void tfree(void *block)
 //------------------------------
 // aligned realloc where needed
 //------------------------------
-static void *trealloc(void *block, size_t size)
+static void *trealloc(void *block, int size)
 {
 	#if defined(_WIN32) && !defined(_WIN64)
 		return _aligned_realloc(block, size, TENSOR_ALIGN);
@@ -74,7 +74,7 @@ static void *trealloc(void *block, size_t size)
 //
 // Note: tensors are ROW major
 //------------------------------
-PTensor tensor_create(size_t rows, size_t cols)
+PTensor tensor_create(int rows, int cols)
 {
 	PTensor t = NULL;
 
@@ -104,7 +104,7 @@ PTensor tensor_create(size_t rows, size_t cols)
 //------------------------------
 // create new tensor from array
 //------------------------------
-PTensor tensor_create_from_array(size_t rows, size_t cols, real *array)
+PTensor tensor_create_from_array(int rows, int cols, real *array)
 {
 	PTensor t = tensor_create(rows, cols);
 
@@ -121,7 +121,7 @@ PTensor tensor_create_from_array(size_t rows, size_t cols, real *array)
 //------------------------------
 // set tensor values from array
 //------------------------------
-void tensor_set_from_array(PTensor t, size_t rows, size_t cols, real *array)
+void tensor_set_from_array(PTensor t, int rows, int cols, real *array)
 {
 	assert(t);
 	assert(array);
@@ -136,9 +136,9 @@ void tensor_set_from_array(PTensor t, size_t rows, size_t cols, real *array)
 
 	// TODO - check values alignment?
 
-	size_t limit = t->rows * t->cols;
+	int limit = t->rows * t->cols;
 
-	for (size_t i = 0; i < limit; i++)
+	for (int i = 0; i < limit; i++)
 		t->values[i] = *array++;
 }
 
@@ -167,8 +167,8 @@ void tensor_fill(PTensor t, real val)
 	if (!t)
 		return;
 
-	size_t limit = t->rows * t->cols;
-	size_t i = 0;
+	int limit = t->rows * t->cols;
+	int i = 0;
 
 	for (; i < limit; i++)
 		t->values[i] = val;
@@ -183,9 +183,9 @@ void tensor_random_uniform(PTensor t, real min, real max)
 	if (!t)
 		return;
 
-	size_t limit = t->rows * t->cols;
+	int limit = t->rows * t->cols;
 
-	for (size_t i = 0; i < limit; i++)
+	for (int i = 0; i < limit; i++)
 	{
 		real r = (real)rand() / (real)RAND_MAX;
 		real scale = max - min;
@@ -200,33 +200,35 @@ void tensor_random_uniform(PTensor t, real min, real max)
 //------------------------------
 // create new tensor of ones
 //------------------------------
-PTensor tensor_ones(size_t rows, size_t cols)
+PTensor tensor_ones(int rows, int cols)
 {
 	PTensor t = tensor_create(rows, cols);
 	if (!t)
 		return NULL;
 
 	tensor_fill(t, 1.0);
+
 	return t;
 }
 
 //------------------------------
 // create new tensor of zeros
 //------------------------------
-PTensor tensor_zeros(size_t rows, size_t cols)
+PTensor tensor_zeros(int rows, int cols)
 {
 	PTensor t = tensor_create(rows, cols);
 	if (!t)
 		return NULL;
 
 	tensor_fill(t, 0.0);
+
 	return t;
 }
 
 //----------------------------------
 // create new tensor of rand values
 //----------------------------------
-PTensor tensor_create_random_uniform(size_t rows, size_t cols, real min, real max)
+PTensor tensor_create_random_uniform(int rows, int cols, real min, real max)
 {
 	PTensor t = tensor_create(rows, cols);
 	if (!t)
@@ -238,7 +240,7 @@ PTensor tensor_create_random_uniform(size_t rows, size_t cols, real min, real ma
 }
 
 //------------------------------
-// returns y = a * x + b * y
+// returns y = a * x + y
 //------------------------------
 PTensor tensor_axpy(real a, PTensor x, PTensor y)
 {
@@ -248,13 +250,13 @@ PTensor tensor_axpy(real a, PTensor x, PTensor y)
 		return NULL;
 	}
 
-	size_t limit = x->rows * x->cols;
+	int limit = x->rows * x->cols;
 
-//#ifdef USE_BLAS
-//	cblas_saxpy(limit, a, x->values, 1, y->values, 1);
-//#else
+#ifdef USE_BLAS
+	cblas_saxpy(limit, a, x->values, 1, y->values, 1);
+#else
 
-	size_t i = 0;
+	int i = 0;
 
 	if (a == 1.0)
 	{
@@ -266,7 +268,51 @@ PTensor tensor_axpy(real a, PTensor x, PTensor y)
 		for (; i < limit; i++)
 			y->values[i] += a * x->values[i];
 	}
-//#endif
+#endif
+
+	return y;
+}
+
+//------------------------------
+// returns y = a * x + b * y
+//------------------------------
+PTensor tensor_axpby(real a, PTensor x, real b, PTensor y)
+{
+	if (!x || !y || x->rows != y->rows || x->cols != y->cols)
+	{
+		assert(0 && "tensor: invalid shape.");
+		return NULL;
+	}
+
+	int limit = x->rows * x->cols;
+
+#ifdef USE_BLAS
+	cblas_saxpby(limit, a, x->values, 1, b, y->values, 1);
+#else
+
+	int i = 0;
+
+	if (a == 1.0 && b == 1.0)
+	{
+		for (; i < limit; i++)
+			y->values[i] += x->values[i];
+	}
+	else if (a == 1.0)
+	{
+		for (; i < limit; i++)
+			y->values[i] = x->values[i] + b * y->values[i];
+	}
+	else if (b == 1.0)
+	{
+		for (; i < limit; i++)
+			y->values[i] = a * x->values[i] + y->values[i];
+	}
+	else
+	{
+		for (; i < limit; i++)
+			y->values[i] = a * x->values[i] + b * y->values[i];
+	}
+#endif
 
 	return y;
 }
@@ -279,8 +325,8 @@ PTensor tensor_add_scalar(PTensor t, real val)
 	if (!t)
 		return NULL;
 
-	size_t limit = t->rows * t->cols;
-	size_t i = 0;
+	int limit = t->rows * t->cols;
+	int i = 0;
 
 	for (; i < limit; i++)
 		t->values[i] += val;
@@ -299,12 +345,12 @@ PTensor tensor_add(PTensor a, PTensor b)
 	// shape must be the same
 	if (a->rows != b->rows || a->cols != b->cols)
 	{
-		puts("err: tensor_add shapes not equal");
+		assert(0 && "tensor_add shapes not equal");
 		return NULL;
 	}
 
-	size_t limit = a->rows * a->cols;
-	size_t i = 0;
+	int limit = a->rows * a->cols;
+	int i = 0;
 
 	for (; i < limit; i++)
 		a->values[i] += b->values[i];
@@ -323,12 +369,12 @@ PTensor tensor_sub(PTensor a, PTensor b)
 	// shape must be the same
 	if (a->rows != b->rows || a->cols != b->cols)
 	{
-		puts("err: tensor_add shapes not equal");
+		assert(0 && "tensor_sub shapes not equal");
 		return NULL;
 	}
 
-	size_t limit = a->rows * a->cols;
-	size_t i = 0;
+	int limit = a->rows * a->cols;
+	int i = 0;
 	
 	for (; i < limit; i++)
 		a->values[i] -= b->values[i];
@@ -344,8 +390,8 @@ PTensor tensor_square(PTensor t)
 	if (!t)
 		return NULL;
 
-	size_t limit = t->rows * t->cols;
-	size_t i = 0;
+	int limit = t->rows * t->cols;
+	int i = 0;
 
 	for (; i < limit; i++)
 		t->values[i] *= t->values[i];
@@ -361,8 +407,8 @@ PTensor tensor_mul_scalar(PTensor t, real val)
 	if (!t)
 		return NULL;
 
-	size_t limit = t->rows * t->cols;
-	size_t i = 0;
+	int limit = t->rows * t->cols;
+	int i = 0;
 
 	for (; i < limit; i++)
 		t->values[i] *= val;
@@ -429,9 +475,9 @@ PTensor tensor_max(PTensor t)
 
 	PTensor r = tensor_zeros(1, t->cols);
 
-	for (size_t row = 0; row < t->rows; row++)
+	for (int row = 0; row < t->rows; row++)
 	{
-		for (size_t col = 0; col < t->cols; col++)
+		for (int col = 0; col < t->cols; col++)
 		{
 			real a = tensor_get_element(r, 0, col);
 			real b = tensor_get_element(t, row, col);
@@ -446,7 +492,7 @@ PTensor tensor_max(PTensor t)
 //------------------------------
 // get a tensor component
 //------------------------------
-real tensor_get_element(PTensor t, size_t row, size_t col)
+real tensor_get_element(PTensor t, int row, int col)
 {
 	if (!t || row > t->rows || col > t->cols)
 		return 0.0;
@@ -457,7 +503,7 @@ real tensor_get_element(PTensor t, size_t row, size_t col)
 //------------------------------
 // set a tensor component
 //------------------------------
-void tensor_set_element(PTensor t, size_t row, size_t col, real val)
+void tensor_set_element(PTensor t, int row, int col, real val)
 {
 	if (!t || row > t->rows || col > t->cols)
 		return;
@@ -483,7 +529,7 @@ void tensor_set_all(PTensor t, real val)
 //-------------------------------------------
 // slice out rows from the end of the tensor
 //-------------------------------------------
-PTensor tensor_slice_rows(PTensor t, size_t row_start)
+PTensor tensor_slice_rows(PTensor t, int row_start)
 {
 	PTensor r;
 
@@ -497,7 +543,7 @@ PTensor tensor_slice_rows(PTensor t, size_t row_start)
 
 	// copy the elements
 	real *v = &(t->values[row_start * t->cols]);
-	for (size_t i = 0; i < (t->rows - row_start) * t->cols; i++)
+	for (int i = 0; i < (t->rows - row_start) * t->cols; i++)
 		r->values[i] = *v++;
 
 	// adjust size of t to remove sliced rows
@@ -513,7 +559,7 @@ PTensor tensor_slice_rows(PTensor t, size_t row_start)
 //-------------------------------------------
 // slice out cols from the end of the tensor
 //-------------------------------------------
-PTensor tensor_slice_cols(PTensor t, size_t col_start)
+PTensor tensor_slice_cols(PTensor t, int col_start)
 {
 	PTensor r;
 
@@ -527,9 +573,9 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 		return NULL;
 
 	// copy the elements
-	for (size_t row = 0; row < t->rows; row++)
+	for (int row = 0; row < t->rows; row++)
 	{
-		for (size_t col = col_start; col < t->cols; col++)
+		for (int col = col_start; col < t->cols; col++)
 		{
 			real v = tensor_get_element(t, row, col);
 			tensor_set_element(r, row, col - col_start, v);
@@ -538,9 +584,9 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 
 	// fixup t to remove the cols
 	real *values = t->values;
-	for (size_t row = 0; row < t->rows; row++)
+	for (int row = 0; row < t->rows; row++)
 	{
-		for (size_t col = 0; col < t->cols; col++)
+		for (int col = 0; col < t->cols; col++)
 		{
 			if (col >= col_start)
 				continue;
@@ -562,7 +608,7 @@ PTensor tensor_slice_cols(PTensor t, size_t col_start)
 //-------------------------------
 // turn int vector to onehot
 //-------------------------------
-PTensor tensor_onehot(PTensor t, size_t classes)
+PTensor tensor_onehot(PTensor t, int classes)
 {
 	if (t->cols > 1)
 	{
@@ -572,9 +618,9 @@ PTensor tensor_onehot(PTensor t, size_t classes)
 
 	PTensor r = tensor_zeros(t->rows, classes);
 
-	for (size_t row = 0; row < t->rows; row++)
+	for (int row = 0; row < t->rows; row++)
 	{
-		tensor_set_element(r, row, (size_t)tensor_get_element(t, row, 0), (real)1.0);
+		tensor_set_element(r, row, (int)tensor_get_element(t, row, 0), (real)1.0);
 	}
 
 	return r;
@@ -651,13 +697,13 @@ PTensor tensor_dot(PTensor a, PTensor b, PTensor dest)
 #else
 
 	real sum;
-	for (size_t a_row = 0; a_row < a->rows; a_row++)
+	for (int a_row = 0; a_row < a->rows; a_row++)
 	{
-		for (size_t b_row = 0; b_row < b->rows; b_row++)
+		for (int b_row = 0; b_row < b->rows; b_row++)
 		{
 			sum = (real)0.0;
 
-			for (size_t a_col = 0; a_col < a->cols; a_col++)
+			for (int a_col = 0; a_col < a->cols; a_col++)
 			{
 				sum += a->values[a_row * a->cols + a_col] * b->values[b_row * b->cols + a_col];
 			}
@@ -689,10 +735,10 @@ void tensor_print(PTensor t)
 
 	real *v = t->values;
 	putchar('[');
-	for (size_t row = 0; row < t->rows; row++)
+	for (int row = 0; row < t->rows; row++)
 	{
 		putchar('[');
-		for (size_t col = 0; col < t->cols; col++)
+		for (int col = 0; col < t->cols; col++)
 		{
 			if (col != 0)
 				putchar(',');

@@ -9,11 +9,11 @@
 //------------------------------
 //
 //------------------------------
-void print_data(real *data, size_t rows, size_t stride)
+void print_data(real *data, int rows, int stride)
 {
-	for (size_t row = 0; row < rows; row++)
+	for (int row = 0; row < rows; row++)
 	{
-		for (size_t col = 0; col < stride; col++)
+		for (int col = 0; col < stride; col++)
 		{
 			printf("%g, ", *data++);
 		}
@@ -59,14 +59,14 @@ void class_histogram(PTensor outputs)
 	int pred;
 
 	int classes = outputs->cols;
-	size_t *histo = alloca(classes * sizeof(size_t));
-	size_t sum = 0;
+	int *histo = alloca(classes * sizeof(int));
+	int sum = 0;
 
-	memset(histo, 0, classes * sizeof(size_t));
+	memset(histo, 0, classes * sizeof(int));
 
 	printf("\nClass Histogram\n");
 
-	for (size_t row = 0; row < outputs->rows; row++)
+	for (int row = 0; row < outputs->rows; row++)
 	{
 		pred = ann_class_prediction(&outputs->values[row * classes], classes);
 		histo[pred]++;
@@ -81,7 +81,7 @@ void class_histogram(PTensor outputs)
 	for (int i = 0; i < classes; i++)
 	{
 		printf("%3d|", i);
-		for (size_t j = 0; j < histo[i]; j++)
+		for (int j = 0; j < histo[i]; j++)
 			putchar('*');
 		puts("");
 	}
@@ -95,7 +95,7 @@ void class_histogram(PTensor outputs)
 //------------------------------
 //
 //------------------------------
-void hypertune(PNetwork pnet, PTensor x_train, PTensor y_train, size_t rows)
+void hypertune(PNetwork pnet, PTensor x_train, PTensor y_train, int rows)
 {
 	real loss, minLoss;
 	real opt_lr, opt_weights;
@@ -185,7 +185,7 @@ int main(int argc, char *argv[])
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 
 	real *data, *test_data;
-	size_t rows, stride, test_rows, test_stride;
+	int rows, stride, test_rows, test_stride;
 
 	// load the training data
 	if (argc > 1)

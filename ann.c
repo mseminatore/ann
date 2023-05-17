@@ -336,7 +336,7 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	// TODO - accumulate gradients here for batches
 	// TODO - use cblas_sdger for tensor outer product
 	// gradient += dL_dy * z
-	tensor_dot(pLayer->t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
+	tensor_outer(pLayer->t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
 
 	// dL_dz = dL_dy * weights
 	tensor_dot(pLayer->t_values, pnet->layers[output_layer - 1].t_weights, pnet->layers[output_layer - 1].t_dl_dz);

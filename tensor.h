@@ -62,6 +62,7 @@ real tensor_sum(PTensor t);
 PTensor tensor_axpy(real a, PTensor x, PTensor y);
 PTensor tensor_gemm(real alpha, PTensor A, PTensor B, real beta, PTensor C);
 PTensor tensor_axpby(real a, PTensor x, real b, PTensor y);
+PTensor tensor_outer(PTensor a, PTensor b, PTensor dest);
 
 // manipulation
 real tensor_get_element(PTensor t, int row, int col);

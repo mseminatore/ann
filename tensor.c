@@ -716,6 +716,41 @@ PTensor tensor_dot(PTensor a, PTensor b, PTensor dest)
 	return dest;
 }
 
+//---------------------------------
+// compute the tensor outer product
+// dest += a * b
+//---------------------------------
+PTensor tensor_outer(PTensor a, PTensor b, PTensor dest)
+{
+	if (a->cols != dest->rows || b->cols != dest->cols)
+	{
+		assert(0 && "tensor: invalid shape.");
+		return NULL;
+	}
+
+#ifdef USE_BLAS
+	cblas_sger(CblasRowMajor, dest->rows, dest->cols, 1.0, a->values, 1, b->values, 1, dest->values, dest->cols);
+#else
+
+	real sum;
+	for (int a_row = 0; a_row < a->rows; a_row++)
+	{
+		for (int b_row = 0; b_row < b->rows; b_row++)
+		{
+			sum = (real)0.0;
+
+			for (int a_col = 0; a_col < a->cols; a_col++)
+			{
+				sum += a->values[a_row * a->cols + a_col] * b->values[b_row * b->cols + a_col];
+			}
+
+			dest->values[b_row * b->cols + a_row] = sum;
+		}
+	}
+#endif
+
+	return dest;
+}
 //-------------------------------
 //
 //-------------------------------

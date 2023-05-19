@@ -684,31 +684,31 @@ PTensor tensor_argmax(PTensor t)
 //-------------------------------
 // compute the tensor dot product
 //-------------------------------
-PTensor tensor_dot(PTensor a, PTensor b, PTensor dest)
+PTensor tensor_matvec(TENSOR_TRANSPOSE trans, PTensor mtx, PTensor v, PTensor dest)
 {
-	if (a->cols != b->cols)
+	if (trans == Tensor_NoTranspose && mtx->cols != v->cols)
 	{
 		assert(0 && "tensor: invalid shape.");
 		return NULL;
 	}
 
 #ifdef USE_BLAS
-	cblas_sgemv(CblasRowMajor, CblasNoTrans, a->rows, a->cols, 1.0, a->values, a->cols, b->values, 1, 0.0, dest->values, 1);
+	cblas_sgemv(CblasRowMajor, (trans == Tensor_NoTranspose) ? CblasNoTrans : CblasTrans, mtx->rows, mtx->cols, 1.0, mtx->values, mtx->cols, v->values, 1, 0.0, dest->values, 1);
 #else
 
 	real sum;
-	for (int a_row = 0; a_row < a->rows; a_row++)
+	for (int mtx_row = 0; mtx_row < mtx->rows; mtx_row++)
 	{
-		for (int b_row = 0; b_row < b->rows; b_row++)
+		for (int v_row = 0; v_row < v->rows; v_row++)
 		{
 			sum = (real)0.0;
 
-			for (int a_col = 0; a_col < a->cols; a_col++)
+			for (int mtx_col = 0; mtx_col < mtx->cols; mtx_col++)
 			{
-				sum += a->values[a_row * a->cols + a_col] * b->values[b_row * b->cols + a_col];
+				sum += mtx->values[mtx_row * mtx->cols + mtx_col] * v->values[v_row * v->cols + mtx_col];
 			}
 
-			dest->values[b_row * b->cols + a_row] = sum;
+			dest->values[v_row * v->cols + mtx_row] = sum;
 		}
 	}
 #endif

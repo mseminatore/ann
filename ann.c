@@ -294,7 +294,7 @@ static void eval_network(PNetwork pnet)
 	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
 	{
 		// y = Wx + b
-		tensor_dot(pnet->layers[layer].t_weights, pnet->layers[layer].t_values, pnet->layers[layer + 1].t_values);
+		tensor_matvec(Tensor_NoTranspose, pnet->layers[layer].t_weights, pnet->layers[layer].t_values, pnet->layers[layer + 1].t_values);
 		tensor_add(pnet->layers[layer + 1].t_values, pnet->layers[layer].t_bias);
 
 		// apply activation function to values
@@ -337,7 +337,8 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	tensor_outer(pLayer->t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
 
 	// dL_dz = weights * dL_dy
-	tensor_dot(pnet->layers[output_layer - 1].t_weights, pLayer->t_values, pnet->layers[output_layer - 1].t_dl_dz);
+	// believe this should be dL_dz = W.tranpose * dL_dy
+	tensor_matvec(Tensor_Transpose, pnet->layers[output_layer - 1].t_weights, pLayer->t_values, pnet->layers[output_layer - 1].t_dl_dz);
 
 	//-------------------------------
 	// output layer back-propagation
@@ -371,19 +372,32 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	//-------------------------------
 	for (int layer = output_layer - 1; layer > 0; layer--)
 	{
-		// gradient = dl_dz_zomz * x = dl_dz * z * (1 - z) * x
+		//
+		// gradient = dl_dz * z * (1 - z) * x = dl_dz_zomz * x 
+		//
 
 		// dl_dz = dl_dz * z
-		tensor_dot(pnet->layers[layer].t_dl_dz, pnet->layers[layer].t_values, pnet->layers[layer].t_dl_dz);
+		tensor_mul(pnet->layers[layer].t_dl_dz, pnet->layers[layer].t_values);
 
-		// z = 1 - z
-//		tensor_sub
+		// z = z ^2
+		tensor_square(pnet->layers[layer].t_values);
 
-		// dl_dz = dl_dz * (1 - z)
-		tensor_dot(pnet->layers[layer].t_dl_dz, pnet->layers[layer].t_values, pnet->layers[layer].t_dl_dz);
+		// z = z * dl_dz
+		tensor_mul(pnet->layers[layer].t_values, pnet->layers[layer].t_dl_dz);
 
-		// 
-		// dl_dz = dl_dz_zomz * weights
+		// dl_dz = dl_dz - dl_dz * z^2
+		tensor_sub(pnet->layers[layer].t_dl_dz, pnet->layers[layer].t_values);
+
+		// TODO update bias?
+		// bias = bias + n * dL_dz
+		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_bias);
+
+		// gradient += dl_dz * x
+		tensor_outer(pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_values, pnet->layers[layer - 1].t_gradients);
+
+		// dL_dz = weights * dL_dy
+		// believe this should be dL_dz = W.tranpose * dL_dz
+		tensor_matvec(Tensor_Transpose, pnet->layers[layer - 1].t_weights, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_dl_dz);
 	}
 
 	//-------------------------------
@@ -538,7 +552,7 @@ static void optimize_adapt(PNetwork pnet, real loss)
 //--------------------------------------------------------
 static void optimize_sgd(PNetwork pnet)
 {
-	for (int layer = 0; layer < pnet->layer_count; layer++)
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
 	{
 		// W = W + n * gradients
 		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_gradients, pnet->layers[layer].t_weights);
@@ -747,7 +761,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		pnet->layers[cur_layer - 1].t_v			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 		pnet->layers[cur_layer - 1].t_m			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 		pnet->layers[cur_layer - 1].t_gradients = tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-		pnet->layers[cur_layer - 1].t_dl_dz		= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
+		pnet->layers[cur_layer - 1].t_dl_dz		= tensor_zeros(1, pnet->layers[cur_layer - 1].node_count);
 		pnet->layers[cur_layer - 1].t_bias		= tensor_zeros(1, node_count);
 	}
 
@@ -842,7 +856,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 // 	// loop over the non-input layers
 // 	for (int layer = 1; layer < pnet->layer_count; layer++)
 // 	{
-// 		tensor_dot(pnet->layers[layer - 1].t_weights, pnet->layers[layer - 1].t_values, pnet->layers[layer].t_values);
+// 		tensor_matvec(pnet->layers[layer - 1].t_weights, pnet->layers[layer - 1].t_values, pnet->layers[layer].t_values);
 
 // 		// update the nodes final value, using the correct activation function
 // //		pnet->layers[layer].nodes[node].value = pnet->layers[layer].activation_func(sum);
@@ -1433,7 +1447,7 @@ void ann_print_props(PNetwork pnet)
 	{
 		if (i != 0)
 			ann_printf(pnet, "-");
-		ann_printf(pnet, "%d", pnet->layers[i].node_count - 1);
+		ann_printf(pnet, "%d", pnet->layers[i].node_count);
 	}
 	ann_printf(pnet, "\n");
 

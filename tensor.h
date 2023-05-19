@@ -32,6 +32,14 @@ typedef struct
 } Tensor, *PTensor;
 
 //------------------------------
+//
+//------------------------------
+typedef enum TENSOR_TRANSPOSE {
+	Tensor_NoTranspose, 
+	Tensor_Transpose
+} TENSOR_TRANSPOSE;
+
+//------------------------------
 // function decls
 //------------------------------
 
@@ -52,7 +60,7 @@ PTensor tensor_sub(PTensor a, PTensor b);
 PTensor tensor_mul_scalar(PTensor t, real val);
 PTensor tensor_mul(PTensor a, PTensor b);
 PTensor tensor_div(PTensor a, PTensor b);
-PTensor tensor_dot(PTensor a, PTensor b, PTensor c);
+PTensor tensor_matvec(TENSOR_TRANSPOSE trans, PTensor mtx, PTensor v, PTensor dest);
 PTensor tensor_square(PTensor t);
 PTensor tensor_exp(PTensor t);
 PTensor tensor_argmax(PTensor t);

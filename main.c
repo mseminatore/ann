@@ -224,7 +224,7 @@ int main(int argc, char *argv[])
 //	hypertune(pnet, x_train, y_train, x_train->rows / 20);
 
 	// train the network
-	ann_train_network(pnet, x_train, y_train, x_train->rows);
+	ann_train_network(pnet, x_train, y_train, x_train->rows / 20);
 	
 	// evaluate the network against the test data
 	real acc = ann_evaluate(pnet, x_test, y_test);

@@ -12,7 +12,7 @@
 int main(int argc, char *argv[])
 {
 	real *test_data;
-	size_t test_rows, test_stride;
+	int test_rows, test_stride;
 
     PNetwork pnet = ann_load_network("mnist-fashion.nn");
 

@@ -943,8 +943,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	//PTensor y_valid = tensor_slice_rows(outputs, 50000);
 
 	// tensors to hold input/output batches
-	PTensor input_batch		= tensor_create(pnet->batchSize, input_node_count);
-	PTensor output_batch	= tensor_create(pnet->batchSize, output_node_count);
+	//PTensor input_batch		= tensor_create(pnet->batchSize, input_node_count);
+	//PTensor output_batch	= tensor_create(pnet->batchSize, output_node_count);
+	PTensor input_batch		= tensor_create(1, input_node_count);
+	PTensor output_batch	= tensor_create(1, output_node_count);
 
 	int batch_count = rows / pnet->batchSize;
 

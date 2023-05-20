@@ -27,8 +27,6 @@
 #ifdef __clang__
 #endif
 
-//#define TENSOR_PATH 0
-
 //-----------------------------------------------
 // optimizer printable names
 //-----------------------------------------------
@@ -301,17 +299,12 @@ static void eval_network(PNetwork pnet)
 		for (int i = 0; i < pnet->layers[layer + 1].node_count; i++)
 		{
 			pnet->layers[layer + 1].t_values->values[i] = pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values->values[i]);
-			//printf("%3.2f ", pnet->layers[layer + 1].t_values->values[i]);
 		}
 	}
-
-//	print_outputs(pnet);
 
 	// apply softmax on output, if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
-
-//	print_outputs(pnet);
 }
 
 //-------------------------------------------
@@ -336,35 +329,8 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	// gradient += dL_dy * z
 	tensor_outer(pLayer->t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
 
-	// dL_dz = weights * dL_dy
-	// believe this should be dL_dz = W.tranpose * dL_dy
+	// dL_dz = weights.T * dL_dy
 	tensor_matvec(Tensor_Transpose, pnet->layers[output_layer - 1].t_weights, pLayer->t_values, pnet->layers[output_layer - 1].t_dl_dz);
-
-	//-------------------------------
-	// output layer back-propagation
-	//-------------------------------
-	//int output_nodes = pnet->layers[output_layer].node_count;
-	//for (int node = 1; node < output_nodes; node++)
-	//{
-	//	// for each incoming input for this node, calculate the change in weight for that node
-	//	int node_count = pnet->layers[output_layer - 1].node_count;
-	//	pnode = &pnet->layers[output_layer].nodes[node];
-	//	for (int prev_node = 0; prev_node < node_count; prev_node++)
-	//	{
-	//		z = pnet->layers[output_layer - 1].nodes[prev_node].value;
-	//		r = *outputs;
-	//		y = pnode->value;
-
-	//		dl_dy = (r - y);
-	//		gradient = dl_dy * z;
-
-	//		pnode->gradients[prev_node] += gradient;
-	//		pnode->dl_dz = dl_dy * pnode->weights[prev_node];
-	//	}
-
-	//	// get next expected output value
-	//	outputs++;
-	//}
 
 	//-------------------------------
 	// hidden layer back-propagation
@@ -388,53 +354,15 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 		// dl_dz = dl_dz - dl_dz * z^2
 		tensor_sub(pnet->layers[layer].t_dl_dz, pnet->layers[layer].t_values);
 
-		// TODO update bias?
 		// bias = bias + n * dL_dz
 		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_bias);
 
 		// gradient += dl_dz * x
 		tensor_outer(pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_values, pnet->layers[layer - 1].t_gradients);
 
-		// dL_dz = weights * dL_dy
-		// believe this should be dL_dz = W.tranpose * dL_dz
+		// dL_dz = weights.T * dL_dy
 		tensor_matvec(Tensor_Transpose, pnet->layers[layer - 1].t_weights, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_dl_dz);
 	}
-
-	//-------------------------------
-	// hidden layer back-propagation
-	// excluding the input layer
-	//-------------------------------
-	//for (int layer = output_layer - 1; layer > 0; layer--)
-	//{
-	//	// for each node of this layer
-	//	int node_count = pnet->layers[layer].node_count;
-	//	for (int node = 1; node < node_count; node++)
-	//	{
-	//		// for each incoming input to this node, calculate the weight change
-	//		int prev_node_count = pnet->layers[layer - 1].node_count;
-	//		for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
-	//		{
-	//			dl_dz = (real)0.0;
-
-	//			// for each following node
-	//			int next_node_count = pnet->layers[layer + 1].node_count;
-	//			pnode = &pnet->layers[layer].nodes[node];
-	//			for (int next_node = 1; next_node < next_node_count; next_node++)
-	//			{
-	//				dl_dz += pnet->layers[layer + 1].nodes[next_node].dl_dz;
-	//			}
-
-	//			x = pnet->layers[layer - 1].nodes[prev_node].value;
-	//			z = pnode->value;
-	//			dl_dz_zomz = dl_dz * z * ((real)1.0 - z);
-
-	//			gradient = dl_dz_zomz * x;
-
-	//			pnode->gradients[prev_node] += gradient;
-	//			pnode->dl_dz = dl_dz_zomz * pnode->weights[prev_node];
-	//		}
-	//	}
-	//}
 }
 
 //------------------------------
@@ -455,10 +383,6 @@ static real train_pass_network(PNetwork pnet, PTensor inputs, PTensor outputs)
 	{
 		pLayer->t_values->values[node] = inputs->values[node];
 	}
-
-#if TENSOR_PATH
-	tensor_set_from_array(player->t_values, 1, node_count, inputs);
-#endif
 
 	// forward evaluate the network
 	eval_network(pnet);
@@ -559,23 +483,6 @@ static void optimize_sgd(PNetwork pnet)
 
 		// TODO - update bias vector here?
 	}
-
-	// for each layer after input
-	//for (int layer = 1; layer < pnet->layer_count; layer++)
-	//{
-	//	// for each node in the layer
-	//	int node_count = pnet->layers[layer].node_count;
-	//	for (int node = 1; node < node_count; node++)
-	//	{
-	//		// for each node in previous layer
-	//		int prev_node_count = pnet->layers[layer - 1].node_count;
-	//		for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
-	//		{
-	//			// update the weights by the change
-	//			pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * pnet->layers[layer].nodes[node].gradients[prev_node];
-	//		}
-	//	}
-	//}
 }
 
 //-----------------------------------------------
@@ -846,62 +753,6 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 }
 
 //-----------------------------------------------
-//
-//-----------------------------------------------
-// void batch_eval_network(PNetwork pnet)
-// {
-// 	if (!pnet)
-// 		return;
-
-// 	// loop over the non-input layers
-// 	for (int layer = 1; layer < pnet->layer_count; layer++)
-// 	{
-// 		tensor_matvec(pnet->layers[layer - 1].t_weights, pnet->layers[layer - 1].t_values, pnet->layers[layer].t_values);
-
-// 		// update the nodes final value, using the correct activation function
-// //		pnet->layers[layer].nodes[node].value = pnet->layers[layer].activation_func(sum);
-// 	}
-
-// 	// apply softmax on output if requested
-// 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
-// 		softmax(pnet);
-// }
-
-//-----------------------------------------------
-// Train the network over a mini-batch
-//-----------------------------------------------
-// real train_batch(PNetwork pnet, PTensor inputs, PTensor outputs)
-// {
-// 	if (!pnet || !inputs || !outputs)
-// 		return 0.0;
-
-// 	assert(pnet->layers[0].layer_type == LAYER_INPUT);
-// 	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
-
-// 	// set the input values on the network
-// 	int node_count = pnet->layers[0].node_count;
-// 	PLayer player = &pnet->layers[0];
-
-// 	real loss = (real)0.0;
-
-// 	for (int i = 0; i < pnet->batchSize; i++)
-// 	{
-// 		tensor_set_from_array(player->t_values, 1, node_count, inputs->values + i * node_count);
-
-// 		// forward evaluate the network
-// 		batch_eval_network(pnet);
-
-// 		// compute the Loss function
-// 		loss += pnet->loss_func(pnet, outputs);
-// 	}
-
-// 	// back propagate error through network and update weights
-// 	pnet->optimize_func(pnet);
-
-// 	return loss;
-// }
-
-//-----------------------------------------------
 // Train the network for a set of inputs/outputs
 //-----------------------------------------------
 real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
@@ -909,7 +760,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	if (!pnet)
 		return 0.0;
 
-	ann_printf(pnet,	"Training ANN\n"
+	ann_printf(pnet,	"\nTraining ANN\n"
 						"------------\n");
 	ann_print_props(pnet);
 	ann_printf(pnet, "  Training size: %u rows\n\n", rows);
@@ -943,7 +794,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	//PTensor y_valid = tensor_slice_rows(outputs, 50000);
 
 	// tensors to hold input/output batches
-	//PTensor input_batch		= tensor_create(pnet->batchSize, input_node_count);
+	//PTensor input_batch	= tensor_create(pnet->batchSize, input_node_count);
 	//PTensor output_batch	= tensor_create(pnet->batchSize, output_node_count);
 	PTensor input_batch		= tensor_create(1, input_node_count);
 	PTensor output_batch	= tensor_create(1, output_node_count);
@@ -964,9 +815,9 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		for (int batch = 0; batch < batch_count; batch++)
 		{
 			// zero the gradients
-			for (int layer = 0; layer < pnet->layer_count; layer++)
+			for (int layer = 0; layer < pnet->layer_count - 1; layer++)
 			{
-				tensor_set_all(pnet->layers[layer].t_gradients, (real)0.0);
+				tensor_fill(pnet->layers[layer].t_gradients, (real)0.0);
 			}
 
 			loss = (real)0.0;

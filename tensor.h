@@ -67,15 +67,14 @@ PTensor tensor_argmax(PTensor t);
 PTensor tensor_max(PTensor t);
 PTensor tensor_exp(PTensor t);
 real tensor_sum(PTensor t);
-PTensor tensor_axpy(real a, PTensor x, PTensor y);
+PTensor tensor_axpy(real alpha, PTensor x, PTensor y);
 PTensor tensor_gemm(real alpha, PTensor A, PTensor B, real beta, PTensor C);
-PTensor tensor_axpby(real a, PTensor x, real b, PTensor y);
+PTensor tensor_axpby(real alpha, PTensor x, real beta, PTensor y);
 PTensor tensor_outer(PTensor a, PTensor b, PTensor dest);
 
 // manipulation
 real tensor_get_element(PTensor t, int row, int col);
 void tensor_set_element(PTensor t, int row, int col, real val);
-void tensor_set_all(PTensor, real val);
 
 PTensor tensor_slice_rows(PTensor t, int rows);
 PTensor tensor_slice_cols(PTensor t, int cols);

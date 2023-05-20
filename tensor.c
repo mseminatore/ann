@@ -242,7 +242,7 @@ PTensor tensor_create_random_uniform(int rows, int cols, real min, real max)
 //------------------------------
 // returns y = a * x + y
 //------------------------------
-PTensor tensor_axpy(real a, PTensor x, PTensor y)
+PTensor tensor_axpy(real alpha, PTensor x, PTensor y)
 {
 	if (!x || !y || x->rows != y->rows || x->cols != y->cols)
 	{
@@ -253,12 +253,12 @@ PTensor tensor_axpy(real a, PTensor x, PTensor y)
 	int limit = x->rows * x->cols;
 
 #ifdef USE_BLAS
-	cblas_saxpy(limit, a, x->values, 1, y->values, 1);
+	cblas_saxpy(limit, alpha, x->values, 1, y->values, 1);
 #else
 
 	int i = 0;
 
-	if (a == 1.0)
+	if (alpha == 1.0)
 	{
 		for (; i < limit; i++)
 			y->values[i] += x->values[i];
@@ -266,7 +266,7 @@ PTensor tensor_axpy(real a, PTensor x, PTensor y)
 	else
 	{
 		for (; i < limit; i++)
-			y->values[i] += a * x->values[i];
+			y->values[i] += alpha * x->values[i];
 	}
 #endif
 
@@ -276,7 +276,7 @@ PTensor tensor_axpy(real a, PTensor x, PTensor y)
 //------------------------------
 // returns y = a * x + b * y
 //------------------------------
-PTensor tensor_axpby(real a, PTensor x, real b, PTensor y)
+PTensor tensor_axpby(real alpha, PTensor x, real beta, PTensor y)
 {
 	if (!x || !y || x->rows != y->rows || x->cols != y->cols)
 	{
@@ -287,30 +287,30 @@ PTensor tensor_axpby(real a, PTensor x, real b, PTensor y)
 	int limit = x->rows * x->cols;
 
 #ifdef USE_BLAS
-	cblas_saxpby(limit, a, x->values, 1, b, y->values, 1);
+	cblas_saxpby(limit, alpha, x->values, 1, beta, y->values, 1);
 #else
 
 	int i = 0;
 
-	if (a == 1.0 && b == 1.0)
+	if (alpha == 1.0 && beta == 1.0)
 	{
 		for (; i < limit; i++)
 			y->values[i] += x->values[i];
 	}
-	else if (a == 1.0)
+	else if (alpha == 1.0)
 	{
 		for (; i < limit; i++)
-			y->values[i] = x->values[i] + b * y->values[i];
+			y->values[i] = x->values[i] + beta * y->values[i];
 	}
-	else if (b == 1.0)
+	else if (beta == 1.0)
 	{
 		for (; i < limit; i++)
-			y->values[i] = a * x->values[i] + y->values[i];
+			y->values[i] = alpha * x->values[i] + y->values[i];
 	}
 	else
 	{
 		for (; i < limit; i++)
-			y->values[i] = a * x->values[i] + b * y->values[i];
+			y->values[i] = alpha * x->values[i] + beta * y->values[i];
 	}
 #endif
 
@@ -402,7 +402,7 @@ PTensor tensor_square(PTensor t)
 //------------------------------
 // multiply tensor by a scalar
 //------------------------------
-PTensor tensor_mul_scalar(PTensor t, real val)
+PTensor tensor_mul_scalar(PTensor t, real alpha)
 {
 	if (!t)
 		return NULL;
@@ -410,11 +410,14 @@ PTensor tensor_mul_scalar(PTensor t, real val)
 	int limit = t->rows * t->cols;
 	int i = 0;
 
+#ifdef USE_BLAS
+	cblas_sscal(limit, alpha, t->values, 1);
+#else
 	for (; i < limit; i++)
 		t->values[i] *= val;
+#endif
 
 	return t;
-
 }
 
 //------------------------------
@@ -509,21 +512,6 @@ void tensor_set_element(PTensor t, int row, int col, real val)
 		return;
 
 	t->values[row * t->cols + col] = val;
-}
-
-//------------------------------
-// set all tensor elements to val
-//------------------------------
-void tensor_set_all(PTensor t, real val)
-{
-	if (!t)
-		return;
-
-	int limit = t->rows * t->cols;
-	int i = 0;
-
-	for (; i < limit; i++)
-		t->values[i] = val;
 }
 
 //-------------------------------------------

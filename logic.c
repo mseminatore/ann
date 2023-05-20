@@ -8,7 +8,7 @@
 int main(int argc, char *argv[])
 {
 	real *data;
-	size_t rows, stride;
+	int rows, stride;
 
 	// load the data
 	if (argc > 1)

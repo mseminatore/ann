@@ -175,11 +175,13 @@ int main(int argc, char *argv[])
 		"Ankle boot"
 	};
 
-#ifdef USE_BLAS
-	printf("%s\n", openblas_get_config());
-#endif
-
 	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_CATEGORICAL_CROSS_ENTROPY);
+
+#ifdef USE_BLAS
+	printf( "%s\n", openblas_get_config());
+	printf("      CPU uArch: %s\n", openblas_get_corename());
+	printf("  Cores/Threads: %d/%d\n", openblas_get_num_procs(), openblas_get_num_threads());
+#endif
 
 	// define our network
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);

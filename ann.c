@@ -1296,6 +1296,7 @@ PNetwork ann_load_network(const char *filename)
 void ann_print_props(PNetwork pnet)
 {
 	ann_printf(pnet, "  Network shape: ");
+
 	for (int i = 0; i < pnet->layer_count; i++)
 	{
 		if (i != 0)

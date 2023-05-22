@@ -765,7 +765,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	ann_print_props(pnet);
 	ann_printf(pnet, "  Training size: %u rows\n\n", rows);
 
-	clock_t time_start = clock();
+	time_t time_start = time(NULL);
 
 	pnet->train_iteration = 0;
 
@@ -876,8 +876,8 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	//tensor_free(x_valid);
 	//tensor_free(y_valid);
 
-	clock_t time_end = clock();
-	double diff_t = (time_end - time_start) / CLOCKS_PER_SEC;
+	time_t time_end = time(NULL);
+	double diff_t = (time_end - time_start);
 	double per_step = 1000.0 * diff_t / (rows * epoch);
 
 	ann_printf(pnet, "\nTraining time: %f seconds, %f ms/step\n", diff_t, per_step);

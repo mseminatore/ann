@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
 	real *test_data;
 	int test_rows, test_stride;
 
-    PNetwork pnet = ann_load_network("mnist-fashion.nn");
+    PNetwork pnet = ann_load_network("mnist-fashion.nna");
 
 	// load the test data
 	ann_load_csv("fashion-mnist_test.csv", CSV_HAS_HEADER, &test_data, &test_rows, &test_stride);

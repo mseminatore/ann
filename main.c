@@ -234,7 +234,7 @@ int main(int argc, char *argv[])
 	real acc = ann_evaluate(pnet, x_test, y_test);
 	printf("\nTest accuracy: %g%%\n", acc * 100);
 
-//	ann_save_network(pnet, "mnist-fashion.nn");
+	ann_save_network(pnet, "mnist-fashion.nna");
 //	ann_save_network_binary(pnet, "mnist-fashion.bnn");
 
 	int i = 0;

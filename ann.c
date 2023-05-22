@@ -1214,7 +1214,7 @@ int ann_save_network(PNetwork pnet, const char *filename)
 	for (int layer = 0; layer < pnet->layer_count; layer++)
 	{
 		// node count
-		fprintf(fptr, "%d\n", pnet->layers[layer].node_count - 1);
+		fprintf(fptr, "%d\n", pnet->layers[layer].node_count);
 
 		// layer type
 		fprintf(fptr, "%d\n", pnet->layers[layer].layer_type);
@@ -1222,17 +1222,21 @@ int ann_save_network(PNetwork pnet, const char *filename)
 		// activation type
 		fprintf(fptr, "%d\n", pnet->layers[layer].activation);
 
-		// save node weights
-		// TODO - skip the output layer NOT the inputs layer
-		if (layer == 0)
+		// output layers don't have weights or bias
+		if (layer == pnet->layer_count - 1)
 			continue;
 
-		for (int node = 0; node < pnet->layers[layer].node_count; node++)
+		// save bias vector
+		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
 		{
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-			{
-				//fprintf(fptr, "%f\n", pnet->layers[layer].nodes[node].weights[prev_node]);
-			}
+			fprintf(fptr, "%f\n", pnet->layers[layer].t_bias->values[element]);
+		}
+
+		// save node weights
+		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
+		for (int element = 0; element < limit; element++)
+		{
+			fprintf(fptr, "%f\n", pnet->layers[layer].t_weights->values[element]);			
 		}
 	}
 
@@ -1270,17 +1274,21 @@ PNetwork ann_load_network(const char *filename)
 
 		ann_add_layer(pnet, node_count, layer_type, activation);
 
-		// set node weights
-		// TODO - skip the output layer NOT the inputs layer
-		if (layer == 0)
+		// output layers don't have weights or bias
+		if (layer == pnet->layer_count - 1)
 			continue;
 
-		for (int node = 0; node < pnet->layers[layer].node_count; node++)
+		// read bias vector
+		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
 		{
-			for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-			{
-				//fscanf(fptr, "%f", &pnet->layers[layer].nodes[node].weights[prev_node]);
-			}
+			fscanf(fptr, "%f", &pnet->layers[layer].t_bias->values[element]);
+		}
+
+		// read node weights
+		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
+		for (int element = 0; element < limit; element++)
+		{
+			fscanf(fptr, "%f", &pnet->layers[layer].t_weights->values[element]);			
 		}
 	}
 

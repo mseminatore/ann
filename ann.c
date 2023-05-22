@@ -822,7 +822,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 
 			loss = (real)0.0;
 
-			for (int batch_index = 0; batch_index < pnet->batchSize; batch_index++)
+			for (unsigned batch_index = 0; batch_index < pnet->batchSize; batch_index++)
 			{
 				row = batch * pnet->batchSize + batch_index;
 
@@ -1221,11 +1221,10 @@ int ann_save_network(PNetwork pnet, const char *filename)
 
 		// activation type
 		fprintf(fptr, "%d\n", pnet->layers[layer].activation);
+	}
 
-		// output layers don't have weights or bias
-		if (layer == pnet->layer_count - 1)
-			continue;
-
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
 		// save bias vector
 		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
 		{
@@ -1244,9 +1243,9 @@ int ann_save_network(PNetwork pnet, const char *filename)
 	return ERR_OK;
 }
 
-//------------------------------
+//--------------------------------
 // load a previously saved network
-//------------------------------
+//--------------------------------
 PNetwork ann_load_network(const char *filename)
 {
 	FILE *fptr = fopen(filename, "rt");
@@ -1273,11 +1272,10 @@ PNetwork ann_load_network(const char *filename)
 		fscanf(fptr, "%d", &activation);
 
 		ann_add_layer(pnet, node_count, layer_type, activation);
+	}
 
-		// output layers don't have weights or bias
-		if (layer == pnet->layer_count - 1)
-			continue;
-
+	for (int layer = 0; layer < layer_count - 1; layer++)
+	{
 		// read bias vector
 		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
 		{

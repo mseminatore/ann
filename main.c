@@ -185,7 +185,7 @@ int main(int argc, char *argv[])
 
 	// define our network
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);
-	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);	// 912
+	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 
 	real *data, *test_data;
@@ -223,9 +223,6 @@ int main(int argc, char *argv[])
 	pnet->epochLimit = 5;
 	pnet->convergence_epsilon = (real)1e-5;
 	pnet->batchSize = 8;
-//	pnet->learning_rate = (real)0.015;
-
-//	hypertune(pnet, x_train, y_train, x_train->rows / 20);
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows /20);

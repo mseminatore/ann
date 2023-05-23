@@ -490,27 +490,16 @@ static void optimize_sgd(PNetwork pnet)
 //-----------------------------------------------
 static void optimize_momentum(PNetwork pnet)
 {
-	//real beta = (real)0.9, one_minus_beta = (real)0.1;
-	//real m;
+	real beta = (real)0.9, one_minus_beta = (real)0.1;
 
-	//// for each layer after input
-	//for (int layer = 1; layer < pnet->layer_count; layer++)
-	//{
-	//	// for each node in the layer
-	//	int node_count = pnet->layers[layer].node_count;
-	//	for (int node = 1; node < node_count; node++)
-	//	{
-	//		// for each node in previous layer
-	//		int prev_node_count = pnet->layers[layer - 1].node_count;
-	//		for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
-	//		{
-	//			// update the weights by the change
-	//			m = beta * pnet->layers[layer].nodes[node].m[prev_node] + one_minus_beta * pnet->layers[layer].nodes[node].gradients[prev_node];
-	//			pnet->layers[layer].nodes[node].m[prev_node] = m;
-	//			pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * m;
-	//		}
-	//	}
-	//}
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		// momentum = beta * m + one_minus_beta * gradients
+		tensor_axpby(one_minus_beta, pnet->layers[layer].t_gradients, beta, pnet->layers[layer].t_m);
+
+		// W = W + n * m
+		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_m, pnet->layers[layer].t_weights);
+	}
 }
 
 //-----------------------------------------------
@@ -522,7 +511,7 @@ static void optimize_adagrad(PNetwork pnet)
 }
 
 //-----------------------------------------------
-//
+// Gradient descent with adaptive learning
 //-----------------------------------------------
 static void optimize_rmsprop(PNetwork pnet)
 {
@@ -737,6 +726,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 
 	case OPT_MOMENTUM:
 		pnet->optimize_func = optimize_momentum;
+		pnet->learning_rate = (real)0.01;
 		break;
 
 	case OPT_RMSPROP:
@@ -1135,57 +1125,117 @@ int ann_predict(PNetwork pnet, real *inputs, real *outputs)
 //-----------------------------------
 int ann_save_network_binary(PNetwork pnet, const char *filename)
 {
-	//if (!pnet || !filename)
-	//	return ERR_FAIL;
+	if (!pnet || !filename)
+		return ERR_FAIL;
 
-	//FILE *fptr = fopen(filename, "wb");
-	//if (!fptr)
-	//	return ERR_FAIL;
+	FILE *fptr = fopen(filename, "wb");
+	if (!fptr)
+		return ERR_FAIL;
 
-	//// save out network
-	//// save optimizer
-	//fwrite(&pnet->optimizer, sizeof(int), 1, fptr);
+	// save out network
+	// save optimizer
+	fwrite(&pnet->optimizer, sizeof(int), 1, fptr);
 
-	//// save loss
-	//fwrite(&pnet->loss_type, sizeof(int), 1, fptr);
+	// save loss
+	fwrite(&pnet->loss_type, sizeof(int), 1, fptr);
 
-	//// save network props
-	//fwrite(&pnet->layer_count, sizeof(int), 1, fptr);
+	// save network props
+	fwrite(&pnet->layer_count, sizeof(int), 1, fptr);
 
-	//// save layer details
-	//int val;
-	//real w;
-	//for (int layer = 0; layer < pnet->layer_count; layer++)
-	//{
-	//	// node count
-	//	val = pnet->layers[layer].node_count - 1;
-	//	fwrite(&val, sizeof(val), 1, fptr);
+	// save layer details
+	int val;
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		// node count
+		val = pnet->layers[layer].node_count;
+		fwrite(&val, sizeof(val), 1, fptr);
 
-	//	// layer type
-	//	val = pnet->layers[layer].layer_type;
-	//	fwrite(&val, sizeof(val), 1, fptr);
+		// layer type
+		val = pnet->layers[layer].layer_type;
+		fwrite(&val, sizeof(val), 1, fptr);
 
-	//	// activation type
-	//	val = pnet->layers[layer].activation;
-	//	fwrite(&val, sizeof(val), 1, fptr);
+		// activation type
+		val = pnet->layers[layer].activation;
+		fwrite(&val, sizeof(val), 1, fptr);
+	}
 
-	//	// input node has no weights vector
-	//	if (layer == 0)
-	//		continue;
+	real w;
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		// save bias vector
+		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
+		{
+			w = pnet->layers[layer].t_bias->values[element];
+			fwrite(&w, sizeof(w), 1, fptr);
+		}
 
-	//	// save node weights
-	//	for (int node = 1; node < pnet->layers[layer].node_count; node++)
-	//	{
-	//		for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-	//		{
-	//			w = pnet->layers[layer].nodes[node].weights[prev_node];
-	//			fwrite(&w, sizeof(w), 1, fptr);
-	//		}
-	//	}
-	//}
+		// save node weights
+		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
+		for (int element = 0; element < limit; element++)
+		{
+			w = pnet->layers[layer].t_weights->values[element];
+			fwrite(&w, sizeof(w), 1, fptr);
+		}
+	}
 
-	//fclose(fptr);
+	fclose(fptr);
 	return ERR_OK;
+}
+
+//------------------------------
+// read network from binary file
+//------------------------------
+PNetwork ann_load_network_binary(const char *filename)
+{
+	if (!filename)
+		return NULL;
+
+	FILE *fptr = fopen(filename, "rb");
+	if (!fptr)
+		return NULL;
+
+	// load network
+	int optimizer, loss_type, layer_count, node_count, layer_type, activation;
+	fread(&optimizer, sizeof(optimizer), 1, fptr);
+	fread(&loss_type, sizeof(loss_type), 1, fptr);
+	fread(&layer_count, sizeof(layer_count), 1, fptr);
+
+	PNetwork pnet = ann_make_network(optimizer, loss_type);
+	if (!pnet)
+		return NULL;
+
+	ann_printf(pnet, "loading network %s...", filename);
+
+	// create layers
+	for (int layer = 0; layer < layer_count; layer++)
+	{
+		fread(&node_count, sizeof(node_count), 1, fptr);
+		fread(&layer_type, sizeof(layer_type), 1, fptr);
+		fread(&activation, sizeof(activation), 1, fptr);
+
+		ann_add_layer(pnet, node_count, layer_type, activation);
+	}
+
+	for (int layer = 0; layer < layer_count - 1; layer++)
+	{
+		// read bias vector
+		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
+		{
+			fread(&pnet->layers[layer].t_bias->values[element], sizeof(real), 1, fptr);
+		}
+
+		// read node weights
+		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
+		for (int element = 0; element < limit; element++)
+		{
+			fread(&pnet->layers[layer].t_weights->values[element], sizeof(real), 1, fptr);
+		}
+	}
+
+	ann_printf(pnet, "done.\n");
+
+	fclose(fptr);
+	return pnet;
 }
 
 //------------------------------

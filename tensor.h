@@ -52,6 +52,7 @@ PTensor tensor_ones(int rows, int cols);
 PTensor tensor_zeros(int rows, int cols);
 PTensor tensor_create_random_uniform(int rows, int cols, real min, real max);
 PTensor tensor_onehot(PTensor t, int classes);
+PTensor tensor_copy(PTensor t);
 
 // math ops
 PTensor tensor_add_scalar(PTensor t, real val);

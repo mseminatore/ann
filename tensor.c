@@ -159,6 +159,21 @@ void tensor_free(PTensor t)
 }
 
 //------------------------------
+//
+//------------------------------
+PTensor tensor_copy(PTensor t)
+{
+	PTensor r = tensor_create(t->rows, t->cols);
+
+	int limit = t->rows * t->cols;
+
+	for (int i = 0; i < limit; i++)
+		r->values[i] = t->values[i];
+
+	return r;
+}
+
+//------------------------------
 // fill tensor with given value
 //------------------------------
 void tensor_fill(PTensor t, real val)
@@ -414,7 +429,7 @@ PTensor tensor_mul_scalar(PTensor t, real alpha)
 	cblas_sscal(limit, alpha, t->values, 1);
 #else
 	for (; i < limit; i++)
-		t->values[i] *= val;
+		t->values[i] *= alpha;
 #endif
 
 	return t;
@@ -657,9 +672,9 @@ PTensor tensor_exp(PTensor t)
 	return t;
 }
 
-//-------------------------------
+//-------------------------------------
 // return tensor containing argmax of t
-//-------------------------------
+//-------------------------------------
 PTensor tensor_argmax(PTensor t)
 {
 	assert(0);
@@ -685,20 +700,41 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, PTensor mtx, PTensor v, PTensor de
 #else
 
 	real sum;
-	for (int mtx_row = 0; mtx_row < mtx->rows; mtx_row++)
+
+	if (trans == Tensor_NoTranspose)
 	{
-		for (int v_row = 0; v_row < v->rows; v_row++)
+		assert(dest->rows == 1);
+
+		// for each row of the matrix
+		for (int mtx_row = 0; mtx_row < mtx->rows; mtx_row++)
 		{
 			sum = (real)0.0;
 
 			for (int mtx_col = 0; mtx_col < mtx->cols; mtx_col++)
 			{
-				sum += mtx->values[mtx_row * mtx->cols + mtx_col] * v->values[v_row * v->cols + mtx_col];
+				sum += mtx->values[mtx_row * mtx->cols + mtx_col] * v->values[mtx_col];
 			}
 
-			dest->values[v_row * v->cols + mtx_row] = sum;
+			dest->values[mtx_row] = sum;
 		}
 	}
+	else
+	{
+		assert(dest->rows == 1);
+
+		for (int mtx_col = 0; mtx_col < mtx->cols; mtx_col++)
+		{
+			sum = (real)0.0;
+
+			for (int mtx_row = 0; mtx_row < mtx->rows; mtx_row++)
+			{
+				sum += mtx->values[mtx_row * mtx->cols + mtx_col] * v->values[mtx_row];
+			}
+
+			dest->values[mtx_col] = sum;
+		}
+	}
+
 #endif
 
 	return dest;
@@ -720,21 +756,14 @@ PTensor tensor_outer(PTensor a, PTensor b, PTensor dest)
 	cblas_sger(CblasRowMajor, dest->rows, dest->cols, 1.0, a->values, 1, b->values, 1, dest->values, dest->cols);
 #else
 
-	real sum;
-	for (int a_row = 0; a_row < a->rows; a_row++)
+	for (int a_col = 0; a_col < a->cols; a_col++)
 	{
-		for (int b_row = 0; b_row < b->rows; b_row++)
+		for (int b_col = 0; b_col < b->cols; b_col++)
 		{
-			sum = (real)0.0;
-
-			for (int a_col = 0; a_col < a->cols; a_col++)
-			{
-				sum += a->values[a_row * a->cols + a_col] * b->values[b_row * b->cols + a_col];
-			}
-
-			dest->values[b_row * b->cols + a_row] = sum;
+			dest->values[a_col * b->cols + b_col] += a->values[a_col] * b->values[b_col];
 		}
 	}
+
 #endif
 
 	return dest;

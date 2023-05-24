@@ -232,6 +232,7 @@ void print_outputs(PNetwork pnet)
 	putchar('[');
 
 	PLayer pLayer = &pnet->layers[0];
+
 	//tensor_print(pLayer->t_values);
 
 	// print nodes in the output layer
@@ -301,6 +302,8 @@ static void eval_network(PNetwork pnet)
 			pnet->layers[layer + 1].t_values->values[i] = pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values->values[i]);
 		}
 	}
+
+//	print_outputs(pnet);
 
 	// apply softmax on output, if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)

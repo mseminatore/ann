@@ -4,6 +4,6 @@
 #define __CONFIG_H
 
 // define to compile in BLAS library support
-//#define USE_BLAS
+#define USE_BLAS
 
 #endif

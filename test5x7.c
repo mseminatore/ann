@@ -38,7 +38,7 @@ void print5x7(real *data)
 }
 
 // add noise
-void add_noise(real *data, size_t size, int amount)
+void add_noise(real *data, int size, int amount)
 {
 	for (int i = 0; i < amount; i++)
 	{
@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
 	PNetwork pnet = ann_make_network(OPT_DEFAULT, LOSS_DEFAULT);
 
 	real *data;
-	size_t rows, stride;
+	int rows, stride;
 
 	// load the data
 	if (argc > 1)

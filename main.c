@@ -6,6 +6,26 @@
 #include "ann.h"
 #include <cblas.h>
 
+static int threads = -1;
+
+//----------------------------------
+// get options from the command line
+//----------------------------------
+int getopt(int n, char *args[])
+{
+	int i;
+	for (i = 1; (i < n) && (args[i][0] == '-'); i++)
+	{
+		if (args[i][1] == 't')
+		{
+			threads = atoi(args[i + 1]);
+			i++;
+		}
+	}
+
+	return i;
+}
+
 //------------------------------
 //
 //------------------------------
@@ -177,7 +197,12 @@ int main(int argc, char *argv[])
 
 	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_CATEGORICAL_CROSS_ENTROPY);
 
+	int iFirstArg = getopt(argc, argv);
+
 #ifdef USE_BLAS
+	if (threads != -1)
+		openblas_set_num_threads(threads);
+
 	printf( "%s\n", openblas_get_config());
 	printf("      CPU uArch: %s\n", openblas_get_corename());
 	printf("  Cores/Threads: %d/%d\n", openblas_get_num_procs(), openblas_get_num_threads());
@@ -192,14 +217,14 @@ int main(int argc, char *argv[])
 	int rows, stride, test_rows, test_stride;
 
 	// load the training data
-	if (argc > 1)
-		ann_load_csv(argv[1], CSV_HAS_HEADER, &data, &rows, &stride);
+	if (iFirstArg < argc)
+		ann_load_csv(argv[iFirstArg], CSV_HAS_HEADER, &data, &rows, &stride);
 	else
 		ann_load_csv("fashion-mnist_train.csv", CSV_HAS_HEADER, &data, &rows, &stride);
 
 	// load the test data
-	if (argc > 2)
-		ann_load_csv(argv[2], CSV_HAS_HEADER, &test_data, &test_rows, &test_stride);
+	if (iFirstArg + 1 < argc)
+		ann_load_csv(argv[iFirstArg + 1], CSV_HAS_HEADER, &test_data, &test_rows, &test_stride);
 	else
 		ann_load_csv("fashion-mnist_test.csv", CSV_HAS_HEADER, &test_data, &test_rows, &test_stride);
 
@@ -225,18 +250,11 @@ int main(int argc, char *argv[])
 	pnet->batchSize = 8;
 
 	// train the network
-	ann_train_network(pnet, x_train, y_train, x_train->rows /20);
+	ann_train_network(pnet, x_train, y_train, x_train->rows);
 	
 	// evaluate the network against the test data
 	real acc = ann_evaluate(pnet, x_test, y_test);
 	printf("\nTest accuracy: %g%%\n", acc * 100);
-
-//	ann_save_network(pnet, "mnist-fashion.nna");
-//	ann_save_network_binary(pnet, "mnist-fashion.bnn");
-
-	int i = 0;
-//	for (; i < 5; i++)
-//		print_ascii_art(&x_train->values[i * 784], 28, 28);
 
 	// free memory
 	ann_free_network(pnet);

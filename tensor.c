@@ -1,37 +1,13 @@
 #include <assert.h>
 #include <stdio.h>
 #include <math.h>
-
-#if defined(_WIN32) || defined(__x86_64__)
-#	include <immintrin.h>
-#	define TENSOR_SSE
-#endif
-
-#if defined(__aarch64__)
-#	define TENSOR_SSE
-#	include "sse2neon.h"
-#endif
-
 #include "tensor.h"
 
 #if defined(USE_BLAS)
 #	include <cblas.h>
 #endif
 
-#ifdef __AVX__
-#	define TENSOR_AVX
-#endif
-
-#if _M_IX86_FP == 2
-#	define TENSOR_SSE
-#	define TENSOR_AVX
-#endif
-
-#ifdef TENSOR_AVX
-#	define TENSOR_ALIGN 32
-#else
-#	define TENSOR_ALIGN 16
-#endif
+#define TENSOR_ALIGN 32
 
 //------------------------------
 // aligned alloc where needed
@@ -684,9 +660,10 @@ PTensor tensor_argmax(PTensor t)
 	return NULL;
 }
 
-//-------------------------------
-// compute the tensor dot product
-//-------------------------------
+//----------------------------------
+// compute the matrix-vector product
+// y = Ax + y
+//----------------------------------
 PTensor tensor_matvec(TENSOR_TRANSPOSE trans, PTensor mtx, PTensor v, PTensor dest)
 {
 	if (trans == Tensor_NoTranspose && mtx->cols != v->cols)

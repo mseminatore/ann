@@ -68,7 +68,8 @@ int main(int argc, char *argv[])
 	PTensor y_train = tensor_slice_cols(x_train, 35);
 	
 	pnet->learning_rate = (real)0.35;
-
+	pnet->batchSize = 1;
+	
 	// define our network
 	ann_add_layer(pnet, 35, LAYER_INPUT, ACTIVATION_NULL);
 	ann_add_layer(pnet, 48, LAYER_HIDDEN, ACTIVATION_SIGMOID);

@@ -1,3 +1,26 @@
+/**********************************************************************************/
+/* Copyright (c) 2023 Mark Seminatore                                             */
+/* All rights reserved.                                                           */
+/*                                                                                */
+/* Permission is hereby granted, free of charge, to any person obtaining a copy   */
+/* of this software and associated documentation files(the "Software"), to deal   */
+/* in the Software without restriction, including without limitation the rights   */
+/* to use, copy, modify, merge, publish, distribute, sublicense, and / or sell    */
+/* copies of the Software, and to permit persons to whom the Software is          */
+/* furnished to do so, subject to the following conditions:                       */
+/*                                                                                */
+/* The above copyright notice and this permission notice shall be included in all */
+/* copies or substantial portions of the Software.                                */
+/*                                                                                */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR     */
+/* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,       */
+/* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE    */
+/* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER         */
+/* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,  */
+/* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE  */
+/* SOFTWARE.                                                                      */
+/**********************************************************************************/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,9 +65,9 @@ void print_data(real *data, int rows, int stride)
 	}
 }
 
-//------------------------------
-//
-//------------------------------
+//------------------------------------------
+// get/print prediction from one-hot vector
+//------------------------------------------
 void print_class_pred(real * data)
 {
 	int class = ann_class_prediction(data, 10);
@@ -52,9 +75,9 @@ void print_class_pred(real * data)
 	printf("\nClass prediction is: %d\n\n", class + 1);
 }
 
-//------------------------------
+//--------------------------------------
 // display a 28x28 image from flat data
-//------------------------------
+//--------------------------------------
 void print_ascii_art(real *data, int rows, int cols)
 {
 	char c;
@@ -73,7 +96,9 @@ void print_ascii_art(real *data, int rows, int cols)
 	}
 }
 
-//
+//--------------------------------------
+// print a histogram of tensor values
+//--------------------------------------
 void class_histogram(PTensor outputs)
 {
 	int pred;
@@ -113,70 +138,6 @@ void class_histogram(PTensor outputs)
 }
 
 //------------------------------
-//
-//------------------------------
-void hypertune(PNetwork pnet, PTensor x_train, PTensor y_train, int rows)
-{
-	real loss, minLoss;
-	real opt_lr, opt_weights;
-
-	pnet->epochLimit = 1;
-
-	// optimize for learning rate
-	puts("Optimizing LR\n");
-
-	minLoss = 100.0;
-	real dl_dr = (real)0.1;
-	pnet->learning_rate = (real)0.01;
-	loss = ann_train_network(pnet, x_train, y_train, rows);
-
-	while (dl_dr > 1e-3)
-	{
-		loss -= ann_train_network(pnet, x_train, y_train, rows);
-//		dl_dr = loss / 
-
-		pnet->learning_rate -= dl_dr;
-	}
-
-	for (real lr = (real)0.001; lr < 1.1; lr += 0.0)
-	{
-		pnet->learning_rate = lr;
-
-		// train the network
-		loss = ann_train_network(pnet, x_train, y_train, rows);
-		if (loss < minLoss)
-		{
-			minLoss = loss;
-			opt_lr = lr;
-		}
-	}
-
-//	printf("Optimal LR was: %f\n", opt_lr);
-
-	// optimize for initial weights
-	puts("Optimizing weights\n");
-
-	minLoss = 100.0;
-	for (real w = (real)0.001; w < 1.1; w *= 10.0)
-	{
-		pnet->weight_limit = w;
-		pnet->learning_rate = opt_lr;
-
-		// train the network
-		loss = ann_train_network(pnet, x_train, y_train, rows);
-		if (loss < minLoss)
-		{
-			minLoss = loss;
-			opt_weights = w;
-		}
-	}
-
-	printf("Optimal LR was: %f\n", opt_lr);
-	printf("Optimal weight was: %f\n", opt_weights);
-
-}
-
-//------------------------------
 // main program start
 //------------------------------
 int main(int argc, char *argv[])
@@ -195,8 +156,6 @@ int main(int argc, char *argv[])
 		"Ankle boot"
 	};
 
-	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_CATEGORICAL_CROSS_ENTROPY);
-
 	int iFirstArg = getopt(argc, argv);
 
 #ifdef USE_BLAS
@@ -207,6 +166,9 @@ int main(int argc, char *argv[])
 	printf("      CPU uArch: %s\n", openblas_get_corename());
 	printf("  Cores/Threads: %d/%d\n", openblas_get_num_procs(), openblas_get_num_threads());
 #endif
+
+	// make a new network
+	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_CATEGORICAL_CROSS_ENTROPY);
 
 	// define our network
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);

@@ -105,6 +105,8 @@ PTensor tensor_slice_cols(PTensor t, int cols);
 void tensor_fill(PTensor t, real val);
 void tensor_random_uniform(PTensor t, real min, real max);
 
+// IO
 void tensor_print(PTensor t);
+int tensor_save_to_file(PTensor t, const char *filename);
 
 #endif

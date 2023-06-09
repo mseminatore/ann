@@ -21,6 +21,10 @@
 /* SOFTWARE.                                                                      */
 /**********************************************************************************/
 
+#ifdef _WIN32
+#	define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #include <assert.h>
 #include <stdio.h>
 #include <math.h>
@@ -788,6 +792,38 @@ PTensor tensor_outer(real alpha, PTensor a, PTensor b, PTensor dest)
 PTensor tensor_gemm(real alpha, PTensor A, PTensor B, real beta, PTensor C)
 {
 	return C;
+}
+
+//-------------------------------
+// write tensor to CSV file
+//-------------------------------
+int tensor_save_to_file(PTensor t, const char *filename)
+{
+	assert(filename);
+	assert(t);
+	if (!t || !filename)
+		return -1;
+
+	FILE *fptr = fopen(filename, "wt");
+	if (!fptr)
+		return -1;
+
+	for (int row = 0; row < t->rows; row++)
+	{
+		for (int col = 0; col < t->cols; col++)
+		{
+			if (col != 0)
+				fputs(", ", fptr);
+
+			fprintf(fptr, "%f", t->values[row * t->cols + col]);
+		}
+
+		fputc('\n', fptr);
+	}
+
+	fclose(fptr);
+
+	return 0;
 }
 
 //------------------------------

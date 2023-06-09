@@ -254,7 +254,7 @@ PTensor tensor_create_random_uniform(int rows, int cols, real min, real max)
 }
 
 //------------------------------
-// returns y = a * x + y
+// returns y = alpha * x + y
 //------------------------------
 PTensor tensor_axpy(real alpha, PTensor x, PTensor y)
 {
@@ -287,9 +287,9 @@ PTensor tensor_axpy(real alpha, PTensor x, PTensor y)
 	return y;
 }
 
-//------------------------------
-// returns y = a * x + b * y
-//------------------------------
+//----------------------------------
+// returns y = alpha * x + beta * y
+//----------------------------------
 PTensor tensor_axpby(real alpha, PTensor x, real beta, PTensor y)
 {
 	if (!x || !y || x->rows != y->rows || x->cols != y->cols)
@@ -628,12 +628,12 @@ PTensor tensor_onehot(PTensor t, int classes)
 	return r;
 }
 
-//------------------------------
+//--------------------------------
 // return the horizontal sum of t
-//------------------------------
+//--------------------------------
 real tensor_sum(PTensor t)
 {
-	real sum = (real)0.0;
+	real sum;
 
 	if (!t || t->rows > 1)
 	{
@@ -646,6 +646,7 @@ real tensor_sum(PTensor t)
 #ifdef USE_BLAS
 	sum = cblas_sasum(limit, t->values, 1);
 #else
+	sum = (real)0.0
 	int i = 0;
 	for (; i < limit; i++)
 		sum += t->values[i];
@@ -663,8 +664,8 @@ PTensor tensor_exp(PTensor t)
 		return NULL;
 
 	int limit = t->rows * t->cols;
-	int i = 0;
 
+	int i = 0;
 	for (; i < limit; i++)
 		t->values[i] = (real)exp(t->values[i]);
 
@@ -685,9 +686,9 @@ PTensor tensor_argmax(PTensor t)
 
 //----------------------------------
 // compute the matrix-vector product
-// y = Ax + y
+// y = alpha * Ax + beta * v
 //----------------------------------
-PTensor tensor_matvec(TENSOR_TRANSPOSE trans, PTensor mtx, PTensor v, PTensor dest)
+PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, PTensor mtx, real beta, PTensor v, PTensor dest)
 {
 	if (trans == Tensor_NoTranspose && mtx->cols != v->cols)
 	{
@@ -696,7 +697,7 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, PTensor mtx, PTensor v, PTensor de
 	}
 
 #ifdef USE_BLAS
-	cblas_sgemv(CblasRowMajor, (trans == Tensor_NoTranspose) ? CblasNoTrans : CblasTrans, mtx->rows, mtx->cols, 1.0, mtx->values, mtx->cols, v->values, 1, 0.0, dest->values, 1);
+	cblas_sgemv(CblasRowMajor, (trans == Tensor_NoTranspose) ? CblasNoTrans : CblasTrans, mtx->rows, mtx->cols, alpha, mtx->values, mtx->cols, v->values, 1, beta, dest->values, 1);
 #else
 
 	real sum;
@@ -712,10 +713,10 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, PTensor mtx, PTensor v, PTensor de
 
 			for (int mtx_col = 0; mtx_col < mtx->cols; mtx_col++)
 			{
-				sum += mtx->values[mtx_row * mtx->cols + mtx_col] * v->values[mtx_col];
+				sum += alpha * mtx->values[mtx_row * mtx->cols + mtx_col] * v->values[mtx_col];
 			}
 
-			dest->values[mtx_row] = sum;
+			dest->values[mtx_row] = beta * dest->values[mtx_row] + sum;
 		}
 	}
 	else
@@ -728,10 +729,10 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, PTensor mtx, PTensor v, PTensor de
 
 			for (int mtx_row = 0; mtx_row < mtx->rows; mtx_row++)
 			{
-				sum += mtx->values[mtx_row * mtx->cols + mtx_col] * v->values[mtx_row];
+				sum += alpha * mtx->values[mtx_row * mtx->cols + mtx_col] * v->values[mtx_row];
 			}
 
-			dest->values[mtx_col] = sum;
+			dest->values[mtx_col] = beta * dest->values[mtx_col] + sum;
 		}
 	}
 
@@ -742,9 +743,9 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, PTensor mtx, PTensor v, PTensor de
 
 //---------------------------------
 // compute the tensor outer product
-// dest += a * b
+// dest += alpha * a * b
 //---------------------------------
-PTensor tensor_outer(PTensor a, PTensor b, PTensor dest)
+PTensor tensor_outer(real alpha, PTensor a, PTensor b, PTensor dest)
 {
 	if (a->cols != dest->rows || b->cols != dest->cols)
 	{
@@ -753,14 +754,26 @@ PTensor tensor_outer(PTensor a, PTensor b, PTensor dest)
 	}
 
 #ifdef USE_BLAS
-	cblas_sger(CblasRowMajor, dest->rows, dest->cols, 1.0, a->values, 1, b->values, 1, dest->values, dest->cols);
+	cblas_sger(CblasRowMajor, dest->rows, dest->cols, alpha, a->values, 1, b->values, 1, dest->values, dest->cols);
 #else
-
-	for (int a_col = 0; a_col < a->cols; a_col++)
+	if (alpha == 1.0)
 	{
-		for (int b_col = 0; b_col < b->cols; b_col++)
+		for (int a_col = 0; a_col < a->cols; a_col++)
 		{
-			dest->values[a_col * b->cols + b_col] += a->values[a_col] * b->values[b_col];
+			for (int b_col = 0; b_col < b->cols; b_col++)
+			{
+				dest->values[a_col * b->cols + b_col] += a->values[a_col] * b->values[b_col];
+			}
+		}
+	}
+	else
+	{
+		for (int a_col = 0; a_col < a->cols; a_col++)
+		{
+			for (int b_col = 0; b_col < b->cols; b_col++)
+			{
+				dest->values[a_col * b->cols + b_col] += alpha * a->values[a_col] * b->values[b_col];
+			}
 		}
 	}
 
@@ -768,6 +781,7 @@ PTensor tensor_outer(PTensor a, PTensor b, PTensor dest)
 
 	return dest;
 }
+
 //-------------------------------
 //
 //-------------------------------

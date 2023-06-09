@@ -316,7 +316,7 @@ static void eval_network(PNetwork pnet)
 	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
 	{
 		// y = Wx + b
-		tensor_matvec(Tensor_NoTranspose, pnet->layers[layer].t_weights, pnet->layers[layer].t_values, pnet->layers[layer + 1].t_values);
+		tensor_matvec(Tensor_NoTranspose, (real)1.0, pnet->layers[layer].t_weights, (real)0.0, pnet->layers[layer].t_values, pnet->layers[layer + 1].t_values);
 		tensor_add(pnet->layers[layer + 1].t_values, pnet->layers[layer].t_bias);
 
 		// apply activation function to values
@@ -353,10 +353,10 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	tensor_axpy(pnet->learning_rate, pLayer->t_values, pnet->layers[output_layer - 1].t_bias);
 
 	// gradient += dL_dy * z
-	tensor_outer(pLayer->t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
+	tensor_outer((real)1.0, pLayer->t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
 
 	// dL_dz = weights.T * dL_dy
-	tensor_matvec(Tensor_Transpose, pnet->layers[output_layer - 1].t_weights, pLayer->t_values, pnet->layers[output_layer - 1].t_dl_dz);
+	tensor_matvec(Tensor_Transpose, (real)1.0, pnet->layers[output_layer - 1].t_weights, (real)0.0, pLayer->t_values, pnet->layers[output_layer - 1].t_dl_dz);
 
 	//-------------------------------
 	// hidden layer back-propagation
@@ -384,10 +384,10 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_bias);
 
 		// gradient += dl_dz * x
-		tensor_outer(pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_values, pnet->layers[layer - 1].t_gradients);
+		tensor_outer((real)1.0, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_values, pnet->layers[layer - 1].t_gradients);
 
 		// dL_dz = weights.T * dL_dy
-		tensor_matvec(Tensor_Transpose, pnet->layers[layer - 1].t_weights, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_dl_dz);
+		tensor_matvec(Tensor_Transpose, (real)1.0, pnet->layers[layer - 1].t_weights, (real)0.0, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_dl_dz);
 	}
 }
 
@@ -893,7 +893,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	//tensor_free(y_valid);
 
 	time_t time_end = time(NULL);
-	double diff_t = (time_end - time_start);
+	double diff_t = (double)(time_end - time_start);
 	double per_step = 1000.0 * diff_t / (rows * epoch);
 
 	ann_printf(pnet, "\nTraining time: %f seconds, %f ms/step\n", diff_t, per_step);

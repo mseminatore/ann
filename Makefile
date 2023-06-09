@@ -1,6 +1,6 @@
 TARGET = ann
 OBJS = ann.o tensor.o
-DEPS = ann.h tensor.h
+DEPS = ann.h tensor.h ann_config.h
 CFLAGS = -g -mavx -O3 -I"/opt/OpenBLAS/include"
 
 LFLAGS = -L/opt/OpenBLAS/lib/ -lopenblas

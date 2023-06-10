@@ -119,23 +119,27 @@ typedef enum {
 // forward decls
 typedef struct Network Network;
 typedef struct Network *PNetwork;
+typedef struct Layer Layer;
+typedef struct Layer *PLayer;
 
 // function pointers for Network
 typedef real(*Loss_func) (PNetwork pnet, PTensor outputs);
 typedef void(*Output_func) (const char *);
 typedef void(*Optimization_func) (PNetwork pnet);
 typedef real(*Activation_func) (real);
+typedef void(*BackPropagate_func)(PNetwork pnet, PLayer layer, PLayer prev_layer);
 
 //------------------------------
 // Defines a layer in a network
 //------------------------------
-typedef struct
+struct Layer
 {
 	int node_count;						// number of nodes in layer
 
 	Layer_type layer_type;				// type of this layer
 	Activation_type activation;			// type of activation, none, sigmoid, Relu
 	Activation_func activation_func;	// node activation function
+	BackPropagate_func back_prop_func;	// back propagation function for this layer
 
 	PTensor t_values;					// tensor of node values for the layer
 	PTensor t_weights;					// tensor of weights for the layer
@@ -144,7 +148,7 @@ typedef struct
 	PTensor t_gradients;				// tensor of gradients for back propagation
 	PTensor t_dl_dz;					// tensor of dL_dz
 	PTensor t_bias;						// bias vector
-} Layer, *PLayer;
+};
 
 //------------------------------
 // Defines a network

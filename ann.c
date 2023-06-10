@@ -243,7 +243,7 @@ static void init_weights(PNetwork pnet)
 }
 
 //--------------------------------
-//
+// print nodes in the output layer
 //--------------------------------
 void print_outputs(PNetwork pnet)
 {
@@ -252,13 +252,8 @@ void print_outputs(PNetwork pnet)
 
 	puts("");
 
-	putchar('[');
-
 	PLayer pLayer = &pnet->layers[0];
 
-	//tensor_print(pLayer->t_values);
-
-	// print nodes in the output layer
 	pLayer = &pnet->layers[pnet->layer_count - 1];
 	tensor_print(pLayer->t_values);
 }
@@ -326,11 +321,70 @@ static void eval_network(PNetwork pnet)
 		}
 	}
 
-//	print_outputs(pnet);
-
 	// apply softmax on output, if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax(pnet);
+}
+
+//-------------------------------------------
+// propagate output error to prev layer
+//-------------------------------------------
+static void back_propagate_output(PNetwork pnet, PLayer layer, PLayer prev_layer, PTensor outputs)
+{
+	//-------------------------------
+	// output layer back-propagation
+	//-------------------------------
+
+	// compute dL_dy = (r - y)
+	tensor_axpby(1.0, outputs, -1.0, layer->t_values);
+
+	// bias = bias + n * dL_dy
+	tensor_axpy(pnet->learning_rate, layer->t_values, prev_layer->t_bias);
+
+	// gradient += dL_dy * z
+	tensor_outer((real)1.0, layer->t_values, prev_layer->t_values, prev_layer->t_gradients);
+
+	// dL_dz = weights.T * dL_dy
+	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_values, prev_layer->t_dl_dz);
+}
+
+//-------------------------------------------
+// propagate back for sigmoid layers
+//-------------------------------------------
+static void back_propagate_sigmoid(PNetwork pnet, PLayer layer, PLayer prev_layer)
+{
+	//
+	// gradient = dl_dz * z * (1 - z) * x = dl_dz_zomz * x 
+	//
+
+	// dl_dz = dl_dz * z
+	tensor_mul(layer->t_dl_dz, layer->t_values);
+
+	// z = z ^2
+	tensor_square(layer->t_values);
+
+	// z = z * dl_dz
+	tensor_mul(layer->t_values, layer->t_dl_dz);
+
+	// dl_dz = dl_dz - dl_dz * z^2
+	tensor_sub(layer->t_dl_dz, layer->t_values);
+
+	// bias = bias + n * dL_dz
+	tensor_axpy(pnet->learning_rate, layer->t_dl_dz, prev_layer->t_bias);
+
+	// gradient += dl_dz * x
+	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
+
+	// dL_dz = weights.T * dL_dy
+	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_dl_dz, prev_layer->t_dl_dz);
+}
+
+//-------------------------------------------
+// propagate back for RELU layers
+//-------------------------------------------
+static void back_propagate_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
+{
+
 }
 
 //-------------------------------------------
@@ -341,22 +395,7 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	// for each node in the output layer, excluding output layer bias node
 	int output_layer = pnet->layer_count - 1;
 
-	//-------------------------------
-	// output layer back-propagation
-	//-------------------------------
-	PLayer pLayer = &pnet->layers[output_layer];
-
-	// compute dL_dy = (r - y)
-	tensor_axpby(1.0, outputs, -1.0, pLayer->t_values);
-
-	// bias = bias + n * dL_dy
-	tensor_axpy(pnet->learning_rate, pLayer->t_values, pnet->layers[output_layer - 1].t_bias);
-
-	// gradient += dL_dy * z
-	tensor_outer((real)1.0, pLayer->t_values, pnet->layers[output_layer - 1].t_values, pnet->layers[output_layer - 1].t_gradients);
-
-	// dL_dz = weights.T * dL_dy
-	tensor_matvec(Tensor_Transpose, (real)1.0, pnet->layers[output_layer - 1].t_weights, (real)0.0, pLayer->t_values, pnet->layers[output_layer - 1].t_dl_dz);
+	back_propagate_output(pnet, &pnet->layers[output_layer], &pnet->layers[output_layer - 1], outputs);
 
 	//-------------------------------
 	// hidden layer back-propagation
@@ -364,36 +403,13 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	//-------------------------------
 	for (int layer = output_layer - 1; layer > 0; layer--)
 	{
-		//
-		// gradient = dl_dz * z * (1 - z) * x = dl_dz_zomz * x 
-		//
-
-		// dl_dz = dl_dz * z
-		tensor_mul(pnet->layers[layer].t_dl_dz, pnet->layers[layer].t_values);
-
-		// z = z ^2
-		tensor_square(pnet->layers[layer].t_values);
-
-		// z = z * dl_dz
-		tensor_mul(pnet->layers[layer].t_values, pnet->layers[layer].t_dl_dz);
-
-		// dl_dz = dl_dz - dl_dz * z^2
-		tensor_sub(pnet->layers[layer].t_dl_dz, pnet->layers[layer].t_values);
-
-		// bias = bias + n * dL_dz
-		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_bias);
-
-		// gradient += dl_dz * x
-		tensor_outer((real)1.0, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_values, pnet->layers[layer - 1].t_gradients);
-
-		// dL_dz = weights.T * dL_dy
-		tensor_matvec(Tensor_Transpose, (real)1.0, pnet->layers[layer - 1].t_weights, (real)0.0, pnet->layers[layer].t_dl_dz, pnet->layers[layer - 1].t_dl_dz);
+		pnet->layers[layer].back_prop_func(pnet, &pnet->layers[layer], &pnet->layers[layer - 1]);
 	}
 }
 
-//------------------------------
-// train the network over 
-//------------------------------
+//-------------------------------------------------
+// train the network over a single input/output set
+//-------------------------------------------------
 static real train_pass_network(PNetwork pnet, PTensor inputs, PTensor outputs)
 {
 	if (!pnet || !inputs || !outputs)
@@ -439,7 +455,7 @@ static void shuffle_indices(int *input_indices, int count)
 }
 
 //-----------------------------------------------
-//
+// null optimization
 //-----------------------------------------------
 static void optimize_none(PNetwork pnet)
 {
@@ -506,8 +522,6 @@ static void optimize_sgd(PNetwork pnet)
 	{
 		// W = W + n * gradients
 		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_gradients, pnet->layers[layer].t_weights);
-
-		// TODO - update bias vector here?
 	}
 }
 
@@ -633,15 +647,18 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	int cur_layer = pnet->layer_count - 1;
 	pnet->layers[cur_layer].layer_type = layer_type;
 	pnet->layers[cur_layer].activation = activation_type;
+	pnet->layers[cur_layer].back_prop_func = NULL;
 
 	switch (activation_type)
 	{
 	case ACTIVATION_SIGMOID:
 		pnet->layers[cur_layer].activation_func = sigmoid;
+		pnet->layers[cur_layer].back_prop_func	= back_propagate_sigmoid;
 		break;
 
 	case ACTIVATION_RELU:
 		pnet->layers[cur_layer].activation_func = relu;
+		pnet->layers[cur_layer].back_prop_func	= back_propagate_relu;
 		break;
 
 	case ACTIVATION_LEAKY_RELU:

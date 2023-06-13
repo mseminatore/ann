@@ -125,29 +125,27 @@ int main(int argc, char *argv[])
     PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_MSE);
 
     // setup training tensors
-	PTensor x_train = tensor_create_from_array(rows, stride, data);
-	PTensor y_train = tensor_slice_cols(x_train, 2);
+    PTensor x_train = tensor_create_from_array(rows, stride, data);
+    PTensor y_train = tensor_slice_cols(x_train, 2);
 
-	// define our network structure
-	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
-	ann_add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
-
-	pnet->batchSize = 1;
+    // define our network structure
+    ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
     // train the network
-	ann_train_network(pnet, x_train, y_train, x_train->rows);
+    ann_train_network(pnet, x_train, y_train, x_train->rows);
 	
     // make a prediction using the trained network
-	real outputs[1];
-	ann_predict(pnet, &data[0], outputs);
+    real outputs[1];
+    ann_predict(pnet, &data[0], outputs);
 
-	print_outputs(pnet);
+    print_outputs(pnet);
 
     // free resources
-	ann_free_network(pnet);
-	free(data);
+    ann_free_network(pnet);
+    free(data);
 
-	return 0;
+    return 0;
 }
 ```
 

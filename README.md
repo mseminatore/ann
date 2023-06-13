@@ -112,16 +112,16 @@ calls.
 //------------------------------
 int main(int argc, char *argv[])
 {
-	real *data;
-	int rows, stride;
+    real *data;
+    int rows, stride;
 
-	// load the data
-	if (argc > 1)
-		ann_load_csv(argv[1], CSV_NO_HEADER, &data, &rows, &stride);
-	else
-		ann_load_csv("and.csv", CSV_NO_HEADER, &data, &rows, &stride);
+    // load the data
+    if (argc > 1)
+    	ann_load_csv(argv[1], CSV_NO_HEADER, &data, &rows, &stride);
+    else
+    	ann_load_csv("and.csv", CSV_NO_HEADER, &data, &rows, &stride);
 
-	// create a new empty network
+    // create a new empty network
     PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_MSE);
 
     // setup training tensors

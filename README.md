@@ -6,14 +6,16 @@ code is written in ANSI C for portability. It is compiled and tested regularly
 on Windows (x86 and x64) and Mac OSX (Intel and Mx).
 
 There are two main components to the library. The first is a lightweight Tensor library, `tensor.c`. The second is a minimal training and inference runtime, 
-`ann.c`.
+`ann.c`. Integrating the code into another application requires adding these
+two files to the project or linking to the libann library.
 
->The tensor library is not meant to be a comprehensive library. It provides only
+> The tensor library is not meant to be a comprehensive library. It provides only
 > the functions needed to support the inference runtime.
 
 # Tensor library
 
-The following tensor library functions are provided.
+The following tensor library functions are provided. Key functions include 
+both scalar and vectorized versions.
 
 Function | Description
 ---------|------------
@@ -49,7 +51,7 @@ tensor_fill | fill a tensor with a value
 tensor_random_uniform | fill a tensor with random values
 tensor_print | print out a tensor
 
-# ANN library
+# ANN training and inference library
 
 The following training and inference runtime functions are provided.
 
@@ -85,6 +87,16 @@ multiple platforms. Though not yet tested, the
 The `USE_BLAS` define controls whether the provided scalar tensor code
 path is used or the BLAS code path.
 
+# Known Issues
+
+There are a few portions of the library that are currently under construction.
+These are:
+
+- RELU, leaky RELU, Tanh and softsign activation not yet functional
+- Adagrad optimizer not yet vectorized
+- RMSProp optimizer not yet vectorized
+- Adam optimizer not yet vectorized
+
 # Example usage
 
 Basic usage of the library for training and prediction involves just a few function
@@ -109,30 +121,34 @@ int main(int argc, char *argv[])
 	else
 		ann_load_csv("and.csv", CSV_NO_HEADER, &data, &rows, &stride);
 
-	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_MSE);
+	// create a new empty network
+    PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_MSE);
 
+    // setup training tensors
 	PTensor x_train = tensor_create_from_array(rows, stride, data);
 	PTensor y_train = tensor_slice_cols(x_train, 2);
 
-	// define our network
+	// define our network structure
 	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
 	ann_add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
 	pnet->batchSize = 1;
-	
+
+    // train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows);
 	
+    // make a prediction using the trained network
 	real outputs[1];
 	ann_predict(pnet, &data[0], outputs);
 
 	print_outputs(pnet);
 
+    // free resources
 	ann_free_network(pnet);
-
 	free(data);
+
 	return 0;
 }
 ```
 
 # Datasets
-

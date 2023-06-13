@@ -791,6 +791,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	if (!pnet)
 		return 0.0;
 
+	// ensure batch size is appropriate
+	if (rows < 5000)
+		pnet->batchSize = 1;		
+
 	ann_printf(pnet,	"\nTraining ANN\n"
 						"------------\n");
 	ann_print_props(pnet);

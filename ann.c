@@ -1009,17 +1009,6 @@ void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
 }
 
 //------------------------------
-//
-//------------------------------
-static void free_node(PNode pnode)
-{
-	free(pnode->weights);
-	free(pnode->m);
-	free(pnode->v);
-	free(pnode->gradients);
-}
-
-//------------------------------
 // free a network
 //------------------------------
 void ann_free_network(PNetwork pnet)

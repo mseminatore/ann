@@ -11,6 +11,8 @@ There are two main components to the library. The first is a lightweight Tensor 
 
 # Tensor library
 
+The following tensor library functions are provided.
+
 Function | Description
 ---------|------------
 tensor_create | create a new empty tensor
@@ -47,5 +49,20 @@ tensor_print | print out a tensor
 
 # ANN library
 
+The following training and inference runtime functions are provided.
 
+Function | Description
+-------- | -----------
+ann_make_network | create a new neural network
+ann_add_layer | add a layer to the network
+ann_free_network | free a network
+ann_load_csv | load data from a csv file to a tensor
+ann_load_network | load a previously saved network (text)
+ann_save_network | save a trained network (text)
+ann_load_network_binary | load a previously saved network (binary)
+ann_save_network_binary | save a trained network (binary)
+ann_train_network | train a network
+ann_predict| predict outputs based on a trained network
+
+# Datasets
 

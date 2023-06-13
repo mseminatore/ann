@@ -58,19 +58,6 @@
 #define ERR_OK 0
 
 //------------------------------
-// Defines a node
-//------------------------------
-typedef struct
-{
-	real *weights;		// array of node weights
-	real *m;			// momentum
-	real *v;			// velocity
-	real *gradients;	// gradients
-	real value;			// node value
-	real dl_dz;			// gradient term for this node
-} Node, *PNode;
-
-//------------------------------
 // Layer types
 //------------------------------
 typedef enum { 

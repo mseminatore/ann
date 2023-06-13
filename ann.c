@@ -21,7 +21,9 @@
 /* SOFTWARE.                                                                      */
 /**********************************************************************************/
 
-#define _CRT_SECURE_NO_WARNINGS
+#ifdef _WIN32
+#	define _CRT_SECURE_NO_WARNINGS
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,13 +34,13 @@
 #include <time.h>
 #include "ann.h"
 
+//-----------------------------------------------
 // define the text and binary file format versions
+//-----------------------------------------------
 #define ANN_TEXT_FORMAT_VERSION 1
 #define ANN_BINARY_FORMAT_VERSION 1
 
 #if defined(_WIN32) && !defined(_WIN64)
-	//#define R_MIN -0.05
-	//#define R_MAX 0.05
 #	define R_MIN -1
 #	define R_MAX 1
 #else
@@ -917,7 +919,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 //------------------------------
 // evaluate the accuracy 
 //------------------------------
-real ann_evaluate(PNetwork pnet, PTensor inputs, PTensor outputs)
+real ann_evaluate_accuracy(PNetwork pnet, PTensor inputs, PTensor outputs)
 {
 	int correct = 0;
 

@@ -34,12 +34,6 @@
 //----------------------------------
 typedef float real;
 
-#ifdef _M_AMD64
-	typedef int tsize;
-#else
-	typedef int tsize;
-#endif
-
 #ifndef max
 #	define max(a, b) (((a) > (b)) ? (a) : (b))
 #endif
@@ -55,7 +49,7 @@ typedef struct
 } Tensor, *PTensor;
 
 //------------------------------
-//
+// flags for matvec operation
 //------------------------------
 typedef enum TENSOR_TRANSPOSE {
 	Tensor_NoTranspose, 

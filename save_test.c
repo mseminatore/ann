@@ -29,7 +29,7 @@ int main(int argc, char *argv[])
 	tensor_mul_scalar(x_test, (real)(1.0 / 255.0));
 	
 	// evaluate the network against the test data
-	real acc = ann_evaluate(pnet, x_test, y_test);
+	real acc = ann_evaluate_accuracy(pnet, x_test, y_test);
 	printf("\nTest accuracy: %g%%\n", acc * 100);
 
 	// free memory

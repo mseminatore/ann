@@ -62,7 +62,26 @@ ann_save_network | save a trained network (text)
 ann_load_network_binary | load a previously saved network (binary)
 ann_save_network_binary | save a trained network (binary)
 ann_train_network | train a network
-ann_predict| predict outputs based on a trained network
+ann_predict | predict an output using a previously trained network
+ann_set_convergence | set the convergence threshold (optional)
+ann_evaluate_accuracy | evaluate accuracy of trained network using test data
+ann_set_learning_rate | override the default learning rate
+ann_set_loss_function | set the loss function
+
+# Accelerating training wiht BLAS libraries
+
+The `tensor` functions used for training and inference can be accelerated
+using BLAS libraries, providing significant training speed increases. 
+Many BLAS libraries use multi-threading and SIMD instructions with cache
+aware partitioning algorithms to accelerate the various vector and matrix
+operations used with ML training and inference.
+
+The code is regularly tested against [OpenBLAS](https://openblas.net) on
+multiple platforms. Though not yet tested, the Intel MKL library should 
+also work with appropriate build setup.
+
+The `USE_BLAS` define controls whether the provided scalar tensor code
+path is used or the BLAS code path.
 
 # Datasets
 

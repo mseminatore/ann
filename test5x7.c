@@ -98,7 +98,7 @@ int main(int argc, char *argv[])
 		printf("Actual class: %d\n", class + 1);
 	}
 
-	real acc = ann_evaluate(pnet, x_train, y_train);
+	real acc = ann_evaluate_accuracy(pnet, x_train, y_train);
 	printf("Train accuracy: %g%%\n", acc * 100);
 	printf("Test accuracy: %g%%\n", (real)correct * 10);
 

@@ -650,7 +650,7 @@ real tensor_sum(PTensor t)
 #ifdef USE_BLAS
 	sum = cblas_sasum(limit, t->values, 1);
 #else
-	sum = (real)0.0
+	sum = (real)0.0;
 	int i = 0;
 	for (; i < limit; i++)
 		sum += t->values[i];

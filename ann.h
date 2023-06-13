@@ -47,15 +47,17 @@
 #define DEFAULT_MSE_AVG			4		// number of prior MSE's to average
 #define DEFAULT_BATCH_SIZE		32
 
-//
-#define CSV_HAS_HEADER 1
-#define CSV_NO_HEADER 0
+//-----------------------------------------------
+// flags for CSV reader
+//-----------------------------------------------
+#define CSV_HAS_HEADER 	1
+#define CSV_NO_HEADER 	0
 
 //------------------------------
 // Error values
 //------------------------------
-#define ERR_FAIL -1
-#define ERR_OK 0
+#define ERR_FAIL 	-1
+#define ERR_OK 		0
 
 //------------------------------
 // Layer types
@@ -103,13 +105,17 @@ typedef enum {
 } Optimizer_type;
 
 
+//-----------------------------------------------
 // forward decls
+//-----------------------------------------------
 typedef struct Network Network;
 typedef struct Network *PNetwork;
 typedef struct Layer Layer;
 typedef struct Layer *PLayer;
 
+//-----------------------------------------------
 // function pointers for Network
+//-----------------------------------------------
 typedef real(*Loss_func) (PNetwork pnet, PTensor outputs);
 typedef void(*Output_func) (const char *);
 typedef void(*Optimization_func) (PNetwork pnet);
@@ -168,7 +174,7 @@ struct Network
 };
 
 //------------------------------
-// ANN function decls
+// ANN public function decls
 //------------------------------
 
 // building/freeing network model
@@ -186,7 +192,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 void ann_set_convergence(PNetwork pnet, real limit);
 int ann_predict(PNetwork pnet, real *inputs, real *outputs);
 int ann_class_prediction(real *outputs, int classes);
-real ann_evaluate(PNetwork pnet, PTensor inputs, PTensor outputs);
+real ann_evaluate_accuracy(PNetwork pnet, PTensor inputs, PTensor outputs);
 
 // get/set/show network properties
 void ann_set_learning_rate(PNetwork pnet, real rate);

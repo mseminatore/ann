@@ -46,7 +46,7 @@ int main(int argc, char *argv[])
 	ann_train_network(pnet, x_train, y_train, x_train->rows);
 
 	// evaluate the network against the training data
-	real acc = ann_evaluate(pnet, x_test, y_test);
+	real acc = ann_evaluate_accuracy(pnet, x_test, y_test);
 	printf("\nTest accuracy: %g%%\n", acc * 100);
 
 	real outputs[1];

@@ -1,7 +1,9 @@
-# ann
+# libann
 
 The goal of this library is to provide a compact, light-weight, portable library
-of primitives that can be used for training and evaluating Neural Networks.
+of primitives that can be used for training and evaluating Neural Networks. The
+code is written in ANSI C for portability. It is compiled and tested regularly
+on Windows (x86 and x64) and Mac OSX (Intel and Mx).
 
 There are two main components to the library. The first is a lightweight Tensor library, `tensor.c`. The second is a minimal training and inference runtime, 
 `ann.c`.
@@ -68,20 +70,69 @@ ann_evaluate_accuracy | evaluate accuracy of trained network using test data
 ann_set_learning_rate | override the default learning rate
 ann_set_loss_function | set the loss function
 
-# Accelerating training wiht BLAS libraries
+# Accelerating training with BLAS libraries
 
 The `tensor` functions used for training and inference can be accelerated
-using BLAS libraries, providing significant training speed increases. 
+using [BLAS](https://en.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms) libraries, often providing significant training speed increases. 
 Many BLAS libraries use multi-threading and SIMD instructions with cache
 aware partitioning algorithms to accelerate the various vector and matrix
 operations used with ML training and inference.
 
 The code is regularly tested against [OpenBLAS](https://openblas.net) on
-multiple platforms. Though not yet tested, the Intel MKL library should 
-also work with appropriate build setup.
+multiple platforms. Though not yet tested, the 
+[Intel MKL library](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) should also work with appropriate build setup.
 
 The `USE_BLAS` define controls whether the provided scalar tensor code
 path is used or the BLAS code path.
+
+# Example usage
+
+Basic usage of the library for training and prediction involves just a few function
+calls.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include "ann.h"
+
+//------------------------------
+//
+//------------------------------
+int main(int argc, char *argv[])
+{
+	real *data;
+	int rows, stride;
+
+	// load the data
+	if (argc > 1)
+		ann_load_csv(argv[1], CSV_NO_HEADER, &data, &rows, &stride);
+	else
+		ann_load_csv("and.csv", CSV_NO_HEADER, &data, &rows, &stride);
+
+	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_MSE);
+
+	PTensor x_train = tensor_create_from_array(rows, stride, data);
+	PTensor y_train = tensor_slice_cols(x_train, 2);
+
+	// define our network
+	ann_add_layer(pnet, 2, LAYER_INPUT, ACTIVATION_NULL);
+	ann_add_layer(pnet, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+
+	pnet->batchSize = 1;
+	
+	ann_train_network(pnet, x_train, y_train, x_train->rows);
+	
+	real outputs[1];
+	ann_predict(pnet, &data[0], outputs);
+
+	print_outputs(pnet);
+
+	ann_free_network(pnet);
+
+	free(data);
+	return 0;
+}
+```
 
 # Datasets
 

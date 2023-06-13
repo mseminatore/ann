@@ -89,7 +89,6 @@ PTensor tensor_square(PTensor t);
 PTensor tensor_exp(PTensor t);
 PTensor tensor_argmax(PTensor t);
 PTensor tensor_max(PTensor t);
-PTensor tensor_exp(PTensor t);
 real tensor_sum(PTensor t);
 PTensor tensor_axpy(real alpha, PTensor x, PTensor y);
 PTensor tensor_gemm(real alpha, PTensor A, PTensor B, real beta, PTensor C);

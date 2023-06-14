@@ -149,10 +149,27 @@ int main(int argc, char *argv[])
 }
 ```
 
+# Examples
+
+There are a few example projects included to help you familiarize yourself
+with the library and its usage. These are:
+
+* logic - a simple linear regression model for AND, OR, NOR logic
+* digit5x7 - multi-class model for learning 5x7 character digits
+* save_test - demonstrates loading and testing a pre-trained model file
+* mnist - model for the MNIST datasets (digit or fashion)
+
+> Note that digit5x7 cannot learn XOR, because it is not a linearly
+> separable function and therefore cannot be solved using linear
+> regression
+
 # Machine learning Datasets
 
-There are a number of freely available datasets for learning and practicing
-machine learning.
+If you are not familiar with NN libraries and usage you may find it helpful
+to work with existing datasets which have well explored solution spaces.
+
+To help with this, there are a number of freely available datasets for 
+learning and practicing machine learning.
 
 * [10 Standard Datasets for Practicing Applied Machine Learning](https://machinelearningmastery.com/standard-machine-learning-datasets/)
 * [TensorFlow Datasets](https://www.tensorflow.org/datasets/catalog/overview)

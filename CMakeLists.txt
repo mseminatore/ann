@@ -23,6 +23,3 @@ target_link_libraries(logic ann openblas)
 
 add_executable(save_test save_test.c)
 target_link_libraries(save_test ann openblas)
-
-add_executable(pima pima.c)
-target_link_libraries(pima ann openblas)

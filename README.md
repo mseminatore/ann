@@ -3,14 +3,15 @@
 The goal of this library is to provide a compact, light-weight, portable library
 of primitives that can be used for training and evaluating Neural Networks. The
 code is written in ANSI C for portability. It is compiled and tested regularly
-on Windows (x86 and x64) and Mac OSX (Intel and Mx).
+on Windows (x86 and x64) using Visual Studio and clang, and Mac OSX (Intel and Mx)
+using clang. It should build fine on Linux using gcc.
 
 There are two main components to the library. The first is a lightweight Tensor library, `tensor.c`. The second is a minimal training and inference runtime, 
 `ann.c`. Integrating the code into another application requires adding these
 two files to the project or linking to the libann library.
 
 > The tensor library is not meant to be a comprehensive library. It provides only
-> the functions needed to support the inference runtime.
+> the minimal set of functions needed to support the inference runtime.
 
 # Tensor library
 
@@ -168,13 +169,13 @@ There are a few example projects included to help you familiarize yourself
 with the library and its usage. These are:
 
 * logic - a simple linear regression model for AND, OR, NOR logic
-* digit5x7 - multi-class model for learning 5x7 character digits
+* digit5x7 - multi-class image classification model for learning 5x7 character digits
 * save_test - demonstrates loading and testing a pre-trained model file
 * mnist - model for the MNIST datasets (digit or fashion)
 
-> Note that digit5x7 cannot learn XOR, because it is not a linearly
-> separable function and therefore cannot be solved using a linear
-> regression model
+> Note that digit5x7 is not able to learn XOR. That is because XOR is not 
+> a linearly separable function and therefore it cannot be learned using 
+> a linear regression model. For XOR, a hidden layer is required.
 
 # Machine learning Datasets
 

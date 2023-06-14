@@ -149,4 +149,13 @@ int main(int argc, char *argv[])
 }
 ```
 
-# Datasets
+# Machine learning Datasets
+
+There are a number of freely available datasets for learning and practicing
+machine learning.
+
+* [10 Standard Datasets for Practicing Applied Machine Learning](https://machinelearningmastery.com/standard-machine-learning-datasets/)
+* [TensorFlow Datasets](https://www.tensorflow.org/datasets/catalog/overview)
+* [Kaggle Datasets](https://www.kaggle.com/datasets?fileType=csv)
+* [MNIST Digits](https://www.kaggle.com/datasets/oddrationale/mnist-in-csv)
+* [MNIST Fashion](https://www.kaggle.com/datasets/tk230147/fashion-mnist)

@@ -382,6 +382,18 @@ static void back_propagate_sigmoid(PNetwork pnet, PLayer layer, PLayer prev_laye
 //-------------------------------------------
 static void back_propagate_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
 {
+	//
+	// gradient = dl_dz * d * x where d is derivative of RELU(x) which is 0 or 1
+	//
+	
+	// dl_dz = dl_dz * x
+	tensor_mul(layer->t_dl_dz, layer->t_values);
+
+	// 
+
+	// bias = bias + n * dl_dz
+
+	// gradient += dl_dz * d * x
 
 }
 

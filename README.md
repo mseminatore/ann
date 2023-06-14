@@ -149,6 +149,19 @@ int main(int argc, char *argv[])
 }
 ```
 
+# Building
+
+You can build the code either from the provided `Makefile` or using `CMake`.
+
+To build using `CMake`:
+
+```
+% md build
+% cd build
+% cmake ..
+% cmake --build .
+```
+
 # Examples
 
 There are a few example projects included to help you familiarize yourself
@@ -160,8 +173,8 @@ with the library and its usage. These are:
 * mnist - model for the MNIST datasets (digit or fashion)
 
 > Note that digit5x7 cannot learn XOR, because it is not a linearly
-> separable function and therefore cannot be solved using linear
-> regression
+> separable function and therefore cannot be solved using a linear
+> regression model
 
 # Machine learning Datasets
 

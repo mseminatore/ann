@@ -27,7 +27,10 @@
 #include <math.h>
 #include <time.h>
 #include "ann.h"
-#include <cblas.h>
+
+#ifdef USE_BLAS
+#	include <cblas.h>
+#endif
 
 static int threads = -1;
 

@@ -6,12 +6,29 @@ project(ann VERSION 1.0)
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
 
-if ( WIN32 )
-    include_directories("./cblas/include")
-    link_directories("/opt/lib")
+set(MATH_LIB "")
+
+# link math lib for gcc/linux
+if ( LINUX )
+    message("Linux build: add -lm to linker options")
+    set(MATH_LIB "m")
+#    add_link_options("-l:libm.a")
+endif()
+
+# build with or without BLAS library
+if ( USE_BLAS )
+    message("BLAS library build requested...")
+    add_compile_options(-DUSE_BLAS)
+    set(BLAS_LIB "openblas")
+    if ( WIN32 )
+        include_directories("./cblas/include")
+        link_directories("/opt/lib")
+    else()
+        include_directories("/opt/OpenBLAS/include")
+        link_directories("/opt/OpenBLAS/lib")
+    endif()
 else()
-    include_directories("/opt/OpenBLAS/include")
-    link_directories("/opt/OpenBLAS/lib")
+    set(BLAS_LIB "")
 endif()
 
 # add the library
@@ -19,13 +36,13 @@ add_library(ann STATIC ann.c tensor.c)
 
 # add the executables
 add_executable(mnist mnist.c)
-target_link_libraries(mnist ann openblas)
+target_link_libraries(mnist ann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(digit5x7 digit5x7.c)
-target_link_libraries(digit5x7 ann openblas)
+target_link_libraries(digit5x7 ann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(logic logic.c)
-target_link_libraries(logic ann openblas)
+target_link_libraries(logic ann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(save_test save_test.c)
-target_link_libraries(save_test ann openblas)
+target_link_libraries(save_test ann ${BLAS_LIB} ${MATH_LIB})

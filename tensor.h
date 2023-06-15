@@ -27,6 +27,7 @@
 #define __TENSOR_H
 
 #include <stdlib.h>
+#include <stdint.h>
 #include "ann_config.h"
 
 //----------------------------------

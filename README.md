@@ -1,31 +1,38 @@
 # libann
 
+[![CMake](https://github.com/mseminatore/ann/actions/workflows/cmake.yml/badge.svg)](https://github.com/mseminatore/ann/actions/workflows/cmake.yml)
+
+`libann` is a library for Artificial Neural Networks (ANN).
+
 The goal of this library project is to provide a compact, light-weight, 
 portable library of primitives that can be used for training and evaluating
 Neural Networks. The code is written in ANSI C for portability. It is compiled
-and tested regularly on Windows (x86 and x64) using Visual Studio and clang, 
-and Mac OSX (Intel and Mx) using clang. It should also build fine on Linux 
-using gcc.
+and tested regularly for the following configurations:
+
+* Windows (x86 and x64) using Visual Studio and clang
+* Mac OSX (Intel and M1) using clang
+* Ubuntu Linux using gcc
 
 There are two main components to the library. The first is a lightweight Tensor
 library, `tensor.c`. The second is a minimal training and inference runtime, 
-`ann.c`. Integrating the code into another application requires adding these
-two files to the project or linking to the libann library.
+`ann.c`. Integrating the code into another application requires adding only these
+two files to the project, or linking to the `libann` library.
 
-> The tensor library is not meant to be a comprehensive tensor library. For 
-> example, rank 3 tensors are not supported. It provides only the minimal set of 
-> functions needed to support the current inference runtime.
+> The tensor library is not meant to be a comprehensive tensor library. It provides 
+> only the minimal set of functions needed to support the current inference runtime.
 
 # Tensor library
 
 The `tensor` module provides the fundamental mathematical operations over 
-vectors and matrices required by neural networks. The module does not currently
-support 3D, or rank 3, tensors. 
+vectors and matrices required by neural networks.
 
-> Support for rank 3 tensors may be added in the future.
+> The module does not currently support 3D, or rank 3, tensors. Support for 
+> rank 3 tensors may be added in the future.
 
 Key functions include both scalar and vectorized versions controlled by the
-`USE_BLAS` compiler define.
+`USE_BLAS` compiler define. The default build uses the non-optimized scalar
+versions. Build using `-DUSE_BLAS` or edit **ann_config.h** and uncomment the
+`USE_BLAS` define.
 
 ## Functions
 
@@ -72,17 +79,17 @@ using several types of gradient descent and backpropagation methods. The
 `tensor` module provides the underlying math operations required.
 
 The module supports both **Mean-Squared Error** and **Categorical Cross Entropy** for 
-loss functions. This is set when a network is created via `ann_make_network()`.
+loss functions. This option is set when a network is created via `ann_make_network()`.
 
-For training, the module supports **Stochastic Gradient Descent**, and 
+For training, the module provides **Stochastic Gradient Descent**, and 
 **Momentum** optimizers. Support for **RMSProp**, **AdaGrad** and **Adam** is
 in progress.
 
-Layer activation types supported are **None**, **Sigmoid** and **Softmax**.
+Layer activation types currently supported are **None**, **Sigmoid** and **Softmax**.
 Support for **RELU** is in progress.
 
-For performance, mini-batching is supported and can be configured in several 
-ways.
+For performance, mini-batch support is provided. It can be configured along with other  
+hyper-parameters either directly via the network object or through set_xx functions.
 
 ## Functions
 

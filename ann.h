@@ -30,7 +30,6 @@
 
 #ifdef _WIN32
 #	include <malloc.h>
-#	include <stdint.h>
 #else
 #	include <alloca.h>
 #endif

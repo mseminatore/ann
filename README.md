@@ -69,6 +69,16 @@ The `ann` module provides functions for training and testing a neural network
 using several types of gradient descent and backpropagation methods. The 
 `tensor` module provides the underlying math operations required.
 
+The module supports both **Mean-Squared Error** and **Categorical Cross Entropy** for 
+loss functions. This is set when a network is created via `ann_make_network()`.
+
+For training, the module supports **Stochastic Gradient Descent**, and 
+**Momentum** optimizers. Support for **RMSProp**, **AdaGrad** and **Adam** is
+in progress.
+
+Layer activation types supported are **None**, **Sigmoid** and **Softmax**.
+Support for **RELU** is in progress.
+
 For performance, mini-batching is supported and can be configured in several 
 ways.
 

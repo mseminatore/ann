@@ -8,6 +8,7 @@ include_directories(${PROJECT_SOURCE_DIR})
 
 # link math lib for gcc/linux
 if ( LINUX )
+    message("Linux build: add -lm to linker options")
     add_link_options(-lm)
 endif()
 

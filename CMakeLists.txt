@@ -6,10 +6,13 @@ project(ann VERSION 1.0)
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
 
+set(MATH_LIB "")
+
 # link math lib for gcc/linux
 if ( LINUX )
     message("Linux build: add -lm to linker options")
-    add_link_options("-lm")
+    set(MATH_LIB "libm")
+#    add_link_options("-lm")
 endif()
 
 # build with or without BLAS library
@@ -33,13 +36,13 @@ add_library(ann STATIC ann.c tensor.c)
 
 # add the executables
 add_executable(mnist mnist.c)
-target_link_libraries(mnist ann ${BLAS_LIB})
+target_link_libraries(mnist ann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(digit5x7 digit5x7.c)
-target_link_libraries(digit5x7 ann ${BLAS_LIB})
+target_link_libraries(digit5x7 ann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(logic logic.c)
-target_link_libraries(logic ann ${BLAS_LIB})
+target_link_libraries(logic ann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(save_test save_test.c)
-target_link_libraries(save_test ann ${BLAS_LIB})
+target_link_libraries(save_test ann ${BLAS_LIB} ${MATH_LIB})

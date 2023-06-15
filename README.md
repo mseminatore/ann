@@ -2,12 +2,16 @@
 
 [![CMake](https://github.com/mseminatore/ann/actions/workflows/cmake.yml/badge.svg)](https://github.com/mseminatore/ann/actions/workflows/cmake.yml)
 
+`libann` is a library for Artificial Neural Networks (ANN).
+
 The goal of this library project is to provide a compact, light-weight, 
 portable library of primitives that can be used for training and evaluating
 Neural Networks. The code is written in ANSI C for portability. It is compiled
-and tested regularly on Windows (x86 and x64) using Visual Studio and clang, 
-and Mac OSX (Intel and Mx) using clang. It should also build fine on Linux 
-using gcc.
+and tested regularly for the following configurations:
+
+* Windows (x86 and x64) using Visual Studio and clang
+* Mac OSX (Intel and M1) using clang
+* Ubuntu Linux using gcc
 
 There are two main components to the library. The first is a lightweight Tensor
 library, `tensor.c`. The second is a minimal training and inference runtime, 
@@ -21,13 +25,15 @@ two files to the project or linking to the libann library.
 # Tensor library
 
 The `tensor` module provides the fundamental mathematical operations over 
-vectors and matrices required by neural networks. The module does not currently
-support 3D, or rank 3, tensors. 
+vectors and matrices required by neural networks.
 
-> Support for rank 3 tensors may be added in the future.
+> The module does not currently support 3D, or rank 3, tensors. Support for 
+> rank 3 tensors may be added in the future.
 
 Key functions include both scalar and vectorized versions controlled by the
-`USE_BLAS` compiler define.
+`USE_BLAS` compiler define. The default build uses the non-optimized scalar
+versions. Build using `-DUSE_BLAS` or edit ann_config.h and uncomment the
+`USE_BLAS` define.
 
 ## Functions
 

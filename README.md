@@ -223,6 +223,16 @@ with the library and its usage. These are:
 > a linearly separable function and therefore it cannot be learned using 
 > a linear regression model. For XOR, a hidden layer is required.
 
+The **logic** sample optionally takes the name of dataset on the command line. Data
+files are provided for `AND`, `OR`, and `NAND`. For example:
+
+```
+% ./logic or.csv
+```
+
+The **save_test** sample reads in a previously trained network for the MNIST fashion
+dataset. It will load and create the network from the file `mnist-fashion.nna`. It then expects to find the test file `mnist-fashion_test.csv` in the current directory.
+
 # Machine learning Datasets
 
 If you are not familiar with NN libraries and usage you may find it helpful

@@ -1,22 +1,33 @@
 # libann
 
-The goal of this library is to provide a compact, light-weight, portable library
-of primitives that can be used for training and evaluating Neural Networks. The
-code is written in ANSI C for portability. It is compiled and tested regularly
-on Windows (x86 and x64) using Visual Studio and clang, and Mac OSX (Intel and Mx)
-using clang. It should build fine on Linux using gcc.
+The goal of this library project is to provide a compact, light-weight, 
+portable library of primitives that can be used for training and evaluating
+Neural Networks. The code is written in ANSI C for portability. It is compiled
+and tested regularly on Windows (x86 and x64) using Visual Studio and clang, 
+and Mac OSX (Intel and Mx) using clang. It should also build fine on Linux 
+using gcc.
 
-There are two main components to the library. The first is a lightweight Tensor library, `tensor.c`. The second is a minimal training and inference runtime, 
+There are two main components to the library. The first is a lightweight Tensor
+library, `tensor.c`. The second is a minimal training and inference runtime, 
 `ann.c`. Integrating the code into another application requires adding these
 two files to the project or linking to the libann library.
 
-> The tensor library is not meant to be a comprehensive library. It provides only
-> the minimal set of functions needed to support the inference runtime.
+> The tensor library is not meant to be a comprehensive library. For example,
+> rank 3 tensors are not supported. It provides only the minimal set of 
+> functions needed to support the inference runtime.
 
 # Tensor library
 
-The following tensor library functions are provided. Key functions include 
-both scalar and vectorized versions.
+The `tensor` module provides the fundamental mathematical operations over 
+vectors and matrices required by neural networks. The module does not currently
+support 3D or rank 3 tensors.
+
+Key functions include both scalar and vectorized versions controlled by the
+`USE_BLAS` compiler define.
+
+## Functions
+
+The following tensor library functions are provided.
 
 Function | Description
 ---------|------------
@@ -53,6 +64,15 @@ tensor_random_uniform | fill a tensor with random values
 tensor_print | print out a tensor
 
 # ANN training and inference library
+
+The `ann` module provides functions for training and testing a neural network
+using several types of gradient descent and backpropagation methods. The 
+`tensor` module provides the underlying math operations required.
+
+For performance, mini-batching is supported and can be configured in several 
+ways.
+
+## Functions
 
 The following training and inference runtime functions are provided.
 
@@ -154,9 +174,23 @@ int main(int argc, char *argv[])
 
 You can build the code either from the provided `Makefile` or using `CMake`.
 
+If you plan to use the vectorized version, you must first download and install
+or build the OpenBLAS library. Ensure that `ann_config.h` defines `USE_BLAS`.
+
+> The default build files assume that the OpenBLAS is installed at /opt. If
+> another location is used, update `Makefile` or `CMakeLists.txt` as needed.
+
+To build using `Make`:
+
+```
+% git clone https://github.com/mseminatore/ann
+% make
+```
+
 To build using `CMake`:
 
 ```
+% git clone https://github.com/mseminatore/ann
 % md build
 % cd build
 % cmake ..

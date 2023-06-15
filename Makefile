@@ -3,7 +3,7 @@ ARCH = $(shell uname -m)
 
 # add Intel specific compiler flags
 ifeq ($(ARCH), x86_64)
-	CFLAGS += -mavx
+	CFLAGS += -mavx2 -mfma
 endif
 
 TARGET = mnist

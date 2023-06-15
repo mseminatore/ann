@@ -243,6 +243,14 @@ fashion dataset. It will load and create the network from the file
 `mnist-fashion.nna`. It then expects to find the test file 
 `mnist-fashion_test.csv` in the current directory.
 
+```
+% ./save_test
+Loading network /dev/ann/mnist-fashion.nna...done.
+Loading /dev/ann/fashion-mnist_test.csv...done.
+
+Test accuracy: 86.98%
+```
+
 The **digit5x7** sample is a multi-layer NN for image classification that 
 learns a 1-bit color representation of 5x7 font digits. It has 35 input nodes,
 one per pixel, 48 hidden layer nodes and 10 output nodes. Once trained, noise
@@ -255,6 +263,37 @@ testing dataset.
 
 > Note that due to large file size, the MNIST training data is not provided. A
 > link to download the files is provided below.
+
+The output of the **mnist** sample looks like the following:
+
+```
+OpenBLAS 0.3.23.dev DYNAMIC_ARCH NO_AFFINITY Sandybridge MAX_THREADS=64
+      CPU uArch: Sandybridge
+  Cores/Threads: 8/8
+
+Training ANN
+------------
+  Network shape: 784-128-10
+      Optimizer: Adaptive Stochastic Gradient Descent
+  Loss function: Categorical Cross-Entropy
+Mini-batch size: 8
+  Training size: 60000 rows
+
+Epoch 1/5
+[====================] - loss: 0.4 - LR: 0.05
+Epoch 2/5
+[====================] - loss: 0.63 - LR: 0.047
+Epoch 3/5
+[====================] - loss: 0.15 - LR: 0.011
+Epoch 4/5
+[====================] - loss: 0.24 - LR: 0.016
+Epoch 5/5
+[====================] - loss: 0.44 - LR: 0.02
+
+Training time: 20.000000 seconds, 0.066667 ms/step
+
+Test accuracy: 86.98%
+```
 
 # Machine learning Datasets
 

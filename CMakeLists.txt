@@ -5,8 +5,14 @@ project(ann VERSION 1.0)
 
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
-include_directories("/opt/OpenBLAS/include")
-link_directories("/opt/OpenBLAS/lib")
+
+if ( WIN32 )
+    include_directories("./cblas/include")
+    link_directories("/opt/lib")
+else()
+    include_directories("/opt/OpenBLAS/include")
+    link_directories("/opt/OpenBLAS/lib")
+endif()
 
 # add the library
 add_library(ann STATIC ann.c tensor.c)

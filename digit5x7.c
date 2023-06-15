@@ -104,7 +104,6 @@ int main(int argc, char *argv[])
 		return ERR_FAIL;
 
 	pnet->learning_rate = (real)0.35;
-	pnet->batchSize = 1;
 	
 	// define our network
 	CHECK_OK(ann_add_layer(pnet, 35, LAYER_INPUT, ACTIVATION_NULL));

@@ -193,8 +193,8 @@ int main(int argc, char *argv[])
 
 You can build the code either from the provided `Makefile` or using `CMake`.
 
-If you plan to use the vectorized version, you must first download and install
-or build the OpenBLAS library. Ensure that `ann_config.h` defines `USE_BLAS`.
+If you plan to use the vectorized version, you must first download and install,
+or build, the `OpenBLAS` library. Ensure that **ann_config.h** defines `USE_BLAS`.
 
 > The default build files assume that the OpenBLAS is installed at /opt. If
 > another location is used, update `Makefile` or `CMakeLists.txt` as needed.
@@ -221,24 +221,40 @@ To build using `CMake`:
 There are a few example projects included to help you familiarize yourself
 with the library and its usage. These are:
 
-* logic - a simple linear regression model for AND, OR, NOR logic
-* digit5x7 - multi-class image classification model for learning 5x7 character digits
-* save_test - demonstrates loading and testing a pre-trained model file
-* mnist - model for the MNIST datasets (digit or fashion)
+* **logic** - a simple linear regression model for AND, OR, NOR logic
+* **digit5x7** - multi-class image classification model for learning 5x7 character digits
+* **save_test** - demonstrates loading and testing a pre-trained model file
+* **mnist** - model for the MNIST datasets (digit or fashion)
 
 > Note that digit5x7 is not able to learn XOR. That is because XOR is not 
 > a linearly separable function and therefore it cannot be learned using 
-> a linear regression model. For XOR, a hidden layer is required.
+> a linear regression model. For XOR, a model with a hidden layer is required.
 
-The **logic** sample optionally takes the name of dataset on the command line. Data
-files are provided for `AND`, `OR`, and `NAND`. For example:
+The **logic** sample is a simple linear regression model with no hidden layer.
+It optionally takes the name of dataset on the command line. 
+Data files are provided for `AND`, `OR`, and `NAND`. For example:
 
 ```
 % ./logic or.csv
 ```
 
-The **save_test** sample reads in a previously trained network for the MNIST fashion
-dataset. It will load and create the network from the file `mnist-fashion.nna`. It then expects to find the test file `mnist-fashion_test.csv` in the current directory.
+The **save_test** sample reads in a previously trained network for the MNIST 
+fashion dataset. It will load and create the network from the file 
+`mnist-fashion.nna`. It then expects to find the test file 
+`mnist-fashion_test.csv` in the current directory.
+
+The **digit5x7** sample is a multi-layer NN for image classification that 
+learns a 1-bit color representation of 5x7 font digits. It has 35 input nodes,
+one per pixel, 48 hidden layer nodes and 10 output nodes. Once trained, noise
+is added to the training data and used as test data.
+
+The **mnist** sample is a multi-layer NN for image classification. It trains on
+all 60,000 images in the MNIST training database. Each image is 28 x 28 pixels 
+in 8-bit grayscale. Once trained it tests against all 10,000 images in the MNIST
+testing dataset.
+
+> Note that due to large file size, the MNIST training data is not provided. A
+> link to download the files is provided below.
 
 # Machine learning Datasets
 

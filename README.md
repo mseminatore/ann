@@ -1,5 +1,7 @@
 # libann
 
+[![CMake](https://github.com/mseminatore/ann/actions/workflows/cmake.yml/badge.svg)](https://github.com/mseminatore/ann/actions/workflows/cmake.yml)
+
 The goal of this library project is to provide a compact, light-weight, 
 portable library of primitives that can be used for training and evaluating
 Neural Networks. The code is written in ANSI C for portability. It is compiled

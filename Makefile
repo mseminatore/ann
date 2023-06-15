@@ -1,9 +1,17 @@
+# get arch name
+ARCH = $(shell uname -m)
+
+# add Intel specific compiler flags
+ifeq ($(ARCH), x86_64)
+	CFLAGS += -mavx
+endif
+
 TARGET = mnist
 OBJS = ann.o tensor.o
 DEPS = ann.h tensor.h ann_config.h
-CFLAGS = -g -mavx -O3 -I"/opt/OpenBLAS/include"
+CFLAGS = -g -O3 -I"/opt/OpenBLAS/include"
 
-LFLAGS = -L/opt/OpenBLAS/lib/ -lopenblas
+LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 #-DMKL_ILP64  -m64  -I"${MKLROOT}/include"
 #LFLAGS = ${MKLROOT}/lib/libmkl_intel_ilp64.a ${MKLROOT}/lib/libmkl_tbb_thread.a ${MKLROOT}/lib/libmkl_core.a -L${TBBROOT}/lib -ltbb -lc++ -lpthread -lm -ldl
 

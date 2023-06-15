@@ -6,7 +6,12 @@ project(ann VERSION 1.0)
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
 
-# build with or without 
+# link math lib for gcc/linux
+if ( LINUX )
+    add_link_options(-lm)
+endif()
+
+# build with or without BLAS library
 if ( USE_BLAS )
     message("BLAS library build requested...")
     add_compile_options(-DUSE_BLAS)

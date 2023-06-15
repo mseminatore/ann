@@ -11,8 +11,8 @@ set(MATH_LIB "")
 # link math lib for gcc/linux
 if ( LINUX )
     message("Linux build: add -lm to linker options")
-    set(MATH_LIB "libm")
-#    add_link_options("-lm")
+#    set(MATH_LIB "libm")
+    add_link_options("-l:libm.a")
 endif()
 
 # build with or without BLAS library

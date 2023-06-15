@@ -43,9 +43,10 @@ typedef float real;
 //------------------------------
 typedef struct
 {
-	int rows, cols, stride;
+	int rows, cols;
+	int stride;			// not currently used
 	real *values;
-	int rank;
+	int rank;			// not currently used
 } Tensor, *PTensor;
 
 //------------------------------

@@ -161,7 +161,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ann.c" />
-    <ClCompile Include="main.c" />
+    <ClCompile Include="mnist.c" />
     <ClCompile Include="tensor.c" />
   </ItemGroup>
   <ItemGroup>

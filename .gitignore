@@ -52,6 +52,7 @@ Mkfile.old
 dkms.conf
 
 *.opendb
+*.user
 *.db
 *.filters
 .vs/
@@ -70,3 +71,5 @@ mnist-fashion.bnn
 .vscode
 mnist
 build/
+cblas/
+test5x7/

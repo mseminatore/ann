@@ -34,9 +34,9 @@
 #include <time.h>
 #include "ann.h"
 
-//-----------------------------------------------
+//------------------------------------------------
 // define the text and binary file format versions
-//-----------------------------------------------
+//------------------------------------------------
 #define ANN_TEXT_FORMAT_VERSION 1
 #define ANN_BINARY_FORMAT_VERSION 1
 
@@ -44,8 +44,8 @@
 #	define R_MIN -1
 #	define R_MAX 1
 #else
-	#define R_MIN -1.0
-	#define R_MAX 1.0
+#	define R_MIN -1.0
+#	define R_MAX 1.0
 #endif
 
 //-----------------------------------------------

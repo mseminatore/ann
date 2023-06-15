@@ -12,15 +12,17 @@ library, `tensor.c`. The second is a minimal training and inference runtime,
 `ann.c`. Integrating the code into another application requires adding these
 two files to the project or linking to the libann library.
 
-> The tensor library is not meant to be a comprehensive library. For example,
-> rank 3 tensors are not supported. It provides only the minimal set of 
-> functions needed to support the inference runtime.
+> The tensor library is not meant to be a comprehensive tensor library. For 
+> example, rank 3 tensors are not supported. It provides only the minimal set of 
+> functions needed to support the current inference runtime.
 
 # Tensor library
 
 The `tensor` module provides the fundamental mathematical operations over 
 vectors and matrices required by neural networks. The module does not currently
-support 3D or rank 3 tensors.
+support 3D, or rank 3, tensors. 
+
+> Support for rank 3 tensors may be added in the future.
 
 Key functions include both scalar and vectorized versions controlled by the
 `USE_BLAS` compiler define.

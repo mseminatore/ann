@@ -26,7 +26,6 @@
 #ifndef __ANN_H
 #define __ANN_H
 
-#include <stdint.h>
 #include "tensor.h"
 
 #ifdef _WIN32

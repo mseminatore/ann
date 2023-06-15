@@ -54,7 +54,7 @@
 static const char *optimizers[] = {
 	"Stochastic Gradient Descent",
 	"Stochastic Gradient Descent with decay",
-	"Adaptive SGD",
+	"Adaptive Stochastic Gradient Descent",
 	"SGD with momentum",
 	"RMSPROP",
 	"ADAGRAD",
@@ -66,9 +66,9 @@ static const char *optimizers[] = {
 // loss function printable anmes
 //-----------------------------------------------
 static const char *loss_types[] = {
-	"Mean squared error",
-	"Categorical cross-entropy",
-	"Mean squared error"
+	"Mean Squared Error",
+	"Categorical Cross-Entropy",
+	"Mean Squared Error"
 };
 
 //-----------------------------------------------

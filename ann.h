@@ -60,6 +60,9 @@
 #define ERR_FAIL 	-1
 #define ERR_OK 		0
 
+// validation helper
+#define CHECK_OK(s) if ((s) != ERR_OK) return ERR_FAIL
+
 //------------------------------
 // Layer types
 //------------------------------

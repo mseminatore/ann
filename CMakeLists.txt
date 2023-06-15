@@ -3,12 +3,18 @@ cmake_minimum_required(VERSION 3.10)
 # set the project name and version
 project(ann VERSION 1.0)
 
+
+# testing
+enable_testing()
+add_test(NAME logic COMMAND logic "${CMAKE_SOURCE_DIR}/and.csv")
+add_test(NAME digit5x7 COMMAND digit5x7 "${CMAKE_SOURCE_DIR}/num5x7.csv")
+add_test(NAME save_test COMMAND save_test "${CMAKE_SOURCE_DIR}/mnist-fashion.nna" "${CMAKE_SOURCE_DIR}/fashion-mnist_test.csv")
+
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
 
-set(MATH_LIB "")
-
 # link math lib for gcc/linux
+set(MATH_LIB "")
 if ( LINUX )
     message("Linux build: add -lm to linker options")
     set(MATH_LIB "m")

@@ -226,7 +226,7 @@ with the library and its usage. These are:
 * **save_test** - demonstrates loading and testing a pre-trained model file
 * **mnist** - model for the MNIST datasets (digit or fashion)
 
-> Note that digit5x7 is not able to learn XOR. That is because XOR is not 
+> Note that logic is not able to learn XOR. That is because XOR is not 
 > a linearly separable function and therefore it cannot be learned using 
 > a linear regression model. For XOR, a model with a hidden layer is required.
 

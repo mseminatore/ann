@@ -31,7 +31,7 @@ vectors and matrices required by neural networks.
 
 Key functions include both scalar and vectorized versions controlled by the
 `USE_BLAS` compiler define. The default build uses the non-optimized scalar
-versions. Build using `-DUSE_BLAS` or edit **ann_config.h** and uncomment the
+versions. To use the vector optimized versions build the code using `-DUSE_BLAS=1` or edit **ann_config.h** and uncomment the
 `USE_BLAS` define.
 
 ## Functions

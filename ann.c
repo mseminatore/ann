@@ -37,8 +37,8 @@
 //------------------------------------------------
 // define the text and binary file format versions
 //------------------------------------------------
-#define ANN_TEXT_FORMAT_VERSION 1
-#define ANN_BINARY_FORMAT_VERSION 1
+static const int ANN_TEXT_FORMAT_VERSION = 1;
+static const int ANN_BINARY_FORMAT_VERSION = 1;
 
 #if defined(_WIN32) && !defined(_WIN64)
 #	define R_MIN -1
@@ -805,7 +805,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 
 	// ensure batch size is appropriate
 	if (rows < 5000)
-		pnet->batchSize = 1;		
+		pnet->batchSize = 1;
 
 	ann_printf(pnet,	"\nTraining ANN\n"
 						"------------\n");
@@ -1178,6 +1178,9 @@ int ann_save_network_binary(PNetwork pnet, const char *filename)
 	if (!fptr)
 		return ERR_FAIL;
 
+	// write binary version
+	fwrite (&ANN_BINARY_FORMAT_VERSION, sizeof(int), 1, fptr);
+
 	// save out network
 	// save optimizer
 	fwrite(&pnet->optimizer, sizeof(int), 1, fptr);
@@ -1240,6 +1243,16 @@ PNetwork ann_load_network_binary(const char *filename)
 	if (!fptr)
 		return NULL;
 
+	// load version
+	int ver;
+	fread(&ver, sizeof(ver), 1, fptr);
+	if (ver != ANN_BINARY_FORMAT_VERSION)
+	{
+		printf("Incompatible version, was %d, expected %d\n", ver, ANN_TEXT_FORMAT_VERSION);
+		fclose(fptr);
+		return NULL;
+	}
+
 	// load network
 	int optimizer, loss_type, layer_count, node_count, layer_type, activation;
 	fread(&optimizer, sizeof(optimizer), 1, fptr);
@@ -1248,7 +1261,10 @@ PNetwork ann_load_network_binary(const char *filename)
 
 	PNetwork pnet = ann_make_network(optimizer, loss_type);
 	if (!pnet)
+	{
+		fclose(fptr);
 		return NULL;
+	}
 
 	ann_printf(pnet, "loading network %s...", filename);
 
@@ -1295,6 +1311,9 @@ int ann_save_network(PNetwork pnet, const char *filename)
 	FILE *fptr = fopen(filename, "wt");
 	if (!fptr)
 		return ERR_FAIL;
+
+	// save out version
+	fprintf(fptr, "%d\n", ANN_TEXT_FORMAT_VERSION);
 
 	// save out network
 	// save optimizer
@@ -1348,6 +1367,15 @@ PNetwork ann_load_network(const char *filename)
 	if (!fptr)
 		return NULL;
 
+	int ver;
+	fscanf(fptr, "%d", &ver);
+	if (ver != ANN_TEXT_FORMAT_VERSION)
+	{
+		printf("Incompatible version, was %d, expected %d\n", ver, ANN_TEXT_FORMAT_VERSION);
+		fclose(fptr);
+		return NULL;
+	}
+
 	// load network
 	int optimizer, loss_type, layer_count, node_count, layer_type, activation;
 	fscanf(fptr, "%d", &optimizer);
@@ -1356,7 +1384,10 @@ PNetwork ann_load_network(const char *filename)
 
 	PNetwork pnet = ann_make_network(optimizer, loss_type);
 	if (!pnet)
+	{
+		fclose(fptr);
 		return NULL;
+	}
 
 	ann_printf(pnet, "loading network %s...", filename);
 

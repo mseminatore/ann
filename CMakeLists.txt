@@ -13,12 +13,19 @@ add_test(NAME save_test COMMAND save_test "${CMAKE_SOURCE_DIR}/mnist-fashion.nna
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
 
+# set compiler and arch specific optimizations
+# if ("${CMAKE_C_COMPILER_ID}" STREQUAL "Clang")
+#   set_property(TARGET foo APPEND PROPERTY COMPILE_OPTIONS -Wall)
+# elseif ("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU")
+#   set_property(TARGET foo APPEND PROPERTY COMPILE_OPTIONS -Wall)
+# elseif ("${CMAKE_C_COMPILER_ID}" STREQUAL "MSVC")
+#   set_property(TARGET foo APPEND PROPERTY COMPILE_OPTIONS /W3)
+
 # link math lib for gcc/linux
 set(MATH_LIB "")
 if ( LINUX )
     message("Linux build: add -lm to linker options")
     set(MATH_LIB "m")
-#    add_link_options("-l:libm.a")
 endif()
 
 # build with or without BLAS library

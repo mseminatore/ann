@@ -18,7 +18,7 @@ LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 #  -DMKL_ILP64  -m64  -I"${MKLROOT}/include"
 #  ${MKLROOT}/lib/libmkl_intel_ilp64.a ${MKLROOT}/lib/libmkl_tbb_thread.a ${MKLROOT}/lib/libmkl_core.a -L${TBBROOT}/lib -ltbb -lc++ -lpthread -lm -ldl
 
-all: mnist logic digit5x7 save_test
+all: mnist logic digit5x7 save_test save_test_binary
 
 $(TARGET):	$(OBJS) mnist.o
 	$(CC) $(LFLAGS) -o $@ $^
@@ -30,6 +30,9 @@ digit5x7: $(OBJS) digit5x7.o
 	$(CC) $(LFLAGS) -o $@ $^
 
 save_test: $(OBJS) save_test.o
+	$(CC) $(LFLAGS) -o $@ $^
+
+save_test_binary: $(OBJS) save_test_binary.o
 	$(CC) $(LFLAGS) -o $@ $^
 
 %.o: %.c $(DEPS)

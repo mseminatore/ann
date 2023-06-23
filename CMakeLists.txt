@@ -48,7 +48,9 @@ endif()
 # add the library
 add_library(ann STATIC ann.c tensor.c)
 
+#
 # add the executables
+#
 add_executable(mnist mnist.c)
 target_link_libraries(mnist ann ${BLAS_LIB} ${MATH_LIB})
 
@@ -59,4 +61,7 @@ add_executable(logic logic.c)
 target_link_libraries(logic ann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(save_test save_test.c)
+target_link_libraries(save_test ann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(save_test_binary save_test_binary.c)
 target_link_libraries(save_test ann ${BLAS_LIB} ${MATH_LIB})

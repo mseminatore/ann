@@ -72,3 +72,4 @@ mnist
 build/
 cblas/
 test5x7/
+save_test_binary

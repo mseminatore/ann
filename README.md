@@ -83,13 +83,15 @@ loss functions. This option is set when a network is created via `ann_make_netwo
 
 For training, the module provides **Stochastic Gradient Descent**, and 
 **Momentum** optimizers. Support for **RMSProp**, **AdaGrad** and **Adam** is
-in progress.
+in progress. This option is also set when a network is created via 
+`ann_make_network()`.
 
-Layer activation types currently supported are **None**, **Sigmoid** and **Softmax**.
-Support for **RELU** is in progress.
+The layer activation types currently supported are **None**, **Sigmoid** and **Softmax**.
+Support for **RELU** is currently in progress.
 
-For performance, mini-batch support is provided. It can be configured along with other  
-hyper-parameters either directly via the network object or through set_xx functions.
+For performance, mini-batch support is provided. Batch size can be configured, along
+with other hyper-parameters, either directly via the network object or through 
+various set_xx functions.
 
 ## Functions
 
@@ -120,6 +122,10 @@ Many BLAS libraries use multi-threading and SIMD instructions with cache
 aware partitioning algorithms to accelerate the various vector and matrix
 operations used with ML training and inference.
 
+> Note: For all but the largest networks, inference using a pre-trained model is very fast 
+> even without the use of BLAS libraries. The BLAS libraries are most helpful for processing
+> the huge amounts of data involved in training a network.
+
 The code is regularly tested against [OpenBLAS](https://openblas.net) on
 multiple platforms. Though not yet tested, the 
 [Intel MKL library](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) should also work with appropriate build setup.
@@ -148,7 +154,7 @@ calls.
 #include "ann.h"
 
 //------------------------------
-//
+// main program start
 //------------------------------
 int main(int argc, char *argv[])
 {
@@ -189,7 +195,7 @@ int main(int argc, char *argv[])
 }
 ```
 
-# Building
+# Building the code
 
 You can build the code either from the provided `Makefile` or using `CMake`.
 
@@ -203,6 +209,7 @@ To build using `Make`:
 
 ```
 % git clone https://github.com/mseminatore/ann
+% cd ann
 % make
 ```
 
@@ -210,10 +217,11 @@ To build using `CMake`:
 
 ```
 % git clone https://github.com/mseminatore/ann
-% md build
+% cd ann
+% mkdir build
 % cd build
 % cmake ..
-% cmake --build .
+% cmake --build . --config Release
 ```
 
 # Examples
@@ -223,12 +231,13 @@ with the library and its usage. These are:
 
 * **logic** - a simple linear regression model for AND, OR, NOR logic
 * **digit5x7** - multi-class image classification model for learning 5x7 character digits
-* **save_test** - demonstrates loading and testing a pre-trained model file
+* **save_test** - demonstrates loading and testing a pre-trained text model file
+* **save_test_binary** - demonstrates loading and testing a pre-trained binary model file
 * **mnist** - model for the MNIST datasets (digit or fashion)
 
-> Note that logic is not able to learn XOR. That is because XOR is not 
+> Note that **logic** is not able to learn XOR. That is because XOR is not 
 > a linearly separable function and therefore it cannot be learned using 
-> a linear regression model. For XOR, a model with a hidden layer is required.
+> a linear regression model. For XOR, a network with a hidden layer is required.
 
 The **logic** sample is a simple linear regression model with no hidden layer.
 It optionally takes the name of dataset on the command line. 

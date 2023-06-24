@@ -15,11 +15,12 @@ and tested regularly for the following configurations:
 
 There are two main components to the library. The first is a lightweight Tensor
 library, `tensor.c`. The second is a minimal training and inference runtime, 
-`ann.c`. Integrating the code into another application requires adding only these
-two files to the project, or linking to the `libann` library.
+`ann.c`. Integrating `libann` into another application requires adding only 
+these two files to the project, or linking to the `libann` library.
 
-> The tensor library is not meant to be a comprehensive tensor library. It provides 
-> only the minimal set of functions needed to support the current inference runtime.
+> The tensor library is not meant to be a comprehensive tensor library. It 
+> provides only the minimal set of functions needed to support the current 
+> training and inference runtime.
 
 # Tensor library
 
@@ -31,8 +32,8 @@ vectors and matrices required by neural networks.
 
 Key functions include both scalar and vectorized versions controlled by the
 `USE_BLAS` compiler define. The default build uses the non-optimized scalar
-versions. To use the vector optimized versions build the code using `-DUSE_BLAS=1` or edit **ann_config.h** and uncomment the
-`USE_BLAS` define.
+versions. To use the vector optimized versions build the code using 
+`-DUSE_BLAS=1` or edit **ann_config.h** and uncomment the `USE_BLAS` define.
 
 ## Functions
 
@@ -78,20 +79,21 @@ The `ann` module provides functions for training and testing a neural network
 using several types of gradient descent and backpropagation methods. The 
 `tensor` module provides the underlying math operations required.
 
-The module supports both **Mean-Squared Error** and **Categorical Cross Entropy** for 
-loss functions. This option is set when a network is created via `ann_make_network()`.
+The module supports both **Mean-Squared Error** and 
+**Categorical Cross Entropy** for loss functions. This option is set when a 
+network is created via `ann_make_network()`.
 
 For training, the module provides **Stochastic Gradient Descent**, and 
 **Momentum** optimizers. Support for **RMSProp**, **AdaGrad** and **Adam** is
 in progress. This option is also set when a network is created via 
 `ann_make_network()`.
 
-The layer activation types currently supported are **None**, **Sigmoid** and **Softmax**.
-Support for **RELU** is currently in progress.
+The layer activation types currently supported are **None**, **Sigmoid** and 
+**Softmax**. Support for **RELU** is currently in progress.
 
-For performance, mini-batch support is provided. Batch size can be configured, along
-with other hyper-parameters, either directly via the network object or through 
-various set_xx functions.
+For performance, mini-batch support is provided. Batch size can be configured, 
+along with other hyper-parameters, either directly via the network object or 
+through various set_xx functions.
 
 ## Functions
 
@@ -117,18 +119,21 @@ ann_set_loss_function | set the loss function
 # Accelerating training with BLAS libraries
 
 The `tensor` functions used for training and inference can be accelerated
-using [BLAS](https://en.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms) libraries, often providing significant training speed increases. 
-Many BLAS libraries use multi-threading and SIMD instructions with cache
-aware partitioning algorithms to accelerate the various vector and matrix
-operations used with ML training and inference.
+using [BLAS](https://en.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms) 
+libraries, often providing significant training speed increases. Many BLAS 
+libraries use multi-threading and SIMD instructions with cache-aware 
+partitioning algorithms to accelerate the various vector and matrix operations 
+used with ML training and inference.
 
-> Note: For all but the largest networks, inference using a pre-trained model is very fast 
-> even without the use of BLAS libraries. The BLAS libraries are most helpful for processing
-> the huge amounts of data involved in training a network.
+> Note: For all but the largest networks, inference using a pre-trained model 
+> is very fast, even without the use of BLAS libraries. The BLAS libraries are
+> most helpful for processing the huge amounts of data involved in training 
+> networks.
 
 The code is regularly tested against [OpenBLAS](https://openblas.net) on
 multiple platforms. Though not yet tested, the 
-[Intel MKL library](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) should also work with appropriate build setup.
+[Intel MKL library](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) 
+should also work with appropriate build setup.
 
 The `USE_BLAS` define controls whether the provided scalar tensor code
 path is used or the BLAS code path.
@@ -271,7 +276,7 @@ in 8-bit grayscale. Once trained it tests against all 10,000 images in the MNIST
 testing dataset.
 
 > Note that due to large file size, the MNIST training data is not provided. A
-> link to download the files is provided below.
+> link to download the CSV files is provided below.
 
 The output of the **mnist** sample looks like the following:
 

@@ -649,9 +649,11 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	{
 		// need to allocate more layers
 		pnet->layer_size <<= 1;
-		pnet->layers = realloc(pnet->layers, pnet->layer_size * (sizeof(Layer)));
-		if (NULL == pnet->layers)
+		PLayer layer = realloc(pnet->layers, pnet->layer_size * (sizeof(Layer)));
+		if (NULL == layer)
 			return ERR_FAIL;
+
+		pnet->layers = layer;
 	}
 
 	int cur_layer = pnet->layer_count - 1;
@@ -729,6 +731,12 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	// set default values
 	pnet->layer_size	= DEFAULT_LAYERS;
 	pnet->layers		= malloc(pnet->layer_size * (sizeof(Layer)));
+	if (NULL == pnet->layers)
+	{
+		free(pnet);
+		return NULL;
+	}
+
 	pnet->layer_count	= 0;
 	pnet->learning_rate = (real)DEFAULT_LEARNING_RATE;
 	pnet->weights_set	= 0;
@@ -1103,7 +1111,7 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 				// double the size
 				size <<= 1;
 
-				dbuf = realloc(dbuf, size * sizeof(real));
+				real *newbuf = realloc(dbuf, size * sizeof(real));
 				
 				// check for OOM
 				if (!dbuf)
@@ -1111,6 +1119,8 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 					free(dbuf);
 					return ERR_FAIL;
 				}
+
+				dbuf = newbuf;
 			}
 
 			s = strtok(NULL, ", \n");
@@ -1368,7 +1378,7 @@ PNetwork ann_load_network(const char *filename)
 		return NULL;
 
 	int ver;
-	fscanf(fptr, "%d", &ver);
+	CHECK_RESULT(fscanf(fptr, "%d", &ver), 1, NULL);
 	if (ver != ANN_TEXT_FORMAT_VERSION)
 	{
 		printf("Incompatible version, was %d, expected %d\n", ver, ANN_TEXT_FORMAT_VERSION);
@@ -1378,9 +1388,9 @@ PNetwork ann_load_network(const char *filename)
 
 	// load network
 	int optimizer, loss_type, layer_count, node_count, layer_type, activation;
-	fscanf(fptr, "%d", &optimizer);
-	fscanf(fptr, "%d", &loss_type);
-	fscanf(fptr, "%d", &layer_count);
+	CHECK_RESULT(fscanf(fptr, "%d", &optimizer), 1, NULL);
+	CHECK_RESULT(fscanf(fptr, "%d", &loss_type), 1, NULL);
+	CHECK_RESULT(fscanf(fptr, "%d", &layer_count), 1, NULL);
 
 	PNetwork pnet = ann_make_network(optimizer, loss_type);
 	if (!pnet)
@@ -1394,9 +1404,9 @@ PNetwork ann_load_network(const char *filename)
 	// create layers
 	for (int layer = 0; layer < layer_count; layer++)
 	{
-		fscanf(fptr, "%d", &node_count);
-		fscanf(fptr, "%d", &layer_type);
-		fscanf(fptr, "%d", &activation);
+		CHECK_RESULT(fscanf(fptr, "%d", &node_count), 1, NULL);
+		CHECK_RESULT(fscanf(fptr, "%d", &layer_type), 1, NULL);
+		CHECK_RESULT(fscanf(fptr, "%d", &activation), 1, NULL);
 
 		ann_add_layer(pnet, node_count, layer_type, activation);
 	}
@@ -1406,14 +1416,14 @@ PNetwork ann_load_network(const char *filename)
 		// read bias vector
 		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
 		{
-			fscanf(fptr, "%f", &pnet->layers[layer].t_bias->values[element]);
+			CHECK_RESULT(fscanf(fptr, "%f", &pnet->layers[layer].t_bias->values[element]), 1, NULL);
 		}
 
 		// read node weights
 		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
 		for (int element = 0; element < limit; element++)
 		{
-			fscanf(fptr, "%f", &pnet->layers[layer].t_weights->values[element]);			
+			CHECK_RESULT(fscanf(fptr, "%f", &pnet->layers[layer].t_weights->values[element]), 1, NULL);
 		}
 	}
 

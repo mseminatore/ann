@@ -62,6 +62,7 @@
 
 // validation helper
 #define CHECK_OK(s) if ((s) != ERR_OK) return ERR_FAIL
+#define CHECK_RESULT(fn, result, retval) if ((result) != (fn)) return (retval)
 
 //------------------------------
 // Layer types

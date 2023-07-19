@@ -1086,8 +1086,8 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 	dbuf = malloc(size * sizeof(real));
 
 	// skip header if present
-	if (has_header)
-		fgets(buf, DEFAULT_BUFFER_SIZE, f);
+	if (has_header && !fgets(buf, DEFAULT_BUFFER_SIZE, f))
+		return ERR_FAIL;
 
 	// read a line
 	while (fgets(buf, DEFAULT_BUFFER_SIZE, f))
@@ -1255,7 +1255,7 @@ PNetwork ann_load_network_binary(const char *filename)
 
 	// load version
 	int ver;
-	fread(&ver, sizeof(ver), 1, fptr);
+	CHECK_RESULT(fread(&ver, sizeof(ver), 1, fptr), 1, NULL);
 	if (ver != ANN_BINARY_FORMAT_VERSION)
 	{
 		printf("Incompatible version, was %d, expected %d\n", ver, ANN_TEXT_FORMAT_VERSION);
@@ -1265,9 +1265,9 @@ PNetwork ann_load_network_binary(const char *filename)
 
 	// load network
 	int optimizer, loss_type, layer_count, node_count, layer_type, activation;
-	fread(&optimizer, sizeof(optimizer), 1, fptr);
-	fread(&loss_type, sizeof(loss_type), 1, fptr);
-	fread(&layer_count, sizeof(layer_count), 1, fptr);
+	CHECK_RESULT(fread(&optimizer, sizeof(optimizer), 1, fptr), 1, NULL);
+	CHECK_RESULT(fread(&loss_type, sizeof(loss_type), 1, fptr), 1, NULL);
+	CHECK_RESULT(fread(&layer_count, sizeof(layer_count), 1, fptr), 1, NULL);
 
 	PNetwork pnet = ann_make_network(optimizer, loss_type);
 	if (!pnet)
@@ -1281,9 +1281,9 @@ PNetwork ann_load_network_binary(const char *filename)
 	// create layers
 	for (int layer = 0; layer < layer_count; layer++)
 	{
-		fread(&node_count, sizeof(node_count), 1, fptr);
-		fread(&layer_type, sizeof(layer_type), 1, fptr);
-		fread(&activation, sizeof(activation), 1, fptr);
+		CHECK_RESULT(fread(&node_count, sizeof(node_count), 1, fptr), 1, NULL);
+		CHECK_RESULT(fread(&layer_type, sizeof(layer_type), 1, fptr), 1, NULL);
+		CHECK_RESULT(fread(&activation, sizeof(activation), 1, fptr), 1, NULL);
 
 		ann_add_layer(pnet, node_count, layer_type, activation);
 	}
@@ -1293,14 +1293,14 @@ PNetwork ann_load_network_binary(const char *filename)
 		// read bias vector
 		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
 		{
-			fread(&pnet->layers[layer].t_bias->values[element], sizeof(real), 1, fptr);
+			CHECK_RESULT(fread(&pnet->layers[layer].t_bias->values[element], sizeof(real), 1, fptr), 1, NULL);
 		}
 
 		// read node weights
 		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
 		for (int element = 0; element < limit; element++)
 		{
-			fread(&pnet->layers[layer].t_weights->values[element], sizeof(real), 1, fptr);
+			CHECK_RESULT(fread(&pnet->layers[layer].t_weights->values[element], sizeof(real), 1, fptr), 1, NULL);
 		}
 	}
 

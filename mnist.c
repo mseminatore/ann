@@ -178,20 +178,30 @@ int main(int argc, char *argv[])
 	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 
-	real *data, *test_data;
+	real *data = NULL, *test_data = NULL;
 	int rows, stride, test_rows, test_stride;
+	char *training_data_file = "fashion-mnist_train.csv";
+	char* testing_data_file = "fashion-mnist_test.csv";
 
 	// load the training data
 	if (iFirstArg < argc)
-		ann_load_csv(argv[iFirstArg], CSV_HAS_HEADER, &data, &rows, &stride);
-	else
-		ann_load_csv("fashion-mnist_train.csv", CSV_HAS_HEADER, &data, &rows, &stride);
+		training_data_file = argv[iFirstArg];
+	
+	if (ERR_OK != ann_load_csv(training_data_file, CSV_HAS_HEADER, &data, &rows, &stride))
+	{
+		printf("Error: unable to open training file - %s\n", training_data_file);
+		return ERR_FAIL;
+	}
 
 	// load the test data
 	if (iFirstArg + 1 < argc)
-		ann_load_csv(argv[iFirstArg + 1], CSV_HAS_HEADER, &test_data, &test_rows, &test_stride);
-	else
-		ann_load_csv("fashion-mnist_test.csv", CSV_HAS_HEADER, &test_data, &test_rows, &test_stride);
+		testing_data_file = argv[iFirstArg + 1];
+
+	if (ERR_OK != ann_load_csv(testing_data_file, CSV_HAS_HEADER, &test_data, &test_rows, &test_stride))
+	{
+		printf("Error: unable to open training file - %s\n", training_data_file);
+		return ERR_FAIL;
+	}
 
 	// convert outputs to onehot code
 	PTensor y_labels = tensor_create_from_array(rows, stride, data);
@@ -210,6 +220,7 @@ int main(int argc, char *argv[])
 	tensor_mul_scalar(x_train, (real)(1.0 / 255.0));
 	tensor_mul_scalar(x_test, (real)(1.0 / 255.0));
 
+	// set some hyper-parameters
 	pnet->epochLimit = 5;
 	pnet->convergence_epsilon = (real)1e-5;
 	pnet->batchSize = 8;

@@ -257,6 +257,29 @@ PTensor tensor_create_random_uniform(int rows, int cols, real min, real max)
 	return t;
 }
 
+//--------------------------------
+// Heaviside or unit setp function
+// returns y = y > 0 : 1 else 0
+//--------------------------------
+PTensor tensor_heaviside(PTensor a)
+{
+	if (!a)
+	{
+		assert(0 && "tensor: invalid tensor.");
+		return NULL;
+	}
+
+	int limit = a->rows * a->cols;
+
+	int i = 0;
+	for (; i < limit; i++)
+	{
+		a->values[i] = a->values[i] > (real)0.0 ? (real)1.0 : (real)0.0;
+	}
+
+	return a;
+}
+
 //------------------------------
 // returns y = alpha * x + y
 //------------------------------

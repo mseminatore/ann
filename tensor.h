@@ -90,6 +90,7 @@ PTensor tensor_axpy(real alpha, PTensor x, PTensor y);
 PTensor tensor_gemm(real alpha, PTensor A, PTensor B, real beta, PTensor C);
 PTensor tensor_axpby(real alpha, PTensor x, real beta, PTensor y);
 PTensor tensor_outer(real alpha, PTensor a, PTensor b, PTensor dest);
+PTensor tensor_heaviside(PTensor a);
 
 // manipulation
 real tensor_get_element(PTensor t, int row, int col);

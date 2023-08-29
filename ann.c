@@ -386,15 +386,20 @@ static void back_propagate_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
 	// gradient = dl_dz * d * x where d is derivative of RELU(x) which is 0 or 1
 	//
 	
+	// x = d * x
+	tensor_heaviside(layer->t_values);
+
 	// dl_dz = dl_dz * x
 	tensor_mul(layer->t_dl_dz, layer->t_values);
 
-	// 
-
 	// bias = bias + n * dl_dz
+	tensor_axpy(pnet->learning_rate, layer->t_dl_dz, prev_layer->t_bias);
 
 	// gradient += dl_dz * d * x
+	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
 
+	// dl_dz = weights.T * dl_dy ??? is that right?
+	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_dl_dz, prev_layer->t_dl_dz);
 }
 
 //-------------------------------------------

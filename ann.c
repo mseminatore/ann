@@ -325,7 +325,7 @@ static void eval_network(PNetwork pnet)
 }
 
 //-------------------------------------------
-// propagate output error to prev layer
+// back propagate output error to prev layer
 //-------------------------------------------
 static void back_propagate_output(PNetwork pnet, PLayer layer, PLayer prev_layer, PTensor outputs)
 {
@@ -383,7 +383,7 @@ static void back_propagate_sigmoid(PNetwork pnet, PLayer layer, PLayer prev_laye
 static void back_propagate_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
 {
 	//
-	// gradient = dl_dz * d * x where d is derivative of RELU(x) which is 0 or 1
+	// gradient = dl_dz * d * x, where d is derivative of RELU(x) which is 0 or 1
 	//
 	
 	// x = d * x
@@ -691,6 +691,9 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		break;
 
 	case ACTIVATION_NULL:
+		pnet->layers[cur_layer].activation_func = no_activation;
+		break;
+
 	case ACTIVATION_SOFTMAX:
 		pnet->layers[cur_layer].activation_func = no_activation;
 		// handled after full network is evaluated
@@ -1017,7 +1020,7 @@ void ann_set_convergence(PNetwork pnet, real limit)
 }
 
 //------------------------------
-//
+// set the loss function
 //------------------------------
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
 {

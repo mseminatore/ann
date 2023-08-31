@@ -424,7 +424,7 @@ PTensor tensor_sub(PTensor a, PTensor b)
 }
 
 //------------------------------
-// square the tensor
+// square the tensor values
 //------------------------------
 PTensor tensor_square(PTensor t)
 {
@@ -463,6 +463,7 @@ PTensor tensor_mul_scalar(PTensor t, real alpha)
 
 //------------------------------
 // multiply two tensors
+// a = a * b
 //------------------------------
 PTensor tensor_mul(PTensor a, PTensor b)
 {
@@ -487,6 +488,7 @@ PTensor tensor_mul(PTensor a, PTensor b)
 
 //------------------------------
 // divide tensor a by b
+// a = a / b
 //------------------------------
 PTensor tensor_div(PTensor a, PTensor b)
 {

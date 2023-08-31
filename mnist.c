@@ -176,6 +176,7 @@ int main(int argc, char *argv[])
 	// define our network
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);
 	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+//	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_RELU);
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 
 	real *data = NULL, *test_data = NULL;

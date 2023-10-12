@@ -259,7 +259,7 @@ PTensor tensor_create_random_uniform(int rows, int cols, real min, real max)
 
 //--------------------------------
 // Heaviside or unit setp function
-// returns y = y > 0 : 1 else 0
+// returns y = if (y > 0) then 1 else 0
 //--------------------------------
 PTensor tensor_heaviside(PTensor a)
 {

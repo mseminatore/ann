@@ -9,9 +9,15 @@ endif
 TARGET = mnist
 OBJS = ann.o tensor.o
 DEPS = ann.h tensor.h ann_config.h
-CFLAGS += -g -O3 -DUSE_BLAS -I"/opt/OpenBLAS/include"
 
+# use cblas
+#CFLAGS += -g -O3 -DUSE_BLAS -DCBLAS -I.
+#LFLAGS += -L. -lcblas
+
+# use openblas
+CFLAGS += -g -O3 -DUSE_BLAS -I"/opt/OpenBLAS/include"
 LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
+
 #-DMKL_ILP64  -m64  -I"${MKLROOT}/include"
 #LFLAGS = ${MKLROOT}/lib/libmkl_intel_ilp64.a ${MKLROOT}/lib/libmkl_tbb_thread.a ${MKLROOT}/lib/libmkl_core.a -L${TBBROOT}/lib -ltbb -lc++ -lpthread -lm -ldl
 

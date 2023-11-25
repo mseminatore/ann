@@ -161,13 +161,23 @@ int main(int argc, char *argv[])
 
 	int iFirstArg = getopt(argc, argv);
 
-#ifdef USE_BLAS
-	if (threads != -1)
-		openblas_set_num_threads(threads);
+#if defined(USE_BLAS)
 
-	printf( "%s\n", openblas_get_config());
-	printf("      CPU uArch: %s\n", openblas_get_corename());
-	printf("  Cores/Threads: %d/%d\n", openblas_get_num_procs(), openblas_get_num_threads());
+	#if defined(CBLAS)
+		cblas_init();
+		if (threads != -1)
+			cblas_set_num_threads(threads);
+//		printf( "%s\n", openblas_get_config());
+//		printf("      CPU uArch: %s\n", openblas_get_corename());
+//		printf("  Cores/Threads: %d/%d\n", openblas_get_num_procs(), openblas_get_num_threads());
+	#else
+		if (threads != -1)
+			openblas_set_num_threads(threads);
+
+		printf( "%s\n", openblas_get_config());
+		printf("      CPU uArch: %s\n", openblas_get_corename());
+		printf("  Cores/Threads: %d/%d\n", openblas_get_num_procs(), openblas_get_num_threads());
+	#endif
 #endif
 
 	// make a new network

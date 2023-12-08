@@ -167,9 +167,9 @@ int main(int argc, char *argv[])
 		cblas_init();
 		if (threads != -1)
 			cblas_set_num_threads(threads);
-//		printf( "%s\n", openblas_get_config());
-//		printf("      CPU uArch: %s\n", openblas_get_corename());
-//		printf("  Cores/Threads: %d/%d\n", openblas_get_num_procs(), openblas_get_num_threads());
+		printf( "%s\n", cblas_get_config());
+		printf("      CPU uArch: %s\n", cblas_get_corename());
+		printf("  Cores/Threads: %d/%d\n", cblas_get_num_procs(), cblas_get_num_threads());
 	#else
 		if (threads != -1)
 			openblas_set_num_threads(threads);

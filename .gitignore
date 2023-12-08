@@ -68,6 +68,7 @@ logic
 digit5x7
 pima
 save_test
+blas_perf
 .vscode
 mnist
 build/

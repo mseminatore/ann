@@ -11,11 +11,11 @@ OBJS = ann.o tensor.o
 DEPS = ann.h tensor.h ann_config.h
 
 # use cblas
-#CFLAGS += -g -O3 -DUSE_BLAS -DCBLAS -I.
+#CFLAGS += -g -O2 -DUSE_BLAS -DCBLAS -I.
 #LFLAGS += -L. -lcblas
 
 # use openblas
-CFLAGS += -g -O3 -DUSE_BLAS -I"/opt/OpenBLAS/include"
+CFLAGS += -g -O2 -DUSE_BLAS -I"/opt/OpenBLAS/include"
 LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 
 #-DMKL_ILP64  -m64  -I"${MKLROOT}/include"
@@ -24,7 +24,7 @@ LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 #  -DMKL_ILP64  -m64  -I"${MKLROOT}/include"
 #  ${MKLROOT}/lib/libmkl_intel_ilp64.a ${MKLROOT}/lib/libmkl_tbb_thread.a ${MKLROOT}/lib/libmkl_core.a -L${TBBROOT}/lib -ltbb -lc++ -lpthread -lm -ldl
 
-all: mnist logic digit5x7 save_test save_test_binary
+all: mnist logic digit5x7 save_test save_test_binary blas_perf
 
 $(TARGET):	$(OBJS) mnist.o
 	$(CC) $(LFLAGS) -o $@ $^
@@ -39,6 +39,9 @@ save_test: $(OBJS) save_test.o
 	$(CC) $(LFLAGS) -o $@ $^
 
 save_test_binary: $(OBJS) save_test_binary.o
+	$(CC) $(LFLAGS) -o $@ $^
+
+blas_perf: $(OBJS) blas_perf.o
 	$(CC) $(LFLAGS) -o $@ $^
 
 %.o: %.c $(DEPS)

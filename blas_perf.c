@@ -121,12 +121,15 @@ void test_ger()
 //------------------------------------------------------
 int main(int argc, char *argv[])
 {
-	//cblas_init();
-
+#ifdef CBLAS
+	cblas_init(CBLAS_DEFAULT_THREADS);
+    cblas_print_configuration();
+#else
     printf( "%s\n", openblas_get_config());
     printf("    CPU uArch: %s\n", openblas_get_corename());
     printf("Cores/Threads: %d/%d\n\n", openblas_get_num_procs(), openblas_get_num_threads());
-	
+#endif
+
     test_gemm();
 
 	return 0;

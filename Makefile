@@ -11,8 +11,8 @@ OBJS = ann.o tensor.o
 DEPS = ann.h tensor.h ann_config.h
 
 # use cblas
-#CFLAGS += -g -O2 -DUSE_BLAS -DCBLAS -I.
-#LFLAGS += -L. -lcblas
+# CFLAGS += -g -O2 -DUSE_BLAS -DCBLAS -I.
+# LFLAGS += -L. -lcblas
 
 # use openblas
 CFLAGS += -g -O2 -DUSE_BLAS -I"/opt/OpenBLAS/include"
@@ -48,5 +48,5 @@ blas_perf: $(OBJS) blas_perf.o
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) $< -o $@
 
 clean:
-	rm $(TARGET) $(OBJS) logic digit5x7 logic.o digit5x7.o mnist.o save_test.o save_test save_test_binary save_test_binary.o
+	rm $(TARGET) $(OBJS) logic digit5x7 logic.o digit5x7.o mnist.o save_test.o save_test save_test_binary save_test_binary.o blas_perf.o
 

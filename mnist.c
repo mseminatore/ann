@@ -164,7 +164,7 @@ int main(int argc, char *argv[])
 #if defined(USE_BLAS)
 
 	#if defined(CBLAS)
-		cblas_init();
+		cblas_init(CBLAS_DEFAULT_THREADS);
 		if (threads != -1)
 			cblas_set_num_threads(threads);
 		printf( "%s\n", cblas_get_config());

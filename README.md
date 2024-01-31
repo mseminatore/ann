@@ -1,6 +1,7 @@
 # libann
 
 [![CMake](https://github.com/mseminatore/ann/actions/workflows/cmake.yml/badge.svg)](https://github.com/mseminatore/ann/actions/workflows/cmake.yml)
+![GitHub License](https://img.shields.io/github/license/mseminatore/ann)
 
 `libann` is a library for Artificial Neural Networks (ANN).
 

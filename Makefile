@@ -11,6 +11,8 @@ OBJS = ann.o tensor.o
 DEPS = ann.h tensor.h ann_config.h
 
 # use cblas
+#CFLAGS += -g -O2 -DUSE_BLAS -DCBLAS -I"/opt/include"
+#LFLAGS += -L"/opt/lib" -lcblas -lm
 # CFLAGS += -g -O2 -DUSE_BLAS -DCBLAS -I.
 # LFLAGS += -L. -lcblas
 
@@ -27,22 +29,22 @@ LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 all: mnist logic digit5x7 save_test save_test_binary blas_perf
 
 $(TARGET):	$(OBJS) mnist.o
-	$(CC) $(LFLAGS) -o $@ $^
+	$(CC) -o $@ $^ $(LFLAGS)
 
 logic: $(OBJS) logic.o
-	$(CC) $(LFLAGS) -o $@ $^
+	$(CC) -o $@ $^ $(LFLAGS)
 
 digit5x7: $(OBJS) digit5x7.o
-	$(CC) $(LFLAGS) -o $@ $^
+	$(CC) -o $@ $^ $(LFLAGS)
 
 save_test: $(OBJS) save_test.o
-	$(CC) $(LFLAGS) -o $@ $^
+	$(CC) -o $@ $^ $(LFLAGS)
 
 save_test_binary: $(OBJS) save_test_binary.o
-	$(CC) $(LFLAGS) -o $@ $^
+	$(CC) -o $@ $^ $(LFLAGS)
 
 blas_perf: $(OBJS) blas_perf.o
-	$(CC) $(LFLAGS) -o $@ $^
+	$(CC) -o $@ $^ $(LFLAGS)
 
 %.o: %.c $(DEPS)
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) $< -o $@

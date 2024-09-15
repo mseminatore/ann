@@ -11,8 +11,8 @@ OBJS = ann.o tensor.o
 DEPS = ann.h tensor.h ann_config.h
 
 # use cblas
-#CFLAGS += -g -O2 -DUSE_BLAS -DCBLAS -I"/opt/include"
-#LFLAGS += -L"/opt/lib" -lcblas -lm
+# CFLAGS += -g -O2 -DUSE_BLAS -DCBLAS -I"/opt/cblas/include"
+# LFLAGS += -L"/opt/cblas/lib" -lcblas -lm
 # CFLAGS += -g -O2 -DUSE_BLAS -DCBLAS -I.
 # LFLAGS += -L. -lcblas
 

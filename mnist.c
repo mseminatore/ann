@@ -32,7 +32,11 @@
 #	include <cblas.h>
 #endif
 
+#define EPSILON 1e-5
+
 static int threads = -1;
+static int batch_size = 8;
+static int epoch_count = 5;
 
 //----------------------------------
 // get options from the command line
@@ -42,11 +46,27 @@ int getopt(int n, char *args[])
 	int i;
 	for (i = 1; (i < n) && (args[i][0] == '-'); i++)
 	{
+		// thread count
 		if (args[i][1] == 't')
 		{
 			threads = atoi(args[i + 1]);
 			i++;
 		}
+
+		// batch size
+		if (args[i][1] == 'b')
+		{
+			batch_size = atoi(args[i + 1]);
+			i++;
+		}
+
+		// epochs
+		if (args[i][1] == 'e')
+		{
+			epoch_count = atoi(args[i + 1]);
+			i++;
+		}
+
 	}
 
 	return i;
@@ -71,7 +91,7 @@ void print_data(real *data, int rows, int stride)
 //------------------------------------------
 // get/print prediction from one-hot vector
 //------------------------------------------
-void print_class_pred(real * data)
+void print_class_prediction(real * data)
 {
 	int class = ann_class_prediction(data, 10);
 
@@ -233,9 +253,9 @@ int main(int argc, char *argv[])
 	tensor_mul_scalar(x_test, (real)(1.0 / 255.0));
 
 	// set some hyper-parameters
-	pnet->epochLimit = 5;
-	pnet->convergence_epsilon = (real)1e-5;
-	pnet->batchSize = 8;
+	pnet->epochLimit = epoch_count;
+	pnet->convergence_epsilon = (real)EPSILON;
+	pnet->batchSize = batch_size;
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows);

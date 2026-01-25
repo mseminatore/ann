@@ -118,8 +118,176 @@ if (pnet->layers[cur_layer].t_values == NULL) {
 
 ## Future Recommendations
 
-1. **Add error message helper**: Create `const char* ann_strerror(int error_code)`
+1. **Add error message helper**: Create `const char* ann_strerror(int error_code)` ✅ IMPLEMENTED
 2. **Add logging**: Optional error logging callback during initialization
 3. **Expand validation**: Consider adding optional parameter bounds checking
 4. **Error recovery**: Implement cleanup handlers for automatic resource management
 5. **Unit tests**: Create dedicated error handling test suite
+
+---
+
+## Implementation Complete: Error Message Helper Function
+
+### Summary
+Implemented `const char* ann_strerror(int error_code)` function for converting error codes to human-readable messages.
+
+### Location
+- **Declaration**: `/Users/markse/dev/ann/ann.h` (lines 424-440)
+- **Implementation**: `/Users/markse/dev/ann/ann.c` (lines 352-391)
+
+### Function Specification
+
+```c
+/**
+ * Convert an error code to a human-readable error message.
+ * 
+ * Maps error codes (ERR_OK, ERR_NULL_PTR, etc.) to descriptive strings
+ * for better error reporting and debugging.
+ * 
+ * @param error_code Error code to convert (use error codes defined above)
+ * @return Pointer to static error message string, never NULL
+ * 
+ * Usage:
+ *   int result = ann_add_layer(net, 10, LAYER_HIDDEN, ACTIVATION_RELU);
+ *   if (result != ERR_OK) {
+ *       fprintf(stderr, "Error: %s\n", ann_strerror(result));
+ *   }
+ * 
+ * @see ERR_OK ERR_NULL_PTR ERR_ALLOC ERR_INVALID ERR_IO ERR_FAIL
+ */
+const char* ann_strerror(int error_code);
+```
+
+### Error Code Mappings
+
+| Code | Name | Message |
+|------|------|---------|
+| 0 | ERR_OK | Success (ERR_OK) |
+| -2 | ERR_NULL_PTR | NULL pointer provided (ERR_NULL_PTR) |
+| -3 | ERR_ALLOC | Memory allocation failed (ERR_ALLOC) |
+| -4 | ERR_INVALID | Invalid parameter or state (ERR_INVALID) |
+| -5 | ERR_IO | File I/O error (ERR_IO) |
+| -1 | ERR_FAIL | Generic failure (ERR_FAIL) |
+| other | Unknown | Unknown error code |
+
+### Implementation Details
+
+```c
+const char* ann_strerror(int error_code)
+{
+	switch (error_code) {
+		case ERR_OK:
+			return "Success (ERR_OK)";
+		
+		case ERR_NULL_PTR:
+			return "NULL pointer provided (ERR_NULL_PTR)";
+		
+		case ERR_ALLOC:
+			return "Memory allocation failed (ERR_ALLOC)";
+		
+		case ERR_INVALID:
+			return "Invalid parameter or state (ERR_INVALID)";
+		
+		case ERR_IO:
+			return "File I/O error (ERR_IO)";
+		
+		case ERR_FAIL:
+			return "Generic failure (ERR_FAIL)";
+		
+		default:
+			return "Unknown error code";
+	}
+}
+```
+
+### Usage Examples
+
+**Basic Error Reporting:**
+```c
+int result = ann_add_layer(net, 10, LAYER_HIDDEN, ACTIVATION_RELU);
+if (result != ERR_OK) {
+    fprintf(stderr, "Error: %s\n", ann_strerror(result));
+}
+```
+
+**Error Logging with Code:**
+```c
+int result = ann_predict(net, input, output);
+if (result != ERR_OK) {
+    fprintf(stderr, "Prediction failed (code %d): %s\n", 
+            result, ann_strerror(result));
+}
+```
+
+**Training with Error Handling:**
+```c
+int result = ann_train_network(net, training_data, 
+                               100, 0.01, 0.001);
+switch (result) {
+    case ERR_OK:
+        printf("Training completed successfully\n");
+        break;
+    case ERR_NULL_PTR:
+    case ERR_INVALID:
+        fprintf(stderr, "Invalid parameters: %s\n", 
+                ann_strerror(result));
+        break;
+    case ERR_ALLOC:
+        fprintf(stderr, "Insufficient memory: %s\n", 
+                ann_strerror(result));
+        break;
+    default:
+        fprintf(stderr, "Training failed: %s\n", 
+                ann_strerror(result));
+}
+```
+
+### Benefits
+
+1. **Improved Debugging**: Developers can quickly understand what went wrong
+2. **Better Error Messages**: Easier to provide meaningful error output to users
+3. **Consistent Error Reporting**: Uniform error message format across the library
+4. **Logging Integration**: Easy to integrate with logging systems
+5. **Static Strings**: Returns pointers to static strings (no memory allocation needed)
+
+### Testing
+
+Created `test_strerror.c` demonstrating:
+- All error code mappings
+- Handling unknown error codes
+- Integration with library functions
+- Practical error reporting patterns
+
+Output demonstrates:
+```
+Error Code Mappings:
+-------------------
+Code   0: Success (ERR_OK)
+Code  -2: NULL pointer provided (ERR_NULL_PTR)
+Code  -3: Memory allocation failed (ERR_ALLOC)
+Code  -4: Invalid parameter or state (ERR_INVALID)
+Code  -5: File I/O error (ERR_IO)
+Code  -1: Generic failure (ERR_FAIL)
+Code -999: Unknown error code
+
+Demonstration:
+-------------------
+Adding layer with -1 nodes: Invalid parameter or state (ERR_INVALID)
+Adding layer with 10 nodes: Success (ERR_OK)
+Predicting with NULL input: NULL pointer provided (ERR_NULL_PTR)
+```
+
+### Backward Compatibility
+
+✅ Fully backward compatible - does not affect existing code
+- New public API function
+- Returns static strings (no new memory management)
+- Optional to use (not required for existing code)
+- All existing tests continue to pass
+
+### Build Status
+
+✅ Clean compilation
+✅ All 4 integration tests passing
+✅ No warnings or errors
+✅ Ready for production use

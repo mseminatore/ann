@@ -347,6 +347,41 @@ void print_outputs(const PNetwork pnet)
 	tensor_print(pLayer->t_values);
 }
 
+//================================================================================================
+// ERROR MESSAGE HELPER
+//================================================================================================
+
+/**
+ * Convert error code to human-readable string.
+ * Maps numeric error codes to descriptive messages for debugging and logging.
+ * Returns static strings (do not free).
+ */
+const char* ann_strerror(int error_code)
+{
+	switch (error_code) {
+		case ERR_OK:
+			return "Success (ERR_OK)";
+		
+		case ERR_NULL_PTR:
+			return "NULL pointer provided (ERR_NULL_PTR)";
+		
+		case ERR_ALLOC:
+			return "Memory allocation failed (ERR_ALLOC)";
+		
+		case ERR_INVALID:
+			return "Invalid parameter or state (ERR_INVALID)";
+		
+		case ERR_IO:
+			return "File I/O error (ERR_IO)";
+		
+		case ERR_FAIL:
+			return "Generic failure (ERR_FAIL)";
+		
+		default:
+			return "Unknown error code";
+	}
+}
+
 //--------------------------------
 // compute the mean squared error
 // MSE = (1/n) * sum((y_true - y_pred)^2)

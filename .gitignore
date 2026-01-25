@@ -2,6 +2,7 @@
 *.d
 
 IMPROVEMENTS.md
+STRERROR_IMPLEMENTATION.md
 
 # Object files
 *.o

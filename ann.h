@@ -442,4 +442,27 @@ void ann_print_props(const PNetwork pnet);
  */
 void print_outputs(const PNetwork pnet);
 
+// ============================================================================
+// ERROR HANDLING
+// ============================================================================
+
+/**
+ * Convert an error code to a human-readable error message.
+ * 
+ * Maps error codes (ERR_OK, ERR_NULL_PTR, etc.) to descriptive strings
+ * for better error reporting and debugging.
+ * 
+ * @param error_code Error code to convert (use error codes defined above)
+ * @return Pointer to static error message string, never NULL
+ * 
+ * Usage:
+ *   int result = ann_add_layer(net, 10, ACTIVATION_RELU);
+ *   if (result != ERR_OK) {
+ *       fprintf(stderr, "Error: %s\n", ann_strerror(result));
+ *   }
+ * 
+ * @see ERR_OK ERR_NULL_PTR ERR_ALLOC ERR_INVALID ERR_IO ERR_FAIL
+ */
+const char* ann_strerror(int error_code);
+
 #endif

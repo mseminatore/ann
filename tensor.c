@@ -107,7 +107,7 @@ PTensor tensor_create(int rows, int cols)
 //------------------------------
 // create new tensor from array
 //------------------------------
-PTensor tensor_create_from_array(int rows, int cols, real *array)
+PTensor tensor_create_from_array(int rows, int cols, const real *array)
 {
 	PTensor t = tensor_create(rows, cols);
 
@@ -124,7 +124,7 @@ PTensor tensor_create_from_array(int rows, int cols, real *array)
 //------------------------------
 // set tensor values from array
 //------------------------------
-void tensor_set_from_array(PTensor t, int rows, int cols, real *array)
+void tensor_set_from_array(PTensor t, int rows, int cols, const real *array)
 {
 	assert(t);
 	assert(array);
@@ -164,7 +164,7 @@ void tensor_free(PTensor t)
 //------------------------------
 //
 //------------------------------
-PTensor tensor_copy(PTensor t)
+PTensor tensor_copy(const PTensor t)
 {
 	PTensor r = tensor_create(t->rows, t->cols);
 
@@ -261,7 +261,7 @@ PTensor tensor_create_random_uniform(int rows, int cols, real min, real max)
 // Heaviside or unit setp function
 // returns y = if (y > 0) then 1 else 0
 //--------------------------------
-PTensor tensor_heaviside(PTensor a)
+PTensor tensor_heaviside(const PTensor a)
 {
 	if (!a)
 	{
@@ -283,7 +283,7 @@ PTensor tensor_heaviside(PTensor a)
 //------------------------------
 // returns y = alpha * x + y
 //------------------------------
-PTensor tensor_axpy(real alpha, PTensor x, PTensor y)
+PTensor tensor_axpy(real alpha, const PTensor x, PTensor y)
 {
 	if (!x || !y || x->rows != y->rows || x->cols != y->cols)
 	{
@@ -317,7 +317,7 @@ PTensor tensor_axpy(real alpha, PTensor x, PTensor y)
 //----------------------------------
 // returns y = alpha * x + beta * y
 //----------------------------------
-PTensor tensor_axpby(real alpha, PTensor x, real beta, PTensor y)
+PTensor tensor_axpby(real alpha, const PTensor x, real beta, PTensor y)
 {
 	if (!x || !y || x->rows != y->rows || x->cols != y->cols)
 	{
@@ -378,7 +378,7 @@ PTensor tensor_add_scalar(PTensor t, real val)
 //------------------------------
 // add two tensors (a = a + b)
 //------------------------------
-PTensor tensor_add(PTensor a, PTensor b)
+PTensor tensor_add(const PTensor a, const PTensor b)
 {
 	if (!a || !b)
 		return NULL;
@@ -402,7 +402,7 @@ PTensor tensor_add(PTensor a, PTensor b)
 //------------------------------
 // sub two tensors (a = a - b)
 //------------------------------
-PTensor tensor_sub(PTensor a, PTensor b)
+PTensor tensor_sub(const PTensor a, const PTensor b)
 {
 	if (!a || !b)
 		return NULL;
@@ -490,7 +490,7 @@ PTensor tensor_mul(PTensor a, PTensor b)
 // divide tensor a by b
 // a = a / b
 //------------------------------
-PTensor tensor_div(PTensor a, PTensor b)
+PTensor tensor_div(const PTensor a, const PTensor b)
 {
 	if (!a || !b)
 		return NULL;
@@ -514,7 +514,7 @@ PTensor tensor_div(PTensor a, PTensor b)
 // return a tensor containing max
 // col values from each row of t
 //-------------------------------
-PTensor tensor_max(PTensor t)
+PTensor tensor_max(const PTensor t)
 {
 	if (!t)
 		return NULL;
@@ -538,7 +538,7 @@ PTensor tensor_max(PTensor t)
 //------------------------------
 // get a tensor component
 //------------------------------
-real tensor_get_element(PTensor t, int row, int col)
+real tensor_get_element(const PTensor t, int row, int col)
 {
 	if (!t || row > t->rows || col > t->cols)
 		return 0.0;
@@ -560,7 +560,7 @@ void tensor_set_element(PTensor t, int row, int col, real val)
 //-------------------------------------------
 // slice out rows from the end of the tensor
 //-------------------------------------------
-PTensor tensor_slice_rows(PTensor t, int row_start)
+PTensor tensor_slice_rows(const PTensor t, int row_start)
 {
 	PTensor r;
 
@@ -590,7 +590,7 @@ PTensor tensor_slice_rows(PTensor t, int row_start)
 //-------------------------------------------
 // slice out cols from the end of the tensor
 //-------------------------------------------
-PTensor tensor_slice_cols(PTensor t, int col_start)
+PTensor tensor_slice_cols(const PTensor t, int col_start)
 {
 	PTensor r;
 
@@ -639,7 +639,7 @@ PTensor tensor_slice_cols(PTensor t, int col_start)
 //-------------------------------
 // turn int vector to onehot
 //-------------------------------
-PTensor tensor_onehot(PTensor t, int classes)
+PTensor tensor_onehot(const PTensor t, int classes)
 {
 	if (t->cols > 1)
 	{
@@ -660,7 +660,7 @@ PTensor tensor_onehot(PTensor t, int classes)
 //--------------------------------
 // return the horizontal sum of t
 //--------------------------------
-real tensor_sum(PTensor t)
+real tensor_sum(const PTensor t)
 {
 	real sum;
 
@@ -704,7 +704,7 @@ PTensor tensor_exp(PTensor t)
 //-------------------------------------
 // return tensor containing argmax of t
 //-------------------------------------
-PTensor tensor_argmax(PTensor t)
+PTensor tensor_argmax(const PTensor t)
 {
 	assert(0);
 	if (!t)
@@ -717,7 +717,7 @@ PTensor tensor_argmax(PTensor t)
 // compute the matrix-vector product
 // y = alpha * Ax + beta * v
 //----------------------------------
-PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, PTensor mtx, real beta, PTensor v, PTensor dest)
+PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, real beta, const PTensor v, PTensor dest)
 {
 	if (trans == Tensor_NoTranspose && mtx->cols != v->cols)
 	{
@@ -774,7 +774,7 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, PTensor mtx, real beta
 // compute the tensor outer product
 // dest += alpha * a * b
 //---------------------------------
-PTensor tensor_outer(real alpha, PTensor a, PTensor b, PTensor dest)
+PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest)
 {
 	if (a->cols != dest->rows || b->cols != dest->cols)
 	{
@@ -814,7 +814,7 @@ PTensor tensor_outer(real alpha, PTensor a, PTensor b, PTensor dest)
 //-------------------------------
 //
 //-------------------------------
-PTensor tensor_gemm(real alpha, PTensor A, PTensor B, real beta, PTensor C)
+PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTensor C)
 {
 	return C;
 }
@@ -822,7 +822,7 @@ PTensor tensor_gemm(real alpha, PTensor A, PTensor B, real beta, PTensor C)
 //-------------------------------
 // write tensor to CSV file
 //-------------------------------
-int tensor_save_to_file(PTensor t, const char *filename)
+int tensor_save_to_file(const PTensor t, const char *filename)
 {
 	assert(filename);
 	assert(t);
@@ -854,7 +854,7 @@ int tensor_save_to_file(PTensor t, const char *filename)
 //------------------------------
 // print the tensor
 //------------------------------
-void tensor_print(PTensor t)
+void tensor_print(const PTensor t)
 {
 	assert(t);
 	if (!t)

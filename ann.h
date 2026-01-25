@@ -188,24 +188,24 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type);
 void ann_free_network(PNetwork pnet);
 int ann_load_csv(const char *filename, int has_header, real **data, int *rows, int *stride);
 PNetwork ann_load_network(const char *filename);
-int ann_save_network(PNetwork pnet, const char *filename);
-int ann_save_network_binary(PNetwork pnet, const char *filename);
+int ann_save_network(const PNetwork pnet, const char *filename);
+int ann_save_network_binary(const PNetwork pnet, const char *filename);
 PNetwork ann_load_network_binary(const char *filename);
 
 // training/evaluating
 real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows);
 void ann_set_convergence(PNetwork pnet, real limit);
-int ann_predict(PNetwork pnet, real *inputs, real *outputs);
-int ann_class_prediction(real *outputs, int classes);
-real ann_evaluate_accuracy(PNetwork pnet, PTensor inputs, PTensor outputs);
+int ann_predict(const PNetwork pnet, const real *inputs, real *outputs);
+int ann_class_prediction(const real *outputs, int classes);
+real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTensor outputs);
 
 // get/set/show network properties
 void ann_set_learning_rate(PNetwork pnet, real rate);
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
-void ann_print_props(PNetwork pnet);
+void ann_print_props(const PNetwork pnet);
 
 // debugging functions
-// void print_network(PNetwork pnet);
-void print_outputs(PNetwork pnet);
+// void print_network(const PNetwork pnet);
+void print_outputs(const PNetwork pnet);
 
 #endif

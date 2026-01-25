@@ -243,7 +243,7 @@ static void init_weights(PNetwork pnet)
 //--------------------------------
 // print nodes in the output layer
 //--------------------------------
-void print_outputs(PNetwork pnet)
+void print_outputs(const PNetwork pnet)
 {
 	if (!pnet)
 		return;
@@ -951,7 +951,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 //------------------------------
 // evaluate the accuracy 
 //------------------------------
-real ann_evaluate_accuracy(PNetwork pnet, PTensor inputs, PTensor outputs)
+real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTensor outputs)
 {
 	int correct = 0;
 
@@ -980,7 +980,7 @@ real ann_evaluate_accuracy(PNetwork pnet, PTensor inputs, PTensor outputs)
 //------------------------------------
 // predict class from onehot vector
 //------------------------------------
-int ann_class_prediction(real *outputs, int classes)
+int ann_class_prediction(const real *outputs, int classes)
 {
 	int class = -1;
 	real prob = -1.0;
@@ -1159,7 +1159,7 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 //-----------------------------------
 // predict an outcome from trained nn
 //-----------------------------------
-int ann_predict(PNetwork pnet, real *inputs, real *outputs)
+int ann_predict(const PNetwork pnet, const real *inputs, real *outputs)
 {
 	if (!pnet || !inputs || !outputs)
 		return ERR_FAIL;
@@ -1187,7 +1187,7 @@ int ann_predict(PNetwork pnet, real *inputs, real *outputs)
 //-----------------------------------
 // save network to a binary file
 //-----------------------------------
-int ann_save_network_binary(PNetwork pnet, const char *filename)
+int ann_save_network_binary(const PNetwork pnet, const char *filename)
 {
 	if (!pnet || !filename)
 		return ERR_FAIL;
@@ -1321,7 +1321,7 @@ PNetwork ann_load_network_binary(const char *filename)
 //------------------------------
 // save network to a text file
 //------------------------------
-int ann_save_network(PNetwork pnet, const char *filename)
+int ann_save_network(const PNetwork pnet, const char *filename)
 {
 	if (!pnet || !filename)
 		return ERR_FAIL;
@@ -1444,7 +1444,7 @@ PNetwork ann_load_network(const char *filename)
 //-----------------------------------------------
 // display the network properties
 //-----------------------------------------------
-void ann_print_props(PNetwork pnet)
+void ann_print_props(const PNetwork pnet)
 {
 	ann_printf(pnet, "  Network shape: ");
 

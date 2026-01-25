@@ -646,7 +646,10 @@ static void optimize_adam(PNetwork pnet)
 int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type)
 {
 	if (!pnet)
-		return ERR_FAIL;
+		return ERR_NULL_PTR;
+
+	if (node_count <= 0)
+		return ERR_INVALID;
 
 	// check whether we've run out of layers
 	pnet->layer_count++;
@@ -656,7 +659,10 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		pnet->layer_size <<= 1;
 		PLayer layer = realloc(pnet->layers, pnet->layer_size * (sizeof(Layer)));
 		if (NULL == layer)
-			return ERR_FAIL;
+		{
+			pnet->layer_count--;  // rollback count
+			return ERR_ALLOC;
+		}
 
 		pnet->layers = layer;
 	}
@@ -701,7 +707,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 
 	default:
 		assert(0);
-		break;
+		return ERR_INVALID;
 	}
 
 	//--------------------
@@ -710,6 +716,11 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 
 	// create the node values tensor
 	pnet->layers[cur_layer].t_values 	= tensor_zeros(1, node_count);
+	if (pnet->layers[cur_layer].t_values == NULL)
+	{
+		pnet->layer_count--;
+		return ERR_ALLOC;
+	}
 	pnet->layers[cur_layer].node_count	= node_count;
 
 	// create the tensors
@@ -717,11 +728,88 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	{
 		assert(pnet->layers[cur_layer - 1].t_weights == NULL);
 		pnet->layers[cur_layer - 1].t_weights	= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
+		if (pnet->layers[cur_layer - 1].t_weights == NULL)
+		{
+			tensor_free(pnet->layers[cur_layer].t_values);
+			pnet->layers[cur_layer].t_values = NULL;
+			pnet->layer_count--;
+			return ERR_ALLOC;
+		}
+
 		pnet->layers[cur_layer - 1].t_v			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
+		if (pnet->layers[cur_layer - 1].t_v == NULL)
+		{
+			tensor_free(pnet->layers[cur_layer - 1].t_weights);
+			tensor_free(pnet->layers[cur_layer].t_values);
+			pnet->layers[cur_layer - 1].t_weights = NULL;
+			pnet->layers[cur_layer].t_values = NULL;
+			pnet->layer_count--;
+			return ERR_ALLOC;
+		}
+
 		pnet->layers[cur_layer - 1].t_m			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
+		if (pnet->layers[cur_layer - 1].t_m == NULL)
+		{
+			tensor_free(pnet->layers[cur_layer - 1].t_v);
+			tensor_free(pnet->layers[cur_layer - 1].t_weights);
+			tensor_free(pnet->layers[cur_layer].t_values);
+			pnet->layers[cur_layer - 1].t_v = NULL;
+			pnet->layers[cur_layer - 1].t_weights = NULL;
+			pnet->layers[cur_layer].t_values = NULL;
+			pnet->layer_count--;
+			return ERR_ALLOC;
+		}
+
 		pnet->layers[cur_layer - 1].t_gradients = tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
+		if (pnet->layers[cur_layer - 1].t_gradients == NULL)
+		{
+			tensor_free(pnet->layers[cur_layer - 1].t_m);
+			tensor_free(pnet->layers[cur_layer - 1].t_v);
+			tensor_free(pnet->layers[cur_layer - 1].t_weights);
+			tensor_free(pnet->layers[cur_layer].t_values);
+			pnet->layers[cur_layer - 1].t_m = NULL;
+			pnet->layers[cur_layer - 1].t_v = NULL;
+			pnet->layers[cur_layer - 1].t_weights = NULL;
+			pnet->layers[cur_layer].t_values = NULL;
+			pnet->layer_count--;
+			return ERR_ALLOC;
+		}
+
 		pnet->layers[cur_layer - 1].t_dl_dz		= tensor_zeros(1, pnet->layers[cur_layer - 1].node_count);
+		if (pnet->layers[cur_layer - 1].t_dl_dz == NULL)
+		{
+			tensor_free(pnet->layers[cur_layer - 1].t_gradients);
+			tensor_free(pnet->layers[cur_layer - 1].t_m);
+			tensor_free(pnet->layers[cur_layer - 1].t_v);
+			tensor_free(pnet->layers[cur_layer - 1].t_weights);
+			tensor_free(pnet->layers[cur_layer].t_values);
+			pnet->layers[cur_layer - 1].t_gradients = NULL;
+			pnet->layers[cur_layer - 1].t_m = NULL;
+			pnet->layers[cur_layer - 1].t_v = NULL;
+			pnet->layers[cur_layer - 1].t_weights = NULL;
+			pnet->layers[cur_layer].t_values = NULL;
+			pnet->layer_count--;
+			return ERR_ALLOC;
+		}
+
 		pnet->layers[cur_layer - 1].t_bias		= tensor_zeros(1, node_count);
+		if (pnet->layers[cur_layer - 1].t_bias == NULL)
+		{
+			tensor_free(pnet->layers[cur_layer - 1].t_dl_dz);
+			tensor_free(pnet->layers[cur_layer - 1].t_gradients);
+			tensor_free(pnet->layers[cur_layer - 1].t_m);
+			tensor_free(pnet->layers[cur_layer - 1].t_v);
+			tensor_free(pnet->layers[cur_layer - 1].t_weights);
+			tensor_free(pnet->layers[cur_layer].t_values);
+			pnet->layers[cur_layer - 1].t_dl_dz = NULL;
+			pnet->layers[cur_layer - 1].t_gradients = NULL;
+			pnet->layers[cur_layer - 1].t_m = NULL;
+			pnet->layers[cur_layer - 1].t_v = NULL;
+			pnet->layers[cur_layer - 1].t_weights = NULL;
+			pnet->layers[cur_layer].t_values = NULL;
+			pnet->layer_count--;
+			return ERR_ALLOC;
+		}
 	}
 
 	return ERR_OK;
@@ -819,9 +907,17 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	if (!pnet)
 		return 0.0;
 
-	// ensure batch size is appropriate
-	if (rows < 5000)
-		pnet->batchSize = 1;
+	if (!inputs || !outputs)
+		return 0.0;
+
+	if (rows <= 0)
+		return 0.0;
+
+	if (inputs->rows != rows)
+		return 0.0;
+
+	if (outputs->rows != rows)
+		return 0.0;
 
 	ann_printf(pnet,	"\nTraining ANN\n"
 						"------------\n");
@@ -960,6 +1056,16 @@ real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTen
 		return -1.0;
 	}
 
+	if (inputs->rows <= 0 || inputs->cols <= 0 || outputs->rows <= 0 || outputs->cols <= 0)
+	{
+		return -1.0;
+	}
+
+	if (inputs->rows != outputs->rows)
+	{
+		return -1.0;
+	}
+
 	int classes = outputs->cols;
 	real *pred = alloca(classes * sizeof(real));
 	int pred_class, act_class;
@@ -1085,9 +1191,12 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 	uint32_t lineno = 0;
 	int count = 0;
 
+	if (!filename || !data || !rows || !stride)
+		return ERR_NULL_PTR;
+
 	f = fopen(filename, "rt");
 	if (!f)
-		return ERR_FAIL;
+		return ERR_IO;
 
 	*rows = 0;
 
@@ -1162,7 +1271,10 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 int ann_predict(const PNetwork pnet, const real *inputs, real *outputs)
 {
 	if (!pnet || !inputs || !outputs)
-		return ERR_FAIL;
+		return ERR_NULL_PTR;
+
+	if (pnet->layer_count <= 0 || !pnet->layers)
+		return ERR_INVALID;
 
 	// set inputs
 	int node_count = pnet->layers[0].node_count;
@@ -1190,11 +1302,11 @@ int ann_predict(const PNetwork pnet, const real *inputs, real *outputs)
 int ann_save_network_binary(const PNetwork pnet, const char *filename)
 {
 	if (!pnet || !filename)
-		return ERR_FAIL;
+		return ERR_NULL_PTR;
 
 	FILE *fptr = fopen(filename, "wb");
 	if (!fptr)
-		return ERR_FAIL;
+		return ERR_IO;
 
 	// write binary version
 	fwrite (&ANN_BINARY_FORMAT_VERSION, sizeof(int), 1, fptr);
@@ -1324,11 +1436,11 @@ PNetwork ann_load_network_binary(const char *filename)
 int ann_save_network(const PNetwork pnet, const char *filename)
 {
 	if (!pnet || !filename)
-		return ERR_FAIL;
+		return ERR_NULL_PTR;
 
 	FILE *fptr = fopen(filename, "wt");
 	if (!fptr)
-		return ERR_FAIL;
+		return ERR_IO;
 
 	// save out version
 	fprintf(fptr, "%d\n", ANN_TEXT_FORMAT_VERSION);

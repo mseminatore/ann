@@ -81,6 +81,9 @@ PTensor tensor_create(int rows, int cols)
 {
 	PTensor t = NULL;
 
+	if (rows <= 0 || cols <= 0)
+		return NULL;
+
 	t = malloc(sizeof(Tensor));
 	if (!t)
 		return NULL;
@@ -381,7 +384,10 @@ PTensor tensor_add_scalar(PTensor t, real val)
 PTensor tensor_add(const PTensor a, const PTensor b)
 {
 	if (!a || !b)
+	{
+		assert(0 && "tensor_add: null tensor");
 		return NULL;
+	}
 
 	// shape must be the same
 	if (a->rows != b->rows || a->cols != b->cols)
@@ -405,7 +411,10 @@ PTensor tensor_add(const PTensor a, const PTensor b)
 PTensor tensor_sub(const PTensor a, const PTensor b)
 {
 	if (!a || !b)
+	{
+		assert(0 && "tensor_sub: null tensor");
 		return NULL;
+	}
 
 	// shape must be the same
 	if (a->rows != b->rows || a->cols != b->cols)
@@ -468,7 +477,10 @@ PTensor tensor_mul_scalar(PTensor t, real alpha)
 PTensor tensor_mul(PTensor a, PTensor b)
 {
 	if (!a || !b)
+	{
+		assert(0 && "tensor_mul: null tensor");
 		return NULL;
+	}
 
 	// shape must be the same
 	if (a->rows != b->rows || a->cols != b->cols)
@@ -493,7 +505,10 @@ PTensor tensor_mul(PTensor a, PTensor b)
 PTensor tensor_div(const PTensor a, const PTensor b)
 {
 	if (!a || !b)
+	{
+		assert(0 && "tensor_div: null tensor");
 		return NULL;
+	}
 
 	if (a->cols != b->cols || b->rows != 1)
 	{

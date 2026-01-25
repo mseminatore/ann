@@ -57,12 +57,17 @@
 //------------------------------
 // Error values
 //------------------------------
-#define ERR_FAIL 	-1
-#define ERR_OK 		0
+#define ERR_FAIL 		-1
+#define ERR_OK 			0
+#define ERR_NULL_PTR	-2
+#define ERR_ALLOC		-3
+#define ERR_INVALID		-4
+#define ERR_IO			-5
 
 // validation helper
 #define CHECK_OK(s) if ((s) != ERR_OK) return ERR_FAIL
 #define CHECK_RESULT(fn, result, retval) if ((result) != (fn)) return (retval)
+#define CHECK_NULL(ptr) if ((ptr) == NULL) return ERR_NULL_PTR
 
 //------------------------------
 // Layer types

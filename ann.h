@@ -187,30 +187,259 @@ struct Network
 // ANN public function decls
 //------------------------------
 
-// building/freeing network model
-int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type);
+// ============================================================================
+// NETWORK CREATION AND DESTRUCTION
+// ============================================================================
+
+/**
+ * Create a new neural network with specified optimizer and loss function.
+ * 
+ * The network starts with no layers. Use ann_add_layer() to build the network
+ * topology. Weights are initialized automatically when training begins.
+ * 
+ * @param opt Optimizer algorithm (OPT_SGD, OPT_MOMENTUM, OPT_ADAM, etc.)
+ * @param loss_type Loss function (LOSS_MSE or LOSS_CATEGORICAL_CROSS_ENTROPY)
+ * @return Pointer to newly allocated network, or NULL on allocation failure
+ * 
+ * @see ann_add_layer() to add layers to the network
+ * @see ann_free_network() to free network resources
+ */
 PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type);
+
+/**
+ * Add a layer to the network.
+ * 
+ * Layers must be added in order from input to output. Weights and biases
+ * are automatically allocated and initialized for each layer (except input).
+ * Call this function for each layer you want in your network topology.
+ * 
+ * Network must have been created with ann_make_network() first.
+ * 
+ * @param pnet Network to add layer to (must not be NULL)
+ * @param node_count Number of neurons in this layer (must be > 0)
+ * @param layer_type Type: LAYER_INPUT, LAYER_HIDDEN, or LAYER_OUTPUT
+ * @param activation_type Activation: ACTIVATION_NULL, ACTIVATION_SIGMOID, 
+ *                        ACTIVATION_RELU, ACTIVATION_SOFTMAX, etc.
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if network is NULL
+ * @return ERR_INVALID if node_count <= 0 or invalid activation type
+ * @return ERR_ALLOC if memory allocation fails
+ * 
+ * @see ann_make_network()
+ * @see ann_train_network()
+ */
+int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type);
+
+/**
+ * Free all memory associated with a network.
+ * 
+ * Frees all layer tensors, weights, biases, and network structure.
+ * Safe to call with NULL pointer.
+ * 
+ * @param pnet Network to free
+ */
 void ann_free_network(PNetwork pnet);
+
+// ============================================================================
+// DATA LOADING AND SAVING
+// ============================================================================
+
+/**
+ * Load training data from CSV file.
+ * 
+ * CSV format: Each line is one training example, values comma-separated.
+ * First line can be header (skip if has_header=CSV_HAS_HEADER).
+ * 
+ * @param filename Path to CSV file
+ * @param has_header CSV_HAS_HEADER to skip first line, CSV_NO_HEADER otherwise
+ * @param data Output pointer to allocated data array (caller must free)
+ * @param rows Output: number of rows/examples in data
+ * @param stride Output: number of columns per row (width of data)
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if any parameter pointer is NULL
+ * @return ERR_IO if file cannot be opened
+ * 
+ * Data is allocated in row-major order: data[row * stride + col]
+ */
 int ann_load_csv(const char *filename, int has_header, real **data, int *rows, int *stride);
-PNetwork ann_load_network(const char *filename);
+
+/**
+ * Save trained network to text file (human-readable).
+ * 
+ * Format includes version, optimizer, loss type, network topology,
+ * and all weights/biases in text form. Can be loaded with ann_load_network().
+ * 
+ * @param pnet Network to save (must not be NULL)
+ * @param filename Output file path
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if network or filename is NULL
+ * @return ERR_IO if file cannot be created/written
+ * 
+ * @see ann_load_network()
+ */
 int ann_save_network(const PNetwork pnet, const char *filename);
+
+/**
+ * Save trained network to binary file (compact format).
+ * 
+ * Binary format is more compact than text but less human-readable.
+ * Can be loaded with ann_load_network_binary().
+ * 
+ * @param pnet Network to save (must not be NULL)
+ * @param filename Output file path
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if network or filename is NULL
+ * @return ERR_IO if file cannot be created/written
+ * 
+ * @see ann_load_network_binary()
+ */
 int ann_save_network_binary(const PNetwork pnet, const char *filename);
+
+/**
+ * Load trained network from text file.
+ * 
+ * @param filename Path to network file (saved with ann_save_network())
+ * @return Pointer to loaded network, or NULL on error
+ * 
+ * @see ann_save_network()
+ */
+PNetwork ann_load_network(const char *filename);
+
+/**
+ * Load trained network from binary file.
+ * 
+ * @param filename Path to binary network file (saved with ann_save_network_binary())
+ * @return Pointer to loaded network, or NULL on error
+ * 
+ * @see ann_save_network_binary()
+ */
 PNetwork ann_load_network_binary(const char *filename);
 
-// training/evaluating
+// ============================================================================
+// TRAINING AND INFERENCE
+// ============================================================================
+
+/**
+ * Train the network on a dataset using mini-batch stochastic gradient descent.
+ * 
+ * Performs iterative training with backpropagation until convergence or 
+ * epoch limit. Updates learning rate and weights based on selected optimizer.
+ * 
+ * The network topology must be defined (layers added) before calling this.
+ * Initial weights are randomized. Call multiple times to continue training
+ * with same network instance.
+ * 
+ * @param pnet Network to train (must have layers defined)
+ * @param inputs Training input data (rows x input_size matrix)
+ * @param outputs Expected training outputs (rows x output_size matrix)
+ * @param rows Number of training examples
+ * @return Average loss on final epoch, or 0.0 on error
+ * 
+ * @see ann_set_convergence() to set convergence threshold
+ * @see ann_predict() for inference
+ */
 real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows);
-void ann_set_convergence(PNetwork pnet, real limit);
+
+/**
+ * Run trained network on single input to produce output.
+ * 
+ * Forward-propagates input through all layers and returns the output
+ * layer activations. Network must be trained before calling.
+ * 
+ * @param pnet Trained network (must not be NULL)
+ * @param inputs Input feature vector (size = first layer node_count)
+ * @param outputs Output buffer to fill with predictions 
+ *                (size = last layer node_count)
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if network or data pointers are NULL
+ * @return ERR_INVALID if network state is invalid
+ */
 int ann_predict(const PNetwork pnet, const real *inputs, real *outputs);
+
+/**
+ * Determine predicted class from output activations.
+ * 
+ * Returns the index of the maximum output value, useful for classification
+ * when outputs represent class probabilities.
+ * 
+ * @param outputs Output activation vector from network
+ * @param classes Number of classes (length of outputs vector)
+ * @return Index of maximum value (class prediction), or -1 on error
+ */
 int ann_class_prediction(const real *outputs, int classes);
+
+/**
+ * Evaluate network accuracy on a dataset.
+ * 
+ * Runs network on all examples and compares predicted class to expected class.
+ * Uses ann_class_prediction() to determine class from outputs.
+ * 
+ * @param pnet Network to evaluate (must not be NULL)
+ * @param inputs Test input data (rows x input_size matrix)
+ * @param outputs Expected test outputs (rows x output_size matrix)
+ * @return Accuracy as fraction [0.0..1.0], or -1.0 on error
+ * 
+ * @see ann_predict()
+ * @see ann_class_prediction()
+ */
 real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTensor outputs);
 
-// get/set/show network properties
+// ============================================================================
+// CONFIGURATION AND PROPERTIES
+// ============================================================================
+
+/**
+ * Set the learning rate for the network.
+ * 
+ * Learning rate controls step size of weight updates during training.
+ * Default: DEFAULT_LEARNING_RATE (0.05)
+ * Higher values: faster but less stable learning
+ * Lower values: slower but more stable learning
+ * 
+ * @param pnet Network to configure
+ * @param rate Learning rate (suggested range: 0.001 - 0.1)
+ */
 void ann_set_learning_rate(PNetwork pnet, real rate);
+
+/**
+ * Set the loss function used for training.
+ * 
+ * @param pnet Network to configure
+ * @param loss_type LOSS_MSE (regression) or LOSS_CATEGORICAL_CROSS_ENTROPY (classification)
+ */
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
+
+/**
+ * Set the convergence criterion for training.
+ * 
+ * Training stops when average loss falls below this threshold.
+ * Default: DEFAULT_CONVERGENCE (0.01)
+ * 
+ * @param pnet Network to configure
+ * @param limit Loss threshold for convergence
+ */
+void ann_set_convergence(PNetwork pnet, real limit);
+
+/**
+ * Print network properties and configuration to stdout.
+ * 
+ * Displays: network topology, optimizer, loss function, mini-batch size, etc.
+ * 
+ * @param pnet Network to describe (must not be NULL)
+ */
 void ann_print_props(const PNetwork pnet);
 
-// debugging functions
-// void print_network(const PNetwork pnet);
+// ============================================================================
+// DEBUGGING AND INSPECTION
+// ============================================================================
+
+/**
+ * Print the output layer activations to stdout.
+ * 
+ * Useful for debugging to see network predictions.
+ * 
+ * @param pnet Network whose outputs to print (must not be NULL)
+ */
 void print_outputs(const PNetwork pnet);
 
 #endif

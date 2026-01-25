@@ -30,6 +30,66 @@
 #include <math.h>
 #include "tensor.h"
 
+//================================================================================================
+// LINEAR ALGEBRA LIBRARY - Tensor (Matrix/Vector) Implementation
+//================================================================================================
+// This module provides core mathematical operations for the neural network:
+//
+// DATA STRUCTURE - Tensor (2D Array):
+//   struct Tensor {
+//     int rows, cols;           // Dimensions
+//     real *values;             // Row-major array: element[i,j] at values[i*cols+j]
+//   }
+//
+// MEMORY LAYOUT - Row-Major Format:
+//   For a 3x4 matrix, elements are stored as:
+//   [row0_col0][row0_col1][row0_col2][row0_col3][row1_col0]...[row2_col3]
+//   Advantage: Better cache locality for row operations, compatible with BLAS
+//
+// OPERATION CATEGORIES:
+//
+// 1. MEMORY MANAGEMENT:
+//    - tmalloc/tfree: Aligned memory (32-byte boundary) for SIMD/BLAS vectorization
+//    - tensor_create/clone: Allocate and initialize tensors
+//    - tensor_free: Deallocate and mark NULL (null-safe)
+//
+// 2. ELEMENT-WISE OPERATIONS (Broadcasting for different shapes):
+//    - tensor_add/sub/mul/div: C = A ⊙ B (Hadamard product for ⊙)
+//    - tensor_scale: C = a * A (scalar multiplication)
+//    - tensor_fill: C = value (set all elements)
+//    - tensor_sqrt/abs/clip: Unary transformations
+//
+// 3. MATRIX OPERATIONS (Core mathematical computations):
+//    - tensor_matvec: y = A*x (matrix-vector multiplication)
+//    - tensor_axpy: y = a*x + y (scaled add, used in training loops)
+//    - tensor_axpby: y = a*x + b*y (generalized linear combination)
+//    - tensor_outer: C = x ⊗ y (outer product for weight gradients)
+//    - tensor_transpose: Flip rows/columns
+//
+// 4. MANIPULATION (Structural operations):
+//    - tensor_slice: Extract submatrix
+//    - tensor_get/set: Element access (validated bounds)
+//    - tensor_flip_cols: Reverse column order (for special cases)
+//
+// 5. I/O (Persistence and debugging):
+//    - tensor_print: Console output with formatting
+//    - tensor_save_to_file: Binary format
+//    - tensor_load_from_file: Binary restore with validation
+//    - tensor_sum_squared: Compute ||x||^2 (used in loss calculations)
+//
+// NUMERICAL STABILITY:
+//    - All operations use 'real' type (float/double configurable in tensor.h)
+//    - Aligned memory prevents cache misses
+//    - BLAS used conditionally for hardware acceleration
+//
+// PERFORMANCE CHARACTERISTICS:
+//    - Element-wise ops: O(n*m) linear in matrix size
+//    - Matrix-vector: O(n*m) using cache-efficient row access
+//    - Outer product: O(n*m) with output tensor m*n elements
+//    - Transpose: O(n*m) creates new tensor to preserve layout
+//
+//================================================================================================
+
 #if defined(USE_BLAS)
 #	include <cblas.h>
 #endif
@@ -730,7 +790,24 @@ PTensor tensor_argmax(const PTensor t)
 
 //----------------------------------
 // compute the matrix-vector product
-// y = alpha * Ax + beta * v
+// Computes: dest = alpha * A*v + beta * dest
+// or:       dest = alpha * A^T*v + beta * dest (if trans=Transpose)
+//
+// Used in neural networks for:
+//   - Forward propagation: hidden = W * input + bias
+//   - Backpropagation: delta = W^T * delta_next + gradients
+//
+// Parameters:
+//   trans: Whether to use matrix transpose
+//   alpha, beta: Scaling factors (for in-place operations)
+//   mtx: Matrix A (rows x cols)
+//   v: Vector (1 x cols or cols x 1)
+//   dest: Result vector (pre-allocated)
+//
+// Optimizations:
+//   - Uses BLAS gemv when available (Gflops performance)
+//   - Falls back to cache-efficient row-major loops
+//   - Single pass through matrix memory
 //----------------------------------
 PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, real beta, const PTensor v, PTensor dest)
 {
@@ -787,7 +864,24 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, rea
 
 //---------------------------------
 // compute the tensor outer product
-// dest += alpha * a * b
+// Computes: dest += alpha * a * b^T
+// or: C[i,j] += alpha * a[i] * b[j]
+//
+// Used in neural networks for:
+//   - Computing weight gradients: dW = delta ⊗ activation
+//   - Building weight update matrices during backpropagation
+//
+// Parameters:
+//   alpha: Scaling factor (typically learning_rate * batch_factor)
+//   a: Column vector (n x 1)
+//   b: Row vector (1 x m)
+//   dest: Output matrix (n x m), pre-allocated
+//
+// Mathematical notation: C = C + α * a * b^T
+// This produces a rank-1 update to the matrix
+//
+// Complexity: O(n*m) with two nested loops
+// Importance: Critical operation in gradient computation phase
 //---------------------------------
 PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest)
 {

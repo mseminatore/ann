@@ -1,6 +1,8 @@
 # Prerequisites
 *.d
 
+IMPROVEMENTS.md
+
 # Object files
 *.o
 *.ko

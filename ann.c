@@ -34,6 +34,78 @@
 #include <time.h>
 #include "ann.h"
 
+//================================================================================================
+// NEURAL NETWORK IMPLEMENTATION - Architecture and Design Overview
+//================================================================================================
+// This file implements a feedforward neural network (multilayer perceptron) with the following:
+//
+// NETWORK STRUCTURE:
+//   - Flexible layer architecture: input layer → hidden layers → output layer
+//   - Each layer contains: node_count, weights matrix, bias vector, activation function
+//   - Forward propagation: a[i] = activation(W[i] * a[i-1] + b[i])
+//   - Gradients stored in each layer for backpropagation
+//
+// KEY ALGORITHMS:
+//   1. Forward Propagation (eval_network):
+//      Input → Conv to Matrix → Layer1 compute → Layer2 compute → ... → Output
+//
+//   2. Backpropagation (back_propagate):
+//      Computes gradients layer-by-layer from output back to input
+//      Using chain rule: ∂L/∂W = (∂L/∂a) * (∂a/∂z) * (∂z/∂W)
+//      Where z = W*a + b, a = activation(z)
+//
+//   3. Optimization:
+//      Updates weights based on gradients using SGD, momentum, adaptive rates, etc.
+//      W_new = W_old - learning_rate * ∂L/∂W
+//
+// LOSS FUNCTIONS:
+//   - MSE (Mean Squared Error): For regression tasks
+//   - Cross-Entropy: For classification tasks
+//   - Computed as: L = (1/batch_size) * sum of per-sample losses
+//
+// SUPPORTED ACTIVATIONS:
+//   - Sigmoid: f(x) = 1/(1+e^(-x)), range (0,1)
+//   - ReLU: f(x) = max(0,x), efficient and addresses vanishing gradient
+//   - Tanh: f(x) = (e^x - e^(-x))/(e^x + e^(-x)), range (-1,1), zero-centered
+//   - Softmax: Multi-class probability distribution, range (0,1) summing to 1
+//   - Leaky ReLU, Softsign: Specialized variants
+//
+// TRAINING LOOP (ann_train_network):
+//   For each epoch:
+//     Shuffle training data indices
+//     For each mini-batch:
+//       1. Load sample(s)
+//       2. Forward propagation → compute loss
+//       3. Backpropagation → compute gradients
+//       4. Optimization step → update weights
+//       5. Check convergence criteria
+//
+// ERROR HANDLING:
+//   - NULL pointer validation for all public functions (ERR_NULL_PTR)
+//   - Memory allocation failures with automatic rollback (ERR_ALLOC)
+//   - Invalid dimensions/parameters (ERR_INVALID)
+//   - File I/O errors (ERR_IO)
+//
+// MEMORY MANAGEMENT:
+//   - All tensors allocated with aligned memory for BLAS performance
+//   - Gradients allocated on-demand during training
+//   - Automatic cleanup: ann_free_network releases all layer tensors
+//
+// PERSISTENCE:
+//   - Text format: Human-readable network parameters
+//   - Binary format: Compact storage with checksums
+//   - Both formats support version control for format evolution
+//
+//================================================================================================
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <stdarg.h>
+#include <assert.h>
+#include <time.h>
+
 //------------------------------------------------
 // define the text and binary file format versions
 //------------------------------------------------
@@ -101,6 +173,9 @@ static real no_activation(real x) { return x; }
 
 //------------------------------
 // compute the sigmoid activation
+// sigmoid(x) = 1 / (1 + e^(-x))
+// Range: (0, 1), S-shaped curve
+// Good for: binary classification, helps vanishing gradient issues less than tanh
 //------------------------------
 static real sigmoid(real x)
 {
@@ -109,6 +184,10 @@ static real sigmoid(real x)
 
 //------------------------------
 // compute the ReLU activation
+// relu(x) = max(0, x)
+// Ranges: [0, inf), linear in positive domain
+// Advantages: Computationally efficient, mitigates vanishing gradient
+// Issues: Dead neurons (neurons that always output 0)
 //------------------------------
 static real relu(real x)
 {
@@ -117,6 +196,9 @@ static real relu(real x)
 
 //------------------------------
 // compute the leaky ReLU activation
+// leaky_relu(x) = max(0.01*x, x)
+// Solves the "dead neuron" problem of ReLU by allowing small negative slopes
+// 0.01 is the slope coefficient for negative inputs
 //------------------------------
 static real leaky_relu(real x)
 {
@@ -125,6 +207,9 @@ static real leaky_relu(real x)
 
 //------------------------------
 // compute the tanh activation
+// tanh(x) = (e^x - e^(-x)) / (e^x + e^(-x))
+// Range: (-1, 1), zero-centered which aids learning
+// Good for: hidden layers, less prone to vanishing gradient than sigmoid
 //------------------------------
 static real ann_tanh(real x)
 {
@@ -133,7 +218,10 @@ static real ann_tanh(real x)
 
 //---------------------------------
 // compute the softsign activation
-//--------------------------------
+// softsign(x) = x / (1 + |x|)
+// Similar to tanh but with polynomial decay instead of exponential
+// Smoother derivative than tanh in high magnitude regions
+//---------------------------------
 static real softsign(real x)
 {
 	return (real)(x / (1.0 + fabs(x)));
@@ -141,6 +229,9 @@ static real softsign(real x)
 
 //------------------------------
 // compute the softmax
+// Converts output layer into probability distribution (sums to 1)
+// softmax(x_i) = e^x_i / sum(e^x_j for all j)
+// Use with LOSS_CATEGORICAL_CROSS_ENTROPY for multi-class classification
 //------------------------------
 static void softmax(PNetwork pnet)
 {
@@ -258,6 +349,9 @@ void print_outputs(const PNetwork pnet)
 
 //--------------------------------
 // compute the mean squared error
+// MSE = (1/n) * sum((y_true - y_pred)^2)
+// Good for: Regression, continuous outputs
+// Sensitive to outliers due to squaring
 //--------------------------------
 static real compute_ms_error(PNetwork pnet, PTensor outputs)
 {
@@ -279,6 +373,10 @@ static real compute_ms_error(PNetwork pnet, PTensor outputs)
 
 //---------------------------------------------
 // compute the categorical cross entropy error
+// CE = -sum(y_true * log(y_pred))
+// Good for: Multi-class classification
+// Works best with softmax activation and probability outputs
+// Penalizes confident wrong predictions heavily
 //---------------------------------------------
 static real compute_cross_entropy(PNetwork pnet, PTensor outputs)
 {
@@ -297,9 +395,16 @@ static real compute_cross_entropy(PNetwork pnet, PTensor outputs)
 	return -xe;
 }
 
-//------------------------------
+//---------------------------------------------
 // forward evaluate the network
-//------------------------------
+//---------------------------------------------
+// Performs forward propagation through the network:
+// For each hidden layer: z = Wx + b; a = activation(z)
+// For output layer: apply final activation (e.g., softmax for multi-class)
+//
+// Input is stored in layers[0].t_values by ann_predict() or training code
+// Output is in layers[layer_count-1].t_values
+//---------------------------------------------
 static void eval_network(PNetwork pnet)
 {
 	if (!pnet)
@@ -327,6 +432,12 @@ static void eval_network(PNetwork pnet)
 //-------------------------------------------
 // back propagate output error to prev layer
 //-------------------------------------------
+// Backpropagation for output layer:
+// 1. Compute output error: dL/dy = y_predicted - y_true
+// 2. Update bias: b = b + learning_rate * dL/dy
+// 3. Compute gradient: gradient = dL/dy * x^T (outer product with input)
+// 4. Propagate to previous layer: dL/dz = W^T * dL/dy
+//-------------------------------------------
 static void back_propagate_output(PNetwork pnet, PLayer layer, PLayer prev_layer, PTensor outputs)
 {
 	//-------------------------------
@@ -343,6 +454,14 @@ static void back_propagate_output(PNetwork pnet, PLayer layer, PLayer prev_layer
 	tensor_outer((real)1.0, layer->t_values, prev_layer->t_values, prev_layer->t_gradients);
 
 	// dL_dz = weights.T * dL_dy
+// Sigmoid backpropagation:
+// Chain rule: dL/dz = dL/da * da/dz * dz/dw
+// For sigmoid: da/dz = a * (1 - a)
+// Steps:
+// 1. dL/dz = dL/dz * a(1-a) where a*a = a^2, (1-a) = 1-a^2
+// 2. Update bias and compute weight gradient
+// 3. Propagate to previous layer
+//-------------------------------------------
 	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_values, prev_layer->t_dl_dz);
 }
 
@@ -372,6 +491,14 @@ static void back_propagate_sigmoid(PNetwork pnet, PLayer layer, PLayer prev_laye
 
 	// gradient += dl_dz * x
 	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
+// ReLU backpropagation:
+// For ReLU: f(x) = max(0,x), so df/dx = 1 if x>0 else 0
+// The heaviside step function approximates this: h(x) = (x>0) ? 1 : 0
+// Steps:
+// 1. Apply ReLU derivative mask to incoming gradient
+// 2. Update bias and compute weight gradient with masked values
+// 3. Propagate masked gradient to previous layer
+//-------------------------------------------
 
 	// dL_dz = weights.T * dL_dy
 	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_dl_dz, prev_layer->t_dl_dz);
@@ -397,6 +524,12 @@ static void back_propagate_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
 
 	// gradient += dl_dz * d * x
 	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
+// Full backpropagation pass through network:
+// 1. Start at output layer with computed loss gradient
+// 2. Work backward through each hidden layer
+// 3. Each layer's back_prop_func handles its activation-specific gradient
+// 4. Accumulates weight gradients for use by optimizer
+//-------------------------------------------
 
 	// dl_dz = weights.T * dl_dy ??? is that right?
 	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_dl_dz, prev_layer->t_dl_dz);
@@ -411,6 +544,13 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	int output_layer = pnet->layer_count - 1;
 
 	back_propagate_output(pnet, &pnet->layers[output_layer], &pnet->layers[output_layer - 1], outputs);
+// Single training iteration:
+// 1. Set input: copy input values to input layer
+// 2. Forward pass: eval_network() propagates through all layers
+// 3. Compute loss: measures difference between prediction and target
+// 4. Backward pass: back_propagate() computes weight gradients
+// Returns the loss for this example (used to track convergence)
+//-------------------------------------------------
 
 	//-------------------------------
 	// hidden layer back-propagation
@@ -455,7 +595,12 @@ static real train_pass_network(PNetwork pnet, PTensor inputs, PTensor outputs)
 
 //-----------------------------------------------
 // shuffle the indices
+// Implements Fisher-Yates shuffle algorithm
+// Purpose: Randomize training data order each epoch
+// Benefits: Reduces bias from data ordering, improves generalization
+// Algorithm: For each position i, swap with random position j >= i
 // https://en.wikipedia.org/wiki/Fisher–Yates_shuffle
+// Time complexity: O(n) with single pass
 //-----------------------------------------------
 static void shuffle_indices(int *input_indices, int count)
 {
@@ -470,7 +615,9 @@ static void shuffle_indices(int *input_indices, int count)
 }
 
 //-----------------------------------------------
-// null optimization
+// null optimization (no-op)
+// Used when optimizer is set to OPTIM_NONE
+// Weights remain unchanged; useful for testing/debugging
 //-----------------------------------------------
 static void optimize_none(PNetwork pnet)
 {
@@ -486,7 +633,13 @@ static void optimize_decay(PNetwork pnet, real loss)
 }
 
 //-----------------------------------------------
-// adaptive learning rate
+// Adaptive learning rate
+//-----------------------------------------------
+// Adapts learning rate based on convergence progress:
+// - If loss is decreasing: increase learning rate (explore more)
+// - If loss is increasing: decrease learning rate (be more careful)
+// - Averages last N losses to smooth decisions
+// - Helps avoid both premature convergence and divergence
 //-----------------------------------------------
 static void optimize_adapt(PNetwork pnet, real loss)
 {
@@ -530,6 +683,10 @@ static void optimize_adapt(PNetwork pnet, real loss)
 // Stochastic Gradient Descent (SGD)
 //
 // update the weights based on gradients
+// W = W + learning_rate * gradients
+// 
+// Simplest optimization: pure gradient descent with constant learning rate.
+// Good baseline but can oscillate or get stuck in local minima.
 //--------------------------------------------------------
 static void optimize_sgd(PNetwork pnet)
 {
@@ -542,6 +699,13 @@ static void optimize_sgd(PNetwork pnet)
 
 //-----------------------------------------------
 // Gradient descent with momentum
+//-----------------------------------------------
+// Momentum-based optimizer helps escape local minima and accelerates convergence.
+// m = beta * m + (1-beta) * gradients  (exponential moving average of gradients)
+// W = W + learning_rate * m
+// 
+// Default beta=0.9: favors recent gradient history to "build momentum"
+// Usually faster convergence than plain SGD
 //-----------------------------------------------
 static void optimize_momentum(PNetwork pnet)
 {

@@ -70,6 +70,28 @@
 #define CHECK_NULL(ptr) if ((ptr) == NULL) return ERR_NULL_PTR
 
 //------------------------------
+// Error logging callback type
+//------------------------------
+/**
+ * Function pointer type for error logging callbacks.
+ * 
+ * Called when library errors occur (if callback is set via ann_set_error_log_callback).
+ * Allows integration with custom logging systems, monitoring, or alerting.
+ * 
+ * @param error_code Numeric error code (ERR_NULL_PTR, ERR_ALLOC, etc.)
+ * @param error_message Human-readable error message from ann_strerror()
+ * @param function_name Name of the function where error occurred
+ * 
+ * Example callback:
+ *   void my_error_handler(int code, const char *msg, const char *func) {
+ *       fprintf(stderr, "[%s] Error %d: %s\n", func, code, msg);
+ *       log_to_monitoring_system(code, msg, func);
+ *   }
+ *   ann_set_error_log_callback(my_error_handler);
+ */
+typedef void (*ErrorLogCallback)(int error_code, const char *error_message, const char *function_name);
+
+//------------------------------
 // Layer types
 //------------------------------
 typedef enum { 
@@ -464,5 +486,49 @@ void print_outputs(const PNetwork pnet);
  * @see ERR_OK ERR_NULL_PTR ERR_ALLOC ERR_INVALID ERR_IO ERR_FAIL
  */
 const char* ann_strerror(int error_code);
+
+/**
+ * Set the error logging callback for library errors.
+ * 
+ * Installs a callback function that will be called whenever an error occurs
+ * in the library. Enables integration with custom logging systems, monitoring,
+ * alerting, or debugging frameworks.
+ * 
+ * The callback is called with:
+ *   - error_code: Numeric error code (ERR_NULL_PTR, ERR_ALLOC, etc.)
+ *   - error_message: Human-readable message from ann_strerror()
+ *   - function_name: Name of the function that generated the error
+ * 
+ * To disable logging, pass NULL as the callback parameter.
+ * 
+ * @param callback Function pointer to error handler, or NULL to disable
+ * 
+ * Example:
+ *   void error_handler(int code, const char *msg, const char *func) {
+ *       fprintf(stderr, "[ANN Error in %s] %s\n", func, msg);
+ *       // Could also log to file, send to monitoring service, etc.
+ *   }
+ *   ann_set_error_log_callback(error_handler);
+ * 
+ * @see ErrorLogCallback
+ */
+void ann_set_error_log_callback(ErrorLogCallback callback);
+
+/**
+ * Get the currently installed error logging callback.
+ * 
+ * @return Current callback function pointer, or NULL if none is set
+ */
+ErrorLogCallback ann_get_error_log_callback(void);
+
+/**
+ * Clear (disable) the error logging callback.
+ * 
+ * Equivalent to calling ann_set_error_log_callback(NULL).
+ * After this call, library errors will not trigger callbacks.
+ * 
+ * @see ann_set_error_log_callback
+ */
+void ann_clear_error_log_callback(void);
 
 #endif

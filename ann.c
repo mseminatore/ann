@@ -106,6 +106,17 @@
 #include <assert.h>
 #include <time.h>
 
+//================================================================================================================
+// GLOBAL ERROR LOGGING CALLBACK
+//================================================================================================================
+
+/**
+ * Global callback function pointer for error logging.
+ * Can be set via ann_set_error_log_callback() to enable error notifications.
+ * NULL when no callback is installed (default).
+ */
+static ErrorLogCallback g_error_log_callback = NULL;
+
 //------------------------------------------------
 // define the text and binary file format versions
 //------------------------------------------------
@@ -379,6 +390,53 @@ const char* ann_strerror(int error_code)
 		
 		default:
 			return "Unknown error code";
+	}
+}
+
+//================================================================================================
+// ERROR LOGGING CALLBACK MANAGEMENT
+//================================================================================================
+
+/**
+ * Set the error logging callback.
+ * Installs a callback function to be called on library errors.
+ * Pass NULL to disable error logging.
+ */
+void ann_set_error_log_callback(ErrorLogCallback callback)
+{
+	g_error_log_callback = callback;
+}
+
+/**
+ * Get the current error logging callback.
+ * Returns NULL if no callback is installed.
+ */
+ErrorLogCallback ann_get_error_log_callback(void)
+{
+	return g_error_log_callback;
+}
+
+/**
+ * Clear the error logging callback.
+ * Equivalent to calling ann_set_error_log_callback(NULL).
+ */
+void ann_clear_error_log_callback(void)
+{
+	g_error_log_callback = NULL;
+}
+
+/**
+ * Internal helper function to invoke the error callback if one is installed.
+ * Called internally whenever a library error occurs.
+ * 
+ * @param error_code The error code that occurred
+ * @param function_name The name of the function where error occurred
+ */
+static void invoke_error_callback(int error_code, const char *function_name)
+{
+	if (g_error_log_callback != NULL) {
+		const char *error_message = ann_strerror(error_code);
+		g_error_log_callback(error_code, error_message, function_name);
 	}
 }
 
@@ -844,11 +902,15 @@ static void optimize_adam(PNetwork pnet)
 //------------------------------
 int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type)
 {
-	if (!pnet)
+	if (!pnet) {
+		invoke_error_callback(ERR_NULL_PTR, "ann_add_layer");
 		return ERR_NULL_PTR;
+	}
 
-	if (node_count <= 0)
+	if (node_count <= 0) {
+		invoke_error_callback(ERR_INVALID, "ann_add_layer");
 		return ERR_INVALID;
+	}
 
 	// check whether we've run out of layers
 	pnet->layer_count++;
@@ -860,6 +922,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		if (NULL == layer)
 		{
 			pnet->layer_count--;  // rollback count
+			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
 			return ERR_ALLOC;
 		}
 
@@ -906,6 +969,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 
 	default:
 		assert(0);
+		invoke_error_callback(ERR_INVALID, "ann_add_layer");
 		return ERR_INVALID;
 	}
 
@@ -918,6 +982,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	if (pnet->layers[cur_layer].t_values == NULL)
 	{
 		pnet->layer_count--;
+		invoke_error_callback(ERR_ALLOC, "ann_add_layer");
 		return ERR_ALLOC;
 	}
 	pnet->layers[cur_layer].node_count	= node_count;
@@ -932,6 +997,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 			tensor_free(pnet->layers[cur_layer].t_values);
 			pnet->layers[cur_layer].t_values = NULL;
 			pnet->layer_count--;
+			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
 			return ERR_ALLOC;
 		}
 
@@ -943,6 +1009,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 			pnet->layers[cur_layer - 1].t_weights = NULL;
 			pnet->layers[cur_layer].t_values = NULL;
 			pnet->layer_count--;
+			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
 			return ERR_ALLOC;
 		}
 
@@ -956,6 +1023,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 			pnet->layers[cur_layer - 1].t_weights = NULL;
 			pnet->layers[cur_layer].t_values = NULL;
 			pnet->layer_count--;
+			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
 			return ERR_ALLOC;
 		}
 
@@ -971,6 +1039,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 			pnet->layers[cur_layer - 1].t_weights = NULL;
 			pnet->layers[cur_layer].t_values = NULL;
 			pnet->layer_count--;
+			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
 			return ERR_ALLOC;
 		}
 
@@ -988,6 +1057,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 			pnet->layers[cur_layer - 1].t_weights = NULL;
 			pnet->layers[cur_layer].t_values = NULL;
 			pnet->layer_count--;
+			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
 			return ERR_ALLOC;
 		}
 
@@ -1007,6 +1077,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 			pnet->layers[cur_layer - 1].t_weights = NULL;
 			pnet->layers[cur_layer].t_values = NULL;
 			pnet->layer_count--;
+			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
 			return ERR_ALLOC;
 		}
 	}
@@ -1391,11 +1462,17 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 	int count = 0;
 
 	if (!filename || !data || !rows || !stride)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_load_csv");
 		return ERR_NULL_PTR;
+	}
 
 	f = fopen(filename, "rt");
 	if (!f)
+	{
+		invoke_error_callback(ERR_IO, "ann_load_csv");
 		return ERR_IO;
+	}
 
 	*rows = 0;
 
@@ -1403,7 +1480,10 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 
 	// skip header if present
 	if (has_header && !fgets(buf, DEFAULT_BUFFER_SIZE, f))
+	{
+		invoke_error_callback(ERR_FAIL, "ann_load_csv");
 		return ERR_FAIL;
+	}
 
 	// read a line
 	while (fgets(buf, DEFAULT_BUFFER_SIZE, f))
@@ -1433,6 +1513,7 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 				if (!dbuf)
 				{
 					free(dbuf);
+					invoke_error_callback(ERR_FAIL, "ann_load_csv");
 					return ERR_FAIL;
 				}
 
@@ -1451,6 +1532,7 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 			printf("Error: malformed CSV file at line %u\n", lineno);
 			free(dbuf);
 			fclose(f);
+			invoke_error_callback(ERR_FAIL, "ann_load_csv");
 			return ERR_FAIL;
 		}
 
@@ -1470,10 +1552,16 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 int ann_predict(const PNetwork pnet, const real *inputs, real *outputs)
 {
 	if (!pnet || !inputs || !outputs)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_predict");
 		return ERR_NULL_PTR;
+	}
 
 	if (pnet->layer_count <= 0 || !pnet->layers)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_predict");
 		return ERR_INVALID;
+	}
 
 	// set inputs
 	int node_count = pnet->layers[0].node_count;
@@ -1501,11 +1589,17 @@ int ann_predict(const PNetwork pnet, const real *inputs, real *outputs)
 int ann_save_network_binary(const PNetwork pnet, const char *filename)
 {
 	if (!pnet || !filename)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_save_network_binary");
 		return ERR_NULL_PTR;
+	}
 
 	FILE *fptr = fopen(filename, "wb");
 	if (!fptr)
+	{
+		invoke_error_callback(ERR_IO, "ann_save_network_binary");
 		return ERR_IO;
+	}
 
 	// write binary version
 	fwrite (&ANN_BINARY_FORMAT_VERSION, sizeof(int), 1, fptr);
@@ -1635,11 +1729,17 @@ PNetwork ann_load_network_binary(const char *filename)
 int ann_save_network(const PNetwork pnet, const char *filename)
 {
 	if (!pnet || !filename)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_save_network");
 		return ERR_NULL_PTR;
+	}
 
 	FILE *fptr = fopen(filename, "wt");
 	if (!fptr)
+	{
+		invoke_error_callback(ERR_IO, "ann_save_network");
 		return ERR_IO;
+	}
 
 	// save out version
 	fprintf(fptr, "%d\n", ANN_TEXT_FORMAT_VERSION);

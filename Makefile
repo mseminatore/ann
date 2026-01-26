@@ -30,7 +30,7 @@ LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 #  -DMKL_ILP64  -m64  -I"${MKLROOT}/include"
 #  ${MKLROOT}/lib/libmkl_intel_ilp64.a ${MKLROOT}/lib/libmkl_tbb_thread.a ${MKLROOT}/lib/libmkl_core.a -L${TBBROOT}/lib -ltbb -lc++ -lpthread -lm -ldl
 
-all: mnist logic digit5x7 save_test save_test_binary blas_perf test_tensor
+all: mnist logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations
 
 $(TARGET):	$(OBJS) mnist.o
 	$(CC) -o $@ $^ $(LFLAGS)
@@ -53,9 +53,15 @@ blas_perf: $(OBJS) blas_perf.o
 test_tensor: $(OBJS) test_tensor.o testy/test_main.o
 	$(CC) -o $@ $^ $(LFLAGS)
 
+test_network: $(OBJS) test_network.o testy/test_main.o
+	$(CC) -o $@ $^ $(LFLAGS)
+
+test_activations: $(OBJS) test_activations.o testy/test_main.o
+	$(CC) -o $@ $^ $(LFLAGS)
+
 %.o: %.c $(DEPS)
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) $< -o $@
 
 clean:
-	rm -f $(TARGET) $(OBJS) logic digit5x7 logic.o digit5x7.o mnist.o save_test.o save_test save_test_binary save_test_binary.o blas_perf.o test_tensor test_tensor.o testy/test_main.o
+	rm -f $(TARGET) $(OBJS) logic digit5x7 logic.o digit5x7.o mnist.o save_test.o save_test save_test_binary save_test_binary.o blas_perf.o test_tensor test_tensor.o test_network test_network.o test_activations test_activations.o testy/test_main.o
 

@@ -11,6 +11,8 @@ add_test(NAME digit5x7 COMMAND digit5x7 "${CMAKE_SOURCE_DIR}/num5x7.csv")
 add_test(NAME save_test COMMAND save_test "${CMAKE_SOURCE_DIR}/mnist-fashion.nna" "${CMAKE_SOURCE_DIR}/fashion-mnist_test.csv")
 add_test(NAME save_test_binary COMMAND save_test_binary "${CMAKE_SOURCE_DIR}/mnist-fashion.nnb" "${CMAKE_SOURCE_DIR}/fashion-mnist_test.csv")
 add_test(NAME test_tensor COMMAND test_tensor)
+add_test(NAME test_network COMMAND test_network)
+add_test(NAME test_activations COMMAND test_activations)
 
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
@@ -66,5 +68,12 @@ target_link_libraries(save_test ann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(save_test_binary save_test_binary.c)
 target_link_libraries(save_test_binary ann ${BLAS_LIB} ${MATH_LIB})
+
 add_executable(test_tensor test_tensor.c testy/test_main.c)
 target_link_libraries(test_tensor ann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_network test_network.c testy/test_main.c)
+target_link_libraries(test_network ann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_activations test_activations.c testy/test_main.c)
+target_link_libraries(test_activations ann ${BLAS_LIB} ${MATH_LIB})

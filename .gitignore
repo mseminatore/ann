@@ -1,8 +1,13 @@
 # Prerequisites
 *.d
 
+# build files
 IMPROVEMENTS.md
 STRERROR_IMPLEMENTATION.md
+test_tensor
+test_activations
+test_network
+test_comprehensive_callbacks
 
 # Object files
 *.o

@@ -30,7 +30,7 @@ LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 #  -DMKL_ILP64  -m64  -I"${MKLROOT}/include"
 #  ${MKLROOT}/lib/libmkl_intel_ilp64.a ${MKLROOT}/lib/libmkl_tbb_thread.a ${MKLROOT}/lib/libmkl_core.a -L${TBBROOT}/lib -ltbb -lc++ -lpthread -lm -ldl
 
-all: mnist logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations
+all: mnist logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_forward_pass test_training_convergence
 
 $(TARGET):	$(OBJS) mnist.o
 	$(CC) -o $@ $^ $(LFLAGS)
@@ -59,9 +59,21 @@ test_network: $(OBJS) test_network.o testy/test_main.o
 test_activations: $(OBJS) test_activations.o testy/test_main.o
 	$(CC) -o $@ $^ $(LFLAGS)
 
+test_loss_functions: $(OBJS) test_loss_functions.o testy/test_main.o
+	$(CC) -o $@ $^ $(LFLAGS)
+
+test_save_load: $(OBJS) test_save_load.o testy/test_main.o
+	$(CC) -o $@ $^ $(LFLAGS)
+
+test_forward_pass: $(OBJS) test_forward_pass.o testy/test_main.o
+	$(CC) -o $@ $^ $(LFLAGS)
+
+test_training_convergence: $(OBJS) test_training_convergence.o testy/test_main.o
+	$(CC) -o $@ $^ $(LFLAGS)
+
 %.o: %.c $(DEPS)
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) $< -o $@
 
 clean:
-	rm -f $(TARGET) $(OBJS) logic digit5x7 logic.o digit5x7.o mnist.o save_test.o save_test save_test_binary save_test_binary.o blas_perf.o test_tensor test_tensor.o test_network test_network.o test_activations test_activations.o testy/test_main.o
+	rm -f $(TARGET) $(OBJS) logic digit5x7 logic.o digit5x7.o mnist.o save_test.o save_test save_test_binary save_test_binary.o blas_perf.o test_tensor test_tensor.o test_network test_network.o test_activations test_activations.o test_loss_functions test_loss_functions.o test_save_load test_save_load.o test_forward_pass test_forward_pass.o test_training_convergence test_training_convergence.o testy/test_main.o
 

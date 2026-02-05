@@ -8,6 +8,10 @@ test_tensor
 test_activations
 test_network
 test_comprehensive_callbacks
+test_forward_pass
+test_loss_functions
+test_save_load
+test_training_convergence
 
 # Object files
 *.o

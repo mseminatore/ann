@@ -14,6 +14,10 @@ add_test(NAME test_tensor COMMAND test_tensor)
 add_test(NAME test_network COMMAND test_network)
 add_test(NAME test_activations COMMAND test_activations)
 add_test(NAME test_onnx_export COMMAND test_onnx_export)
+add_test(NAME test_loss_functions COMMAND test_loss_functions)
+add_test(NAME test_save_load COMMAND test_save_load)
+#add_test(NAME test_forward_pass COMMAND test_forward_pass)
+#add_test(NAME test_training_convergence COMMAND test_training_convergence)
 
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
@@ -81,3 +85,16 @@ target_link_libraries(test_activations ann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_onnx_export test_onnx_export.c testy/test_main.c)
 target_link_libraries(test_onnx_export ann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_loss_functions test_loss_functions.c testy/test_main.c)
+target_link_libraries(test_loss_functions ann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_save_load test_save_load.c testy/test_main.c)
+target_link_libraries(test_save_load ann ${BLAS_LIB} ${MATH_LIB})
+
+#add_executable(test_forward_pass test_forward_pass.c testy/test_main.c)
+#target_link_libraries(test_forward_pass ann ${BLAS_LIB} ${MATH_LIB})
+
+#add_executable(test_training_convergence test_training_convergence.c testy/test_main.c)
+#target_link_libraries(test_training_convergence ann ${BLAS_LIB} ${MATH_LIB})
+

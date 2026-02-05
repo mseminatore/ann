@@ -73,6 +73,9 @@ tensor_slice_cols | slide out cols to a new tensor
 tensor_fill | fill a tensor with a value
 tensor_random_uniform | fill a tensor with random values
 tensor_print | print out a tensor
+tensor_argmax | find index of maximum value in each column
+tensor_gemm | general matrix multiplication
+tensor_heaviside | Heaviside step function (ReLU derivative)
 
 # ANN training and inference library
 
@@ -116,6 +119,14 @@ ann_set_convergence | set the convergence threshold (optional)
 ann_evaluate_accuracy | evaluate accuracy of trained network using test data
 ann_set_learning_rate | override the default learning rate
 ann_set_loss_function | set the loss function
+ann_export_onnx | export trained network to ONNX JSON format
+ann_class_prediction | determine predicted class from output activations
+ann_print_props | print network properties and configuration
+print_outputs | print output layer activations (debug)
+ann_strerror | convert error code to human-readable message
+ann_set_error_log_callback | install error logging callback
+ann_get_error_log_callback | get current error callback
+ann_clear_error_log_callback | disable error logging callback
 
 # Accelerating training with BLAS libraries
 

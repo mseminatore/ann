@@ -775,14 +775,41 @@ PTensor tensor_exp(PTensor t)
 
 //-------------------------------------
 // return tensor containing argmax of t
+// Returns 1xN tensor with row index of
+// max value in each column
 //-------------------------------------
 PTensor tensor_argmax(const PTensor t)
 {
-	assert(0);
 	if (!t)
 		return NULL;
 
-	return NULL;
+	PTensor r = tensor_zeros(1, t->cols);
+	PTensor maxvals = tensor_zeros(1, t->cols);
+
+	// Initialize with first row values
+	for (int col = 0; col < t->cols; col++)
+	{
+		tensor_set_element(maxvals, 0, col, tensor_get_element(t, 0, col));
+		tensor_set_element(r, 0, col, 0);
+	}
+
+	// Find max value and its index for each column
+	for (int row = 1; row < t->rows; row++)
+	{
+		for (int col = 0; col < t->cols; col++)
+		{
+			real current_max = tensor_get_element(maxvals, 0, col);
+			real val = tensor_get_element(t, row, col);
+			if (val > current_max)
+			{
+				tensor_set_element(maxvals, 0, col, val);
+				tensor_set_element(r, 0, col, (real)row);
+			}
+		}
+	}
+
+	tensor_free(maxvals);
+	return r;
 }
 
 //----------------------------------
@@ -918,10 +945,50 @@ PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest)
 }
 
 //-------------------------------
-//
+// General matrix multiplication
+// C = alpha * A * B + beta * C
+// A is MxK, B is KxN, C is MxN
 //-------------------------------
 PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTensor C)
 {
+	if (!A || !B || !C)
+		return NULL;
+
+	// Check dimensions: A(MxK) * B(KxN) = C(MxN)
+	if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols)
+		return NULL;
+
+	int M = A->rows;
+	int K = A->cols;
+	int N = B->cols;
+
+#ifdef USE_BLAS
+	cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+		M, N, K,
+		alpha, A->values, K,
+		B->values, N,
+		beta, C->values, N);
+#else
+	// Naive triple-loop implementation
+	// First scale C by beta
+	for (int i = 0; i < M * N; i++)
+		C->values[i] *= beta;
+
+	// Then add alpha * A * B
+	for (int i = 0; i < M; i++)
+	{
+		for (int j = 0; j < N; j++)
+		{
+			real sum = 0;
+			for (int k = 0; k < K; k++)
+			{
+				sum += A->values[i * K + k] * B->values[k * N + j];
+			}
+			C->values[i * N + j] += alpha * sum;
+		}
+	}
+#endif
+
 	return C;
 }
 

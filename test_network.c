@@ -180,16 +180,20 @@ void test_main(int argc, char *argv[]) {
     TESTEX("ann_add_layer with negative nodes returns ERR_INVALID", 
            (result == ERR_INVALID));
 
-    // Test adding very large layer
-    result = ann_add_layer(net_adam, 1000000, LAYER_INPUT, ACTIVATION_NULL);
+    // Test adding very large layer - use separate network to avoid state corruption
+    PNetwork net_huge = ann_make_network(OPT_ADAM, LOSS_MSE);
+    result = ann_add_layer(net_huge, 1000000, LAYER_INPUT, ACTIVATION_NULL);
     TESTEX("ann_add_layer with huge node count returns ERR_OK or ERR_ALLOC", 
            (result == ERR_OK || result == ERR_ALLOC));
 
     // If allocation succeeded, verify the layer
-    if (result == ERR_OK && net_adam->layer_count > 0) {
+    if (result == ERR_OK && net_huge != NULL && net_huge->layer_count > 0) {
         TESTEX("Large layer node_count set correctly", 
-               (net_adam->layers[net_adam->layer_count - 1].node_count == 1000000));
+               (net_huge->layers[net_huge->layer_count - 1].node_count == 1000000));
     }
+    
+    // Free immediately to avoid issues with huge allocation
+    ann_free_network(net_huge);
 
     // ========================================================================
     // NETWORK STATE TESTS

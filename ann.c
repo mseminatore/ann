@@ -1871,3 +1871,234 @@ void ann_print_props(const PNetwork pnet)
 	ann_printf(pnet, "  Loss function: %s\n", loss_types[pnet->loss_type]);
 	ann_printf(pnet, "Mini-batch size: %u\n", pnet->batchSize);
 }
+
+//-----------------------------------------------
+// Helper: get ONNX op_type string for activation
+//-----------------------------------------------
+static const char* onnx_activation_op(Activation_type act)
+{
+	switch (act) {
+		case ACTIVATION_SIGMOID:    return "Sigmoid";
+		case ACTIVATION_RELU:       return "Relu";
+		case ACTIVATION_LEAKY_RELU: return "LeakyRelu";
+		case ACTIVATION_TANH:       return "Tanh";
+		case ACTIVATION_SOFTSIGN:   return "Softsign";
+		case ACTIVATION_SOFTMAX:    return "Softmax";
+		case ACTIVATION_NULL:
+		default:                    return NULL;
+	}
+}
+
+//-----------------------------------------------
+// Helper: write JSON float array (tensor values)
+//-----------------------------------------------
+static void write_json_float_array(FILE *fptr, const real *values, int count)
+{
+	fprintf(fptr, "[");
+	for (int i = 0; i < count; i++)
+	{
+		if (i > 0) fprintf(fptr, ", ");
+		fprintf(fptr, "%.8g", (double)values[i]);
+	}
+	fprintf(fptr, "]");
+}
+
+//-----------------------------------------------
+// Helper: write JSON int array (dims)
+//-----------------------------------------------
+static void write_json_int_array(FILE *fptr, const int *values, int count)
+{
+	fprintf(fptr, "[");
+	for (int i = 0; i < count; i++)
+	{
+		if (i > 0) fprintf(fptr, ", ");
+		fprintf(fptr, "%d", values[i]);
+	}
+	fprintf(fptr, "]");
+}
+
+//-----------------------------------------------
+// Export network to ONNX JSON format
+//-----------------------------------------------
+int ann_export_onnx(const PNetwork pnet, const char *filename)
+{
+	if (!pnet || !filename)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_export_onnx");
+		return ERR_NULL_PTR;
+	}
+
+	if (pnet->layer_count < 2)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_export_onnx");
+		return ERR_INVALID;
+	}
+
+	FILE *fptr = fopen(filename, "wt");
+	if (!fptr)
+	{
+		invoke_error_callback(ERR_IO, "ann_export_onnx");
+		return ERR_IO;
+	}
+
+	int input_size = pnet->layers[0].node_count;
+	int output_size = pnet->layers[pnet->layer_count - 1].node_count;
+
+	// Start JSON object
+	fprintf(fptr, "{\n");
+	fprintf(fptr, "  \"ir_version\": 8,\n");
+	fprintf(fptr, "  \"opset_import\": [{\"version\": 17}],\n");
+	fprintf(fptr, "  \"producer_name\": \"ann-library\",\n");
+	fprintf(fptr, "  \"producer_version\": \"1.0\",\n");
+	fprintf(fptr, "  \"graph\": {\n");
+	fprintf(fptr, "    \"name\": \"ann_model\",\n");
+
+	// ========== INITIALIZERS (weights and biases) ==========
+	fprintf(fptr, "    \"initializer\": [\n");
+	int first_init = 1;
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		PLayer pL = &pnet->layers[layer];
+		int next_nodes = pnet->layers[layer + 1].node_count;
+		int curr_nodes = pL->node_count;
+
+		// Weights: shape is [curr_nodes, next_nodes] stored row-major
+		// ONNX MatMul: input [batch, curr_nodes] @ weights [curr_nodes, next_nodes] -> [batch, next_nodes]
+		if (!first_init) fprintf(fptr, ",\n");
+		first_init = 0;
+
+		fprintf(fptr, "      {\n");
+		fprintf(fptr, "        \"name\": \"weight_%d\",\n", layer);
+		fprintf(fptr, "        \"data_type\": 1,\n");  // 1 = FLOAT
+		int w_dims[] = {curr_nodes, next_nodes};
+		fprintf(fptr, "        \"dims\": ");
+		write_json_int_array(fptr, w_dims, 2);
+		fprintf(fptr, ",\n");
+		fprintf(fptr, "        \"float_data\": ");
+		write_json_float_array(fptr, pL->t_weights->values, curr_nodes * next_nodes);
+		fprintf(fptr, "\n");
+		fprintf(fptr, "      }");
+
+		// Bias: shape is [next_nodes]
+		fprintf(fptr, ",\n");
+		fprintf(fptr, "      {\n");
+		fprintf(fptr, "        \"name\": \"bias_%d\",\n", layer);
+		fprintf(fptr, "        \"data_type\": 1,\n");
+		int b_dims[] = {next_nodes};
+		fprintf(fptr, "        \"dims\": ");
+		write_json_int_array(fptr, b_dims, 1);
+		fprintf(fptr, ",\n");
+		fprintf(fptr, "        \"float_data\": ");
+		write_json_float_array(fptr, pL->t_bias->values, next_nodes);
+		fprintf(fptr, "\n");
+		fprintf(fptr, "      }");
+	}
+	fprintf(fptr, "\n    ],\n");
+
+	// ========== NODES (operations) ==========
+	fprintf(fptr, "    \"node\": [\n");
+	int first_node = 1;
+	char prev_output[64];
+	snprintf(prev_output, sizeof(prev_output), "input");
+
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		char matmul_out[64], add_out[64], act_out[64];
+		snprintf(matmul_out, sizeof(matmul_out), "matmul_%d_out", layer);
+		snprintf(add_out, sizeof(add_out), "add_%d_out", layer);
+		snprintf(act_out, sizeof(act_out), "layer_%d_out", layer);
+
+		// Get activation for the NEXT layer (output of this transform)
+		Activation_type next_act = pnet->layers[layer + 1].activation;
+		const char *act_op = onnx_activation_op(next_act);
+
+		// MatMul node: prev_output @ weight_N -> matmul_N_out
+		if (!first_node) fprintf(fptr, ",\n");
+		first_node = 0;
+
+		fprintf(fptr, "      {\n");
+		fprintf(fptr, "        \"op_type\": \"MatMul\",\n");
+		fprintf(fptr, "        \"name\": \"matmul_%d\",\n", layer);
+		fprintf(fptr, "        \"input\": [\"%s\", \"weight_%d\"],\n", prev_output, layer);
+		fprintf(fptr, "        \"output\": [\"%s\"]\n", matmul_out);
+		fprintf(fptr, "      }");
+
+		// Add node: matmul_N_out + bias_N -> add_N_out
+		fprintf(fptr, ",\n");
+		fprintf(fptr, "      {\n");
+		fprintf(fptr, "        \"op_type\": \"Add\",\n");
+		fprintf(fptr, "        \"name\": \"add_%d\",\n", layer);
+		fprintf(fptr, "        \"input\": [\"%s\", \"bias_%d\"],\n", matmul_out, layer);
+		fprintf(fptr, "        \"output\": [\"%s\"]\n", add_out);
+		fprintf(fptr, "      }");
+
+		// Activation node (if any)
+		if (act_op != NULL)
+		{
+			fprintf(fptr, ",\n");
+			fprintf(fptr, "      {\n");
+			fprintf(fptr, "        \"op_type\": \"%s\",\n", act_op);
+			fprintf(fptr, "        \"name\": \"activation_%d\",\n", layer);
+			fprintf(fptr, "        \"input\": [\"%s\"],\n", add_out);
+			fprintf(fptr, "        \"output\": [\"%s\"]", act_out);
+
+			// LeakyRelu needs alpha attribute
+			if (next_act == ACTIVATION_LEAKY_RELU)
+			{
+				fprintf(fptr, ",\n");
+				fprintf(fptr, "        \"attribute\": [{\"name\": \"alpha\", \"type\": 1, \"f\": 0.01}]\n");
+			}
+			// Softmax needs axis attribute (default -1 for last axis)
+			else if (next_act == ACTIVATION_SOFTMAX)
+			{
+				fprintf(fptr, ",\n");
+				fprintf(fptr, "        \"attribute\": [{\"name\": \"axis\", \"type\": 2, \"i\": -1}]\n");
+			}
+			else
+			{
+				fprintf(fptr, "\n");
+			}
+			fprintf(fptr, "      }");
+			snprintf(prev_output, sizeof(prev_output), "%s", act_out);
+		}
+		else
+		{
+			// No activation, next input is add output
+			snprintf(prev_output, sizeof(prev_output), "%s", add_out);
+		}
+	}
+	fprintf(fptr, "\n    ],\n");
+
+	// ========== INPUT ==========
+	fprintf(fptr, "    \"input\": [\n");
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"input\",\n");
+	fprintf(fptr, "        \"type\": {\n");
+	fprintf(fptr, "          \"tensor_type\": {\n");
+	fprintf(fptr, "            \"elem_type\": 1,\n");
+	fprintf(fptr, "            \"shape\": {\"dim\": [{\"dim_param\": \"batch\"}, {\"dim_value\": %d}]}\n", input_size);
+	fprintf(fptr, "          }\n");
+	fprintf(fptr, "        }\n");
+	fprintf(fptr, "      }\n");
+	fprintf(fptr, "    ],\n");
+
+	// ========== OUTPUT ==========
+	fprintf(fptr, "    \"output\": [\n");
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"%s\",\n", prev_output);
+	fprintf(fptr, "        \"type\": {\n");
+	fprintf(fptr, "          \"tensor_type\": {\n");
+	fprintf(fptr, "            \"elem_type\": 1,\n");
+	fprintf(fptr, "            \"shape\": {\"dim\": [{\"dim_param\": \"batch\"}, {\"dim_value\": %d}]}\n", output_size);
+	fprintf(fptr, "          }\n");
+	fprintf(fptr, "        }\n");
+	fprintf(fptr, "      }\n");
+	fprintf(fptr, "    ]\n");
+
+	// Close graph and root
+	fprintf(fptr, "  }\n");
+	fprintf(fptr, "}\n");
+
+	fclose(fptr);
+	return ERR_OK;
+}

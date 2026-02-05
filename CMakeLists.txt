@@ -13,6 +13,7 @@ add_test(NAME save_test_binary COMMAND save_test_binary "${CMAKE_SOURCE_DIR}/mni
 add_test(NAME test_tensor COMMAND test_tensor)
 add_test(NAME test_network COMMAND test_network)
 add_test(NAME test_activations COMMAND test_activations)
+add_test(NAME test_onnx_export COMMAND test_onnx_export)
 
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
@@ -77,3 +78,6 @@ target_link_libraries(test_network ann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_activations test_activations.c testy/test_main.c)
 target_link_libraries(test_activations ann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_onnx_export test_onnx_export.c testy/test_main.c)
+target_link_libraries(test_onnx_export ann ${BLAS_LIB} ${MATH_LIB})

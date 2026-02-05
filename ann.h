@@ -318,6 +318,24 @@ int ann_save_network(const PNetwork pnet, const char *filename);
 int ann_save_network_binary(const PNetwork pnet, const char *filename);
 
 /**
+ * Export trained network to ONNX JSON format.
+ * 
+ * Exports the network as an ONNX model in JSON format, which can be used
+ * for inference in ONNX-compatible runtimes or converted to binary ONNX.
+ * 
+ * Supported activations: Sigmoid, ReLU, LeakyReLU, Tanh, Softsign, Softmax.
+ * Network is exported as a sequence of MatMul + Add + Activation operations.
+ * 
+ * @param pnet Network to export (must not be NULL, must have trained weights)
+ * @param filename Output file path (typically .onnx.json extension)
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if network or filename is NULL
+ * @return ERR_INVALID if network has no layers or unsupported configuration
+ * @return ERR_IO if file cannot be created/written
+ */
+int ann_export_onnx(const PNetwork pnet, const char *filename);
+
+/**
  * Load trained network from text file.
  * 
  * @param filename Path to network file (saved with ann_save_network())

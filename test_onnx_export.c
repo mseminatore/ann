@@ -182,6 +182,4 @@ void test_main(int argc, char *argv[]) {
 
     // Cleanup any remaining test files
     remove_file(test_file);
-
-    END_TESTS();
 }

@@ -917,16 +917,30 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	if (pnet->layer_count > pnet->layer_size)
 	{
 		// need to allocate more layers
+		int old_size = pnet->layer_size;
 		pnet->layer_size <<= 1;
 		PLayer layer = realloc(pnet->layers, pnet->layer_size * (sizeof(Layer)));
 		if (NULL == layer)
 		{
 			pnet->layer_count--;  // rollback count
+			pnet->layer_size = old_size;  // rollback size
 			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
 			return ERR_ALLOC;
 		}
 
 		pnet->layers = layer;
+		
+		// Initialize the newly allocated layers to NULL
+		for (int i = old_size; i < pnet->layer_size; i++)
+		{
+			pnet->layers[i].t_m 		= NULL;
+			pnet->layers[i].t_v 		= NULL;
+			pnet->layers[i].t_values 	= NULL;
+			pnet->layers[i].t_weights 	= NULL;
+			pnet->layers[i].t_gradients = NULL;
+			pnet->layers[i].t_dl_dz		= NULL;
+			pnet->layers[i].t_bias		= NULL;
+		}
 	}
 
 	int cur_layer = pnet->layer_count - 1;
@@ -1429,7 +1443,9 @@ void ann_free_network(PNetwork pnet)
 	// free layers
 	for (int layer = 0; layer < pnet->layer_count; layer++)
 	{
-		tensor_free(pnet->layers[layer].t_values);
+		// Add NULL check before freeing t_values
+		if (pnet->layers[layer].t_values)
+			tensor_free(pnet->layers[layer].t_values);
 
 		if (pnet->layers[layer].t_weights)
 		{

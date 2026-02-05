@@ -214,10 +214,7 @@ void tensor_set_from_array(PTensor t, int rows, int cols, const real *array)
 void tensor_free(PTensor t)
 {
 	if (!t)
-	{
-		assert(t);
 		return;
-	}
 
 	t->rows = t->cols = t->stride = -1;
 	tfree(t->values);

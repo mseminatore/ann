@@ -7,7 +7,8 @@ ifeq ($(ARCH), x86_64)
 endif
 
 TARGET = mnist
-OBJS = ann.o tensor.o
+LIB_OBJS = ann.o tensor.o
+LIBANN = libann.a
 DEPS = ann.h tensor.h ann_config.h
 
 # use no blas
@@ -30,50 +31,54 @@ LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 #  -DMKL_ILP64  -m64  -I"${MKLROOT}/include"
 #  ${MKLROOT}/lib/libmkl_intel_ilp64.a ${MKLROOT}/lib/libmkl_tbb_thread.a ${MKLROOT}/lib/libmkl_core.a -L${TBBROOT}/lib -ltbb -lc++ -lpthread -lm -ldl
 
-all: mnist logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_forward_pass test_training_convergence
+all: $(LIBANN) mnist logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_forward_pass test_training_convergence
 
-$(TARGET):	$(OBJS) mnist.o
-	$(CC) -o $@ $^ $(LFLAGS)
+# build the static library
+$(LIBANN): $(LIB_OBJS)
+	$(AR) rcs $@ $^
 
-logic: $(OBJS) logic.o
-	$(CC) -o $@ $^ $(LFLAGS)
+$(TARGET): $(LIBANN) mnist.o
+	$(CC) -o $@ mnist.o $(LIBANN) $(LFLAGS)
 
-digit5x7: $(OBJS) digit5x7.o
-	$(CC) -o $@ $^ $(LFLAGS)
+logic: $(LIBANN) logic.o
+	$(CC) -o $@ logic.o $(LIBANN) $(LFLAGS)
 
-save_test: $(OBJS) save_test.o
-	$(CC) -o $@ $^ $(LFLAGS)
+digit5x7: $(LIBANN) digit5x7.o
+	$(CC) -o $@ digit5x7.o $(LIBANN) $(LFLAGS)
 
-save_test_binary: $(OBJS) save_test_binary.o
-	$(CC) -o $@ $^ $(LFLAGS)
+save_test: $(LIBANN) save_test.o
+	$(CC) -o $@ save_test.o $(LIBANN) $(LFLAGS)
 
-blas_perf: $(OBJS) blas_perf.o
-	$(CC) -o $@ $^ $(LFLAGS)
+save_test_binary: $(LIBANN) save_test_binary.o
+	$(CC) -o $@ save_test_binary.o $(LIBANN) $(LFLAGS)
 
-test_tensor: $(OBJS) test_tensor.o testy/test_main.o
-	$(CC) -o $@ $^ $(LFLAGS)
+blas_perf: $(LIBANN) blas_perf.o
+	$(CC) -o $@ blas_perf.o $(LIBANN) $(LFLAGS)
 
-test_network: $(OBJS) test_network.o testy/test_main.o
-	$(CC) -o $@ $^ $(LFLAGS)
+test_tensor: $(LIBANN) test_tensor.o testy/test_main.o
+	$(CC) -o $@ test_tensor.o testy/test_main.o $(LIBANN) $(LFLAGS)
 
-test_activations: $(OBJS) test_activations.o testy/test_main.o
-	$(CC) -o $@ $^ $(LFLAGS)
+test_network: $(LIBANN) test_network.o testy/test_main.o
+	$(CC) -o $@ test_network.o testy/test_main.o $(LIBANN) $(LFLAGS)
 
-test_loss_functions: $(OBJS) test_loss_functions.o testy/test_main.o
-	$(CC) -o $@ $^ $(LFLAGS)
+test_activations: $(LIBANN) test_activations.o testy/test_main.o
+	$(CC) -o $@ test_activations.o testy/test_main.o $(LIBANN) $(LFLAGS)
 
-test_save_load: $(OBJS) test_save_load.o testy/test_main.o
-	$(CC) -o $@ $^ $(LFLAGS)
+test_loss_functions: $(LIBANN) test_loss_functions.o testy/test_main.o
+	$(CC) -o $@ test_loss_functions.o testy/test_main.o $(LIBANN) $(LFLAGS)
 
-test_forward_pass: $(OBJS) test_forward_pass.o testy/test_main.o
-	$(CC) -o $@ $^ $(LFLAGS)
+test_save_load: $(LIBANN) test_save_load.o testy/test_main.o
+	$(CC) -o $@ test_save_load.o testy/test_main.o $(LIBANN) $(LFLAGS)
 
-test_training_convergence: $(OBJS) test_training_convergence.o testy/test_main.o
-	$(CC) -o $@ $^ $(LFLAGS)
+test_forward_pass: $(LIBANN) test_forward_pass.o testy/test_main.o
+	$(CC) -o $@ test_forward_pass.o testy/test_main.o $(LIBANN) $(LFLAGS)
+
+test_training_convergence: $(LIBANN) test_training_convergence.o testy/test_main.o
+	$(CC) -o $@ test_training_convergence.o testy/test_main.o $(LIBANN) $(LFLAGS)
 
 %.o: %.c $(DEPS)
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) $< -o $@
 
 clean:
-	rm -f $(TARGET) $(OBJS) logic digit5x7 logic.o digit5x7.o mnist.o save_test.o save_test save_test_binary save_test_binary.o blas_perf.o test_tensor test_tensor.o test_network test_network.o test_activations test_activations.o test_loss_functions test_loss_functions.o test_save_load test_save_load.o test_forward_pass test_forward_pass.o test_training_convergence test_training_convergence.o testy/test_main.o
+	rm -f $(LIBANN) $(LIB_OBJS) $(TARGET) logic digit5x7 logic.o digit5x7.o mnist.o save_test.o save_test save_test_binary save_test_binary.o blas_perf blas_perf.o test_tensor test_tensor.o test_network test_network.o test_activations test_activations.o test_loss_functions test_loss_functions.o test_save_load test_save_load.o test_forward_pass test_forward_pass.o test_training_convergence test_training_convergence.o testy/test_main.o
 

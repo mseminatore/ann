@@ -54,43 +54,44 @@ else()
 endif()
 
 # add the library
-add_library(ann STATIC ann.c tensor.c)
+add_library(libann STATIC ann.c tensor.c)
+set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
 #
 # add the executables
 #
 add_executable(mnist mnist.c)
-target_link_libraries(mnist ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(mnist libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(digit5x7 digit5x7.c)
-target_link_libraries(digit5x7 ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(digit5x7 libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(logic logic.c)
-target_link_libraries(logic ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(logic libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(save_test save_test.c)
-target_link_libraries(save_test ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(save_test libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(save_test_binary save_test_binary.c)
-target_link_libraries(save_test_binary ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(save_test_binary libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_tensor test_tensor.c testy/test_main.c)
-target_link_libraries(test_tensor ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(test_tensor libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_network test_network.c testy/test_main.c)
-target_link_libraries(test_network ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(test_network libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_activations test_activations.c testy/test_main.c)
-target_link_libraries(test_activations ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(test_activations libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_onnx_export test_onnx_export.c testy/test_main.c)
-target_link_libraries(test_onnx_export ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(test_onnx_export libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_loss_functions test_loss_functions.c testy/test_main.c)
-target_link_libraries(test_loss_functions ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(test_loss_functions libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_save_load test_save_load.c testy/test_main.c)
-target_link_libraries(test_save_load ann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(test_save_load libann ${BLAS_LIB} ${MATH_LIB})
 
 #add_executable(test_forward_pass test_forward_pass.c testy/test_main.c)
 #target_link_libraries(test_forward_pass ann ${BLAS_LIB} ${MATH_LIB})

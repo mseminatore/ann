@@ -4,13 +4,14 @@ A prioritized list of improvements and enhancements for the library.
 
 ## High Priority
 
-- [ ] **Complete Activation Function Backpropagation**
-  - README notes ReLU/Tanh/LeakyReLU/Softsign are "not yet functional"
-  - `back_propagate_relu` exists but has uncertain implementation (comment: "??? is that right?")
-  - Missing implementations:
-    - [ ] `back_propagate_tanh`
-    - [ ] `back_propagate_leaky_relu`
-    - [ ] `back_propagate_softsign`
+- [x] **Complete Activation Function Backpropagation**
+  - ~~README notes ReLU/Tanh/LeakyReLU/Softsign are "not yet functional"~~
+  - ~~`back_propagate_relu` exists but has uncertain implementation~~
+  - All backprop functions implemented:
+    - [x] `back_propagate_relu` (fixed and documented)
+    - [x] `back_propagate_tanh`
+    - [x] `back_propagate_leaky_relu`
+    - [x] `back_propagate_softsign`
 
 - [x] **Convert Remaining Asserts to Error Callbacks**
   - ~~31 asserts in tensor.c (null checks, shape validation, bounds checking)~~
@@ -72,3 +73,4 @@ _Move items here as they are finished:_
 - [x] Add missing functions to README documentation tables
 - [x] Convert all asserts to error callbacks (31 in tensor.c, 7 in ann.c)
 - [x] Add bias updates to AdaGrad/RMSProp/Adam optimizers
+- [x] Complete activation function backpropagation (ReLU, LeakyReLU, Tanh, Softsign)

@@ -83,8 +83,8 @@ Test executables: `test_tensor`, `test_network`, `test_activations`, `test_onnx_
 
 | Feature | Status |
 |---------|--------|
-| Activations | Sigmoid, Softmax work; ReLU/Tanh/LeakyReLU in progress |
-| Optimizers | SGD, Momentum work; Adam/AdaGrad not yet vectorized |
+| Activations | Sigmoid, Softmax, ReLU, LeakyReLU, Tanh, Softsign |
+| Optimizers | SGD, Momentum, Adam, AdaGrad, RMSProp (not yet vectorized) |
 | Loss Functions | MSE, Categorical Cross-Entropy |
 | Model Export | Text (`.nna`), Binary (`.nnb`), ONNX JSON |
 

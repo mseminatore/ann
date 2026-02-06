@@ -91,8 +91,8 @@ For training, the module provides **Stochastic Gradient Descent**,
 **Momentum**, **AdaGrad**, **RMSProp**, and **Adam** optimizers. This option 
 is set when a network is created via `ann_make_network()`.
 
-The layer activation types currently supported are **None**, **Sigmoid** and 
-**Softmax**. Support for **RELU** is currently in progress.
+The layer activation types currently supported are **None**, **Sigmoid**, 
+**Softmax**, **ReLU**, **LeakyReLU**, **Tanh**, and **Softsign**.
 
 For performance, mini-batch support is provided. Batch size can be configured, 
 along with other hyper-parameters, either directly via the network object or 
@@ -151,10 +151,7 @@ path is used or the BLAS code path.
 
 # Known Issues
 
-There are a few portions of the library that are currently under construction.
-These are:
-
-- RELU, leaky RELU, Tanh and softsign activation not yet functional
+No known issues at this time.
 
 # Example usage
 

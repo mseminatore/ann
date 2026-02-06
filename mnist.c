@@ -188,9 +188,9 @@ int main(int argc, char *argv[])
 
 	int iFirstArg = getopt(argc, argv);
 
-#if defined(USE_BLAS)
+#if defined(USE_BLAS) || defined(USE_CBLAS) || defined(CBLAS)
 
-	#if defined(CBLAS)
+	#if defined(CBLAS) || defined(USE_CBLAS)
 		cblas_init(CBLAS_DEFAULT_THREADS);
 		if (threads != -1)
 			cblas_set_num_threads(threads);

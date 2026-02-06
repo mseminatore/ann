@@ -25,11 +25,22 @@
 #include <stdlib.h>
 #include "ann.h"
 
+#if defined(USE_CBLAS)
+#	include <cblas.h>
+#endif
+
 //------------------------------
 // main program start
 //------------------------------
 int main(int argc, char *argv[])
 {
+#if defined(USE_CBLAS)
+	cblas_init(CBLAS_DEFAULT_THREADS);
+	printf( "%s\n", cblas_get_config());
+	printf("      CPU uArch: %s\n", cblas_get_corename());
+	printf("  Cores/Threads: %d/%d\n", cblas_get_num_procs(), cblas_get_num_threads());
+#endif
+
 	real *data;
 	int rows, stride;
 	char *filename = "and.csv";

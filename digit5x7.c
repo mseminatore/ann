@@ -25,6 +25,10 @@
 #include <stdlib.h>
 #include "ann.h"
 
+#if defined(USE_CBLAS)
+#	include <cblas.h>
+#endif
+
 #ifdef _WIN32
 #	define DIR_FIX "..\\"
 #else
@@ -78,6 +82,13 @@ void add_noise(real *data, int size, int amount)
 //------------------------------
 int main(int argc, char *argv[])
 {
+#if defined(USE_CBLAS)
+	cblas_init(CBLAS_DEFAULT_THREADS);
+	printf( "%s\n", cblas_get_config());
+	printf("      CPU uArch: %s\n", cblas_get_corename());
+	printf("  Cores/Threads: %d/%d\n", cblas_get_num_procs(), cblas_get_num_threads());
+#endif
+
 	char *filename = DIR_FIX "num5x7.csv";
 
 	PNetwork pnet = ann_make_network(OPT_DEFAULT, LOSS_DEFAULT);

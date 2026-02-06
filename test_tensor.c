@@ -5,6 +5,10 @@
 #include "testy/test.h"
 #include "tensor.h"
 
+#if defined(USE_CBLAS)
+#	include <cblas.h>
+#endif
+
 // Helper function to compare tensors with epsilon tolerance
 static int tensors_equal(const PTensor a, const PTensor b, real epsilon) {
     if (!a || !b) return (a == b);
@@ -22,6 +26,14 @@ static int tensors_equal(const PTensor a, const PTensor b, real epsilon) {
 void test_main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
+
+#if defined(USE_CBLAS)
+	cblas_init(CBLAS_DEFAULT_THREADS);
+	printf( "%s\n", cblas_get_config());
+	printf("      CPU uArch: %s\n", cblas_get_corename());
+	printf("  Cores/Threads: %d/%d\n", cblas_get_num_procs(), cblas_get_num_threads());
+#endif
+
     MODULE("Tensor Unit Tests");
 
     // ========================================================================

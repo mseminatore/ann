@@ -5,6 +5,10 @@
 #include "tensor.h"
 #include "testy/test.h"
 
+#if defined(USE_CBLAS)
+#	include <cblas.h>
+#endif
+
 #define TEST_FILE_TXT "test_roundtrip.nna"
 #define TEST_FILE_BIN "test_roundtrip.nnb"
 
@@ -12,6 +16,13 @@ void test_main(int argc, char* argv[])
 {
     (void)argc;
     (void)argv;
+
+    #if defined(USE_CBLAS)
+	cblas_init(CBLAS_DEFAULT_THREADS);
+	printf( "%s\n", cblas_get_config());
+	printf("      CPU uArch: %s\n", cblas_get_corename());
+	printf("  Cores/Threads: %d/%d\n", cblas_get_num_procs(), cblas_get_num_threads());
+#endif
 
     MODULE("Save/Load Serialization");
 

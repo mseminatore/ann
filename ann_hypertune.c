@@ -63,6 +63,10 @@ static const char *activation_names[] = {
     "NULL", "SIGMOID", "RELU", "LEAKY_RELU", "TANH", "SOFTSIGN", "SOFTMAX"
 };
 
+static const char *topology_names[] = {
+    "CONSTANT", "PYRAMID", "FUNNEL", "INVERSE", "CUSTOM"
+};
+
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
@@ -100,10 +104,17 @@ void hypertune_space_init(HyperparamSpace *space)
     space->hidden_layer_sizes[2] = 128;
     space->hidden_layer_size_count = 3;
     
+    // Default topology patterns
+    space->topology_patterns[0] = TOPOLOGY_CONSTANT;
+    space->topology_pattern_count = 1;
+    
     // Default activations
     space->hidden_activations[0] = ACTIVATION_RELU;
     space->hidden_activations[1] = ACTIVATION_SIGMOID;
     space->hidden_activation_count = 2;
+    
+    // Per-layer activation search disabled by default
+    space->search_per_layer_activation = 0;
     
     // Training settings
     space->epoch_limit = 1000;
@@ -242,6 +253,67 @@ void hypertune_free_split(DataSplit *split)
 // UTILITY FUNCTIONS
 // ============================================================================
 
+void hypertune_generate_topology(
+    TopologyPattern pattern,
+    int base_size,
+    int layer_count,
+    int *output_sizes)
+{
+    if (!output_sizes || layer_count <= 0) return;
+    
+    switch (pattern) {
+        case TOPOLOGY_PYRAMID:
+            // Decreasing sizes: base, base/2, base/4, ...
+            for (int i = 0; i < layer_count; i++) {
+                int divisor = 1 << i;  // 1, 2, 4, 8, ...
+                output_sizes[i] = base_size / divisor;
+                if (output_sizes[i] < 8) output_sizes[i] = 8;  // minimum size
+            }
+            break;
+            
+        case TOPOLOGY_INVERSE:
+            // Increasing sizes: base/2^(n-1), ..., base/2, base
+            for (int i = 0; i < layer_count; i++) {
+                int divisor = 1 << (layer_count - 1 - i);
+                output_sizes[i] = base_size / divisor;
+                if (output_sizes[i] < 8) output_sizes[i] = 8;
+            }
+            break;
+            
+        case TOPOLOGY_FUNNEL:
+            // Expand then contract: base, base*2, base (for 3 layers)
+            for (int i = 0; i < layer_count; i++) {
+                int mid = layer_count / 2;
+                if (i <= mid) {
+                    output_sizes[i] = base_size * (1 << i);
+                    if (output_sizes[i] > base_size * 4) 
+                        output_sizes[i] = base_size * 4;  // cap expansion
+                } else {
+                    int dist_from_end = layer_count - 1 - i;
+                    output_sizes[i] = base_size * (1 << dist_from_end);
+                    if (output_sizes[i] < 8) output_sizes[i] = 8;
+                }
+            }
+            break;
+            
+        case TOPOLOGY_CONSTANT:
+        case TOPOLOGY_CUSTOM:
+        default:
+            // All layers same size
+            for (int i = 0; i < layer_count; i++) {
+                output_sizes[i] = base_size;
+            }
+            break;
+    }
+}
+
+const char* hypertune_topology_name(TopologyPattern pattern)
+{
+    if (pattern >= 0 && pattern <= TOPOLOGY_CUSTOM)
+        return topology_names[pattern];
+    return "UNKNOWN";
+}
+
 PNetwork hypertune_create_network(
     const HypertuneResult *result,
     int input_size,
@@ -266,10 +338,11 @@ PNetwork hypertune_create_network(
         return NULL;
     }
     
-    // Add hidden layers
+    // Add hidden layers with per-layer activations
     for (int i = 0; i < result->hidden_layer_count; i++) {
         int nodes = result->hidden_layer_sizes[i];
-        if (ann_add_layer(net, nodes, LAYER_HIDDEN, result->hidden_activation) != ERR_OK) {
+        Activation_type act = result->hidden_activations[i];
+        if (ann_add_layer(net, nodes, LAYER_HIDDEN, act) != ERR_OK) {
             ann_free_network(net);
             return NULL;
         }
@@ -304,8 +377,9 @@ int hypertune_count_grid_trials(const HyperparamSpace *space)
     int layer_count_opts = space->hidden_layer_count_options > 0 ? space->hidden_layer_count_options : 1;
     int layer_size_count = space->hidden_layer_size_count > 0 ? space->hidden_layer_size_count : 1;
     int act_count = space->hidden_activation_count > 0 ? space->hidden_activation_count : 1;
+    int topo_count = space->topology_pattern_count > 0 ? space->topology_pattern_count : 1;
     
-    return lr_steps * batch_count * opt_count * layer_count_opts * layer_size_count * act_count;
+    return lr_steps * batch_count * opt_count * layer_count_opts * layer_size_count * act_count * topo_count;
 }
 
 // ============================================================================
@@ -323,13 +397,19 @@ void hypertune_print_result(const HypertuneResult *result)
            result->batch_size,
            optimizer_names[result->optimizer]);
     
-    printf("layers=%d [", result->hidden_layer_count);
+    printf("topo=%s, layers=%d [", 
+           topology_names[result->topology_pattern],
+           result->hidden_layer_count);
     for (int i = 0; i < result->hidden_layer_count; i++) {
         if (i > 0) printf(",");
         printf("%d", result->hidden_layer_sizes[i]);
     }
-    printf("], act=%s, epochs=%d, time=%.1fms\n",
-           activation_names[result->hidden_activation],
+    printf("], acts=[");
+    for (int i = 0; i < result->hidden_layer_count; i++) {
+        if (i > 0) printf(",");
+        printf("%s", activation_names[result->hidden_activations[i]]);
+    }
+    printf("], epochs=%d, time=%.1fms\n",
            result->epochs_used,
            result->training_time_ms);
 }
@@ -436,62 +516,83 @@ int hypertune_grid_search(
                         for (int act_i = 0; act_i < space->hidden_activation_count; act_i++) {
                             Activation_type act = space->hidden_activations[act_i];
                             
-                            // Build result config
-                            HypertuneResult current;
-                            hypertune_result_init(&current);
-                            current.trial_id = trial + 1;
-                            current.learning_rate = lr;
-                            current.batch_size = batch;
-                            current.optimizer = opt;
-                            current.hidden_layer_count = layer_count;
-                            current.hidden_activation = act;
-                            for (int l = 0; l < layer_count; l++)
-                                current.hidden_layer_sizes[l] = layer_size;
-                            
-                            // Create and train network
-                            PNetwork net = hypertune_create_network(
-                                &current, input_size, output_size,
-                                output_activation, loss_type);
-                            
-                            if (!net) {
-                                current.score = -1.0f;
-                            } else {
-                                ann_set_epoch_limit(net, space->epoch_limit);
-                                ann_set_convergence(net, space->convergence_epsilon);
+                            int topo_count = space->topology_pattern_count > 0 ? space->topology_pattern_count : 1;
+                            for (int topo_i = 0; topo_i < topo_count; topo_i++) {
+                                TopologyPattern topo = (space->topology_pattern_count > 0) 
+                                    ? space->topology_patterns[topo_i] 
+                                    : TOPOLOGY_CONSTANT;
                                 
-                                double start_time = get_time_ms();
-                                ann_train_network(net, 
-                                    split->train_inputs, 
-                                    split->train_outputs,
-                                    split->train_rows);
-                                double end_time = get_time_ms();
+                                // Build result config
+                                HypertuneResult current;
+                                hypertune_result_init(&current);
+                                current.trial_id = trial + 1;
+                                current.learning_rate = lr;
+                                current.batch_size = batch;
+                                current.optimizer = opt;
+                                current.hidden_layer_count = layer_count;
+                                current.topology_pattern = topo;
                                 
-                                current.training_time_ms = (real)(end_time - start_time);
-                                current.score = options->score_func(
-                                    net, split->val_inputs, split->val_outputs,
-                                    options->user_data);
+                                // Generate topology-based layer sizes
+                                hypertune_generate_topology(topo, layer_size, layer_count, 
+                                                           current.hidden_layer_sizes);
                                 
-                                ann_free_network(net);
+                                // Set per-layer activations
+                                for (int l = 0; l < layer_count; l++) {
+                                    if (space->search_per_layer_activation && 
+                                        space->hidden_activation_count > 1) {
+                                        // Vary activation per layer based on topo_i
+                                        current.hidden_activations[l] = 
+                                            space->hidden_activations[(act_i + l) % space->hidden_activation_count];
+                                    } else {
+                                        current.hidden_activations[l] = act;
+                                    }
+                                }
+                                
+                                // Create and train network
+                                PNetwork net = hypertune_create_network(
+                                    &current, input_size, output_size,
+                                    output_activation, loss_type);
+                                
+                                if (!net) {
+                                    current.score = -1.0f;
+                                } else {
+                                    ann_set_epoch_limit(net, space->epoch_limit);
+                                    ann_set_convergence(net, space->convergence_epsilon);
+                                    
+                                    double start_time = get_time_ms();
+                                    ann_train_network(net, 
+                                        split->train_inputs, 
+                                        split->train_outputs,
+                                        split->train_rows);
+                                    double end_time = get_time_ms();
+                                    
+                                    current.training_time_ms = (real)(end_time - start_time);
+                                    current.score = options->score_func(
+                                        net, split->val_inputs, split->val_outputs,
+                                        options->user_data);
+                                    
+                                    ann_free_network(net);
+                                }
+                                
+                                // Store result
+                                if (results && trial < max_results)
+                                    results[trial] = current;
+                                
+                                // Update best
+                                if (current.score > best.score)
+                                    best = current;
+                                
+                                // Progress callback
+                                if (options->progress_func) {
+                                    options->progress_func(trial + 1, total_trials,
+                                        &best, &current, options->user_data);
+                                } else if (options->verbosity >= 1) {
+                                    printf("[%d/%d] ", trial + 1, total_trials);
+                                    hypertune_print_result(&current);
+                                }
+                                
+                                trial++;
                             }
-                            
-                            // Store result
-                            if (results && trial < max_results)
-                                results[trial] = current;
-                            
-                            // Update best
-                            if (current.score > best.score)
-                                best = current;
-                            
-                            // Progress callback
-                            if (options->progress_func) {
-                                options->progress_func(trial + 1, total_trials,
-                                    &best, &current, options->user_data);
-                            } else if (options->verbosity >= 1) {
-                                printf("[%d/%d] ", trial + 1, total_trials);
-                                hypertune_print_result(&current);
-                            }
-                            
-                            trial++;
                         }
                     }
                 }
@@ -582,19 +683,36 @@ int hypertune_random_search(
         else
             current.hidden_layer_count = 1;
         
-        // Random layer size (same for all layers)
+        // Random layer size (base for topology generation)
         int layer_size = 64;
         if (space->hidden_layer_size_count > 0)
             layer_size = space->hidden_layer_sizes[rand() % space->hidden_layer_size_count];
-        for (int l = 0; l < current.hidden_layer_count; l++)
-            current.hidden_layer_sizes[l] = layer_size;
         
-        // Random activation
-        if (space->hidden_activation_count > 0)
-            current.hidden_activation = space->hidden_activations[
-                rand() % space->hidden_activation_count];
+        // Random topology pattern
+        if (space->topology_pattern_count > 0)
+            current.topology_pattern = space->topology_patterns[
+                rand() % space->topology_pattern_count];
         else
-            current.hidden_activation = ACTIVATION_RELU;
+            current.topology_pattern = TOPOLOGY_CONSTANT;
+        
+        // Generate layer sizes based on topology
+        hypertune_generate_topology(current.topology_pattern, layer_size, 
+                                   current.hidden_layer_count, current.hidden_layer_sizes);
+        
+        // Random activation(s)
+        Activation_type base_act = ACTIVATION_RELU;
+        if (space->hidden_activation_count > 0)
+            base_act = space->hidden_activations[rand() % space->hidden_activation_count];
+        
+        // Set per-layer activations
+        for (int l = 0; l < current.hidden_layer_count; l++) {
+            if (space->search_per_layer_activation && space->hidden_activation_count > 1) {
+                current.hidden_activations[l] = space->hidden_activations[
+                    rand() % space->hidden_activation_count];
+            } else {
+                current.hidden_activations[l] = base_act;
+            }
+        }
         
         // Create and train network
         PNetwork net = hypertune_create_network(

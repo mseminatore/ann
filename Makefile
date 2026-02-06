@@ -15,10 +15,10 @@ DEPS = ann.h tensor.h ann_config.h
 #CFLAGS += -g -O2
 #LFLAGS += -lm
 
-# use cblas
-# CFLAGS += -g -O2 -DUSE_BLAS -DCBLAS -I"/opt/cblas/include"
+# use cblas (requires C11 atomics)
+# CFLAGS += -std=c11 -g -O2 -DUSE_BLAS -DCBLAS -I"/opt/cblas/include"
 # LFLAGS += -L"/opt/cblas/lib" -lcblas -lm
-# CFLAGS += -g -O2 -DUSE_BLAS -DCBLAS -I.
+# CFLAGS += -std=c11 -g -O2 -DUSE_BLAS -DCBLAS -I.
 # LFLAGS += -L. -lcblas
 
 # use openblas

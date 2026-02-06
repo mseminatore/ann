@@ -42,6 +42,17 @@ extern "C" {
 #define HYPERTUNE_MAX_LAYER_SIZES     16
 
 //------------------------------
+// Topology patterns
+//------------------------------
+typedef enum {
+    TOPOLOGY_CONSTANT,    // All hidden layers have same size
+    TOPOLOGY_PYRAMID,     // Layers decrease in size toward output (e.g., 128-64-32)
+    TOPOLOGY_FUNNEL,      // Layers increase then decrease (e.g., 64-128-64)
+    TOPOLOGY_INVERSE,     // Layers increase in size toward output (e.g., 32-64-128)
+    TOPOLOGY_CUSTOM       // Use explicit sizes from hidden_layer_sizes array
+} TopologyPattern;
+
+//------------------------------
 // Hyperparameter search space
 //------------------------------
 typedef struct {
@@ -63,13 +74,20 @@ typedef struct {
     int hidden_layer_counts[HYPERTUNE_MAX_HIDDEN_LAYERS];  // e.g., [1, 2, 3]
     int hidden_layer_count_options;
 
-    // Nodes per hidden layer (applied uniformly or as pyramid)
+    // Nodes per hidden layer (base size for patterns, or explicit sizes)
     int hidden_layer_sizes[HYPERTUNE_MAX_LAYER_SIZES];     // e.g., [32, 64, 128]
     int hidden_layer_size_count;
+
+    // Topology patterns to try
+    TopologyPattern topology_patterns[4];  // e.g., [CONSTANT, PYRAMID]
+    int topology_pattern_count;
 
     // Activations for hidden layers
     Activation_type hidden_activations[HYPERTUNE_MAX_ACTIVATIONS];
     int hidden_activation_count;
+
+    // Per-layer activation search (if enabled, tries different activations per layer)
+    int search_per_layer_activation;  // 0 = same activation for all, 1 = vary per layer
 
     // Epoch limit for each trial
     unsigned epoch_limit;
@@ -93,7 +111,8 @@ typedef struct {
     // Topology
     int hidden_layer_count;
     int hidden_layer_sizes[HYPERTUNE_MAX_HIDDEN_LAYERS];
-    Activation_type hidden_activation;
+    Activation_type hidden_activations[HYPERTUNE_MAX_HIDDEN_LAYERS];  // per-layer activations
+    TopologyPattern topology_pattern;
     
     // Results
     real score;             // user-defined score (higher = better)
@@ -358,6 +377,29 @@ real hypertune_score_accuracy(
     PTensor val_outputs,
     void *user_data
 );
+
+/**
+ * Generate layer sizes based on topology pattern.
+ *
+ * @param pattern Topology pattern to use
+ * @param base_size Base size for the pattern
+ * @param layer_count Number of hidden layers
+ * @param output_sizes Array to fill with layer sizes (must be >= layer_count)
+ */
+void hypertune_generate_topology(
+    TopologyPattern pattern,
+    int base_size,
+    int layer_count,
+    int *output_sizes
+);
+
+/**
+ * Get string name for topology pattern.
+ *
+ * @param pattern Topology pattern
+ * @return Static string name
+ */
+const char* hypertune_topology_name(TopologyPattern pattern);
 
 #ifdef __cplusplus
 }

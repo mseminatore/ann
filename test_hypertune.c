@@ -5,6 +5,10 @@
 #include "testy/test.h"
 #include "ann_hypertune.h"
 
+#if defined(USE_CBLAS)
+#	include <cblas.h>
+#endif
+
 // ============================================================================
 // INITIALIZATION TESTS
 // ============================================================================
@@ -12,6 +16,14 @@
 void test_main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
+
+#if defined(USE_CBLAS)
+	cblas_init(CBLAS_DEFAULT_THREADS);
+	printf( "%s\n", cblas_get_config());
+	printf("      CPU uArch: %s\n", cblas_get_corename());
+	printf("  Cores/Threads: %d/%d\n", cblas_get_num_procs(), cblas_get_num_threads());
+#endif
+
     MODULE("Hypertuning Tests");
 
     // ========================================================================
@@ -125,7 +137,9 @@ void test_main(int argc, char *argv[]) {
     config.hidden_layer_count = 2;
     config.hidden_layer_sizes[0] = 64;
     config.hidden_layer_sizes[1] = 32;
-    config.hidden_activation = ACTIVATION_RELU;
+    config.hidden_activations[0] = ACTIVATION_RELU;
+    config.hidden_activations[1] = ACTIVATION_RELU;
+    config.topology_pattern = TOPOLOGY_CONSTANT;
 
     PNetwork net = hypertune_create_network(&config, 10, 3, ACTIVATION_SOFTMAX, LOSS_CATEGORICAL_CROSS_ENTROPY);
     TESTEX("create_network returns non-NULL", (net != NULL));
@@ -211,5 +225,96 @@ void test_main(int argc, char *argv[]) {
     tensor_free(xor_in);
     tensor_free(xor_out);
 
-    END_TESTS();
+    // ========================================================================
+    SUITE("Topology Generation");
+    COMMENT("Testing topology pattern generation...");
+
+    int sizes[4];
+    
+    // Test CONSTANT topology
+    hypertune_generate_topology(TOPOLOGY_CONSTANT, 64, 3, sizes);
+    TESTEX("CONSTANT: layer 0 = 64", (sizes[0] == 64));
+    TESTEX("CONSTANT: layer 1 = 64", (sizes[1] == 64));
+    TESTEX("CONSTANT: layer 2 = 64", (sizes[2] == 64));
+    
+    // Test PYRAMID topology (decreasing)
+    hypertune_generate_topology(TOPOLOGY_PYRAMID, 64, 3, sizes);
+    TESTEX("PYRAMID: layer 0 = 64", (sizes[0] == 64));
+    TESTEX("PYRAMID: layer 1 = 32", (sizes[1] == 32));
+    TESTEX("PYRAMID: layer 2 = 16", (sizes[2] == 16));
+    
+    // Test INVERSE topology (increasing)
+    hypertune_generate_topology(TOPOLOGY_INVERSE, 64, 3, sizes);
+    TESTEX("INVERSE: layer 0 = 16", (sizes[0] == 16));
+    TESTEX("INVERSE: layer 1 = 32", (sizes[1] == 32));
+    TESTEX("INVERSE: layer 2 = 64", (sizes[2] == 64));
+    
+    // Test FUNNEL topology (expand then contract)
+    hypertune_generate_topology(TOPOLOGY_FUNNEL, 32, 3, sizes);
+    TESTEX("FUNNEL: layer 0 expands", (sizes[0] >= 32));
+    TESTEX("FUNNEL: layer 1 is larger", (sizes[1] >= sizes[0]));
+    TESTEX("FUNNEL: layer 2 contracts", (sizes[2] <= sizes[1]));
+    
+    // Test topology names
+    TESTEX("CONSTANT name", (strcmp(hypertune_topology_name(TOPOLOGY_CONSTANT), "CONSTANT") == 0));
+    TESTEX("PYRAMID name", (strcmp(hypertune_topology_name(TOPOLOGY_PYRAMID), "PYRAMID") == 0));
+    TESTEX("FUNNEL name", (strcmp(hypertune_topology_name(TOPOLOGY_FUNNEL), "FUNNEL") == 0));
+    TESTEX("INVERSE name", (strcmp(hypertune_topology_name(TOPOLOGY_INVERSE), "INVERSE") == 0));
+
+    // ========================================================================
+    SUITE("Topology Search Integration");
+    COMMENT("Testing grid search with multiple topology patterns...");
+
+    HyperparamSpace topo_space;
+    hypertune_space_init(&topo_space);
+    
+    // Minimal configuration with multiple topologies
+    topo_space.learning_rate_min = 0.01f;
+    topo_space.learning_rate_max = 0.01f;
+    topo_space.learning_rate_steps = 1;
+    topo_space.batch_sizes[0] = 32;
+    topo_space.batch_size_count = 1;
+    topo_space.optimizers[0] = OPT_ADAM;
+    topo_space.optimizer_count = 1;
+    topo_space.hidden_layer_counts[0] = 2;
+    topo_space.hidden_layer_count_options = 1;
+    topo_space.hidden_layer_sizes[0] = 16;
+    topo_space.hidden_layer_size_count = 1;
+    topo_space.hidden_activations[0] = ACTIVATION_SIGMOID;
+    topo_space.hidden_activation_count = 1;
+    topo_space.epoch_limit = 50;
+    
+    // Test with 3 topology patterns
+    topo_space.topology_patterns[0] = TOPOLOGY_CONSTANT;
+    topo_space.topology_patterns[1] = TOPOLOGY_PYRAMID;
+    topo_space.topology_patterns[2] = TOPOLOGY_INVERSE;
+    topo_space.topology_pattern_count = 3;
+    
+    // Count should be 3 trials (one per topology)
+    int topo_trials = hypertune_count_grid_trials(&topo_space);
+    TESTEX("Topology search: 3 trials expected", (topo_trials == 3));
+
+    // Run grid search
+    xor_in = tensor_create_from_array(8, 2, xor_inputs);
+    xor_out = tensor_create_from_array(8, 1, xor_outputs);
+    hypertune_split_data(xor_in, xor_out, 0.75f, 0, 0, &xor_split);
+    
+    opts.verbosity = 0;  // quiet
+    trials = hypertune_grid_search(
+        &topo_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &opts, results, 10, &best);
+    
+    TESTEX("Topology grid search returns 3 trials", (trials == 3));
+    TESTEX("Result 0 is CONSTANT", (results[0].topology_pattern == TOPOLOGY_CONSTANT));
+    TESTEX("Result 1 is PYRAMID", (results[1].topology_pattern == TOPOLOGY_PYRAMID));
+    TESTEX("Result 2 is INVERSE", (results[2].topology_pattern == TOPOLOGY_INVERSE));
+    
+    // Verify layer sizes differ by topology
+    TESTEX("CONSTANT: both layers same size", (results[0].hidden_layer_sizes[0] == results[0].hidden_layer_sizes[1]));
+    TESTEX("PYRAMID: layer 0 > layer 1", (results[1].hidden_layer_sizes[0] > results[1].hidden_layer_sizes[1]));
+    TESTEX("INVERSE: layer 0 < layer 1", (results[2].hidden_layer_sizes[0] < results[2].hidden_layer_sizes[1]));
+    
+    hypertune_free_split(&xor_split);
+    tensor_free(xor_in);
+    tensor_free(xor_out);
 }

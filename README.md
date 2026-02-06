@@ -144,6 +144,8 @@ and **random search** (sampling-based) strategies.
 
 - **Grid Search** - exhaustively tries all combinations of hyperparameters
 - **Random Search** - randomly samples from the hyperparameter space
+- **Topology Patterns** - automatic layer size generation (pyramid, funnel, etc.)
+- **Per-Layer Activations** - different activation function for each layer
 - **Data Splitting** - automatic train/validation holdout with optional shuffling
 - **Custom Scoring** - user-defined callback for optimization metric
 - **Progress Reporting** - callback for monitoring search progress
@@ -159,8 +161,9 @@ The following hyperparameters can be tuned:
 | Batch size | Discrete set of values to try |
 | Optimizer | SGD, Momentum, Adam, RMSProp, AdaGrad |
 | Hidden layers | Number of hidden layers (1-5) |
-| Layer size | Number of nodes per hidden layer |
-| Activation | Sigmoid, ReLU, LeakyReLU, Tanh, etc. |
+| Layer size | Base size for topology generation |
+| Topology pattern | CONSTANT, PYRAMID, FUNNEL, INVERSE |
+| Activation | Sigmoid, ReLU, LeakyReLU, Tanh (per layer optional) |
 
 ## Functions
 
@@ -178,6 +181,8 @@ hypertune_count_grid_trials | calculate total grid combinations
 hypertune_print_result | print a single result
 hypertune_print_summary | print top N results
 hypertune_score_accuracy | default scoring function (accuracy)
+hypertune_generate_topology | generate layer sizes from pattern
+hypertune_topology_name | get string name for topology pattern
 
 ## Example Usage
 
@@ -303,6 +308,47 @@ real my_custom_scorer(PNetwork net, PTensor val_in, PTensor val_out, void *data)
 options.score_func = my_custom_scorer;
 options.user_data = NULL;  // optional context data
 ```
+
+## Topology Patterns
+
+The hypertuning module supports automatic generation of layer sizes based on 
+topology patterns. This helps explore different network architectures:
+
+| Pattern | Description | Example (3 layers, base=64) |
+|---------|-------------|----------------------------|
+| CONSTANT | All layers same size | 64 → 64 → 64 |
+| PYRAMID | Decreasing sizes toward output | 64 → 32 → 16 |
+| INVERSE | Increasing sizes toward output | 16 → 32 → 64 |
+| FUNNEL | Expand then contract | 32 → 64 → 32 |
+| CUSTOM | Use explicit sizes | user-defined |
+
+```c
+// Configure multiple topology patterns
+space.topology_patterns[0] = TOPOLOGY_CONSTANT;
+space.topology_patterns[1] = TOPOLOGY_PYRAMID;
+space.topology_patterns[2] = TOPOLOGY_INVERSE;
+space.topology_pattern_count = 3;
+
+// Generate sizes programmatically
+int sizes[3];
+hypertune_generate_topology(TOPOLOGY_PYRAMID, 64, 3, sizes);
+// sizes = {64, 32, 16}
+```
+
+## Per-Layer Activations
+
+Enable searching different activations for each hidden layer:
+
+```c
+space.hidden_activations[0] = ACTIVATION_RELU;
+space.hidden_activations[1] = ACTIVATION_SIGMOID;
+space.hidden_activations[2] = ACTIVATION_TANH;
+space.hidden_activation_count = 3;
+space.search_per_layer_activation = 1;  // enable per-layer search
+```
+
+When `search_per_layer_activation` is enabled, random search will assign 
+different activations to each layer independently.
 
 # Accelerating training with BLAS libraries
 

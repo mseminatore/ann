@@ -28,11 +28,19 @@
 #include <time.h>
 #include "ann.h"
 
+#if defined(USE_CBLAS)
+#	include <cblas.h>
+#endif
+
 //------------------------------
 // main program start
 //------------------------------
 int main(int argc, char *argv[])
 {
+#if defined(USE_CBLAS)
+	cblas_init(CBLAS_DEFAULT_THREADS);
+#endif
+
 	char *network_filename = "mnist-fashion.nnb";
 	char *test_filename = "fashion-mnist_test.csv";
 

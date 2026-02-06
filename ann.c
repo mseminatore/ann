@@ -548,8 +548,8 @@ static void back_propagate_output(PNetwork pnet, PLayer layer, PLayer prev_layer
 	// compute dL_dy = (r - y)
 	tensor_axpby(1.0, outputs, -1.0, layer->t_values);
 
-	// bias = bias + n * dL_dy
-	tensor_axpy(pnet->learning_rate, layer->t_values, prev_layer->t_bias);
+	// accumulate bias gradient: bias_grad += dL_dy
+	tensor_axpy((real)1.0, layer->t_values, prev_layer->t_bias_grad);
 
 	// gradient += dL_dy * z
 	tensor_outer((real)1.0, layer->t_values, prev_layer->t_values, prev_layer->t_gradients);
@@ -587,8 +587,8 @@ static void back_propagate_sigmoid(PNetwork pnet, PLayer layer, PLayer prev_laye
 	// dl_dz = dl_dz - dl_dz * z^2
 	tensor_sub(layer->t_dl_dz, layer->t_values);
 
-	// bias = bias + n * dL_dz
-	tensor_axpy(pnet->learning_rate, layer->t_dl_dz, prev_layer->t_bias);
+	// accumulate bias gradient: bias_grad += dL_dz
+	tensor_axpy((real)1.0, layer->t_dl_dz, prev_layer->t_bias_grad);
 
 	// gradient += dl_dz * x
 	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
@@ -620,8 +620,8 @@ static void back_propagate_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
 	// dl_dz = dl_dz * x
 	tensor_mul(layer->t_dl_dz, layer->t_values);
 
-	// bias = bias + n * dl_dz
-	tensor_axpy(pnet->learning_rate, layer->t_dl_dz, prev_layer->t_bias);
+	// accumulate bias gradient: bias_grad += dl_dz
+	tensor_axpy((real)1.0, layer->t_dl_dz, prev_layer->t_bias_grad);
 
 	// gradient += dl_dz * d * x
 	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
@@ -802,6 +802,9 @@ static void optimize_sgd(PNetwork pnet)
 	{
 		// W = W + n * gradients
 		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_gradients, pnet->layers[layer].t_weights);
+
+		// bias = bias + n * bias_grad
+		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_bias_grad, pnet->layers[layer].t_bias);
 	}
 }
 
@@ -826,6 +829,12 @@ static void optimize_momentum(PNetwork pnet)
 
 		// W = W + n * m
 		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_m, pnet->layers[layer].t_weights);
+
+		// bias momentum = beta * bias_m + one_minus_beta * bias_grad
+		tensor_axpby(one_minus_beta, pnet->layers[layer].t_bias_grad, beta, pnet->layers[layer].t_bias_m);
+
+		// bias = bias + n * bias_m
+		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_bias_m, pnet->layers[layer].t_bias);
 	}
 }
 
@@ -854,6 +863,20 @@ static void optimize_adagrad(PNetwork pnet)
 			real grad = g->values[i];
 			v->values[i] += grad * grad;
 			w->values[i] += pnet->learning_rate * grad / ((real)sqrt(v->values[i]) + epsilon);
+		}
+
+		// Update biases with AdaGrad
+		PTensor bg = pnet->layers[layer].t_bias_grad;
+		PTensor bv = pnet->layers[layer].t_bias_v;
+		PTensor b = pnet->layers[layer].t_bias;
+
+		int bias_size = bg->cols;
+
+		for (int i = 0; i < bias_size; i++)
+		{
+			real grad = bg->values[i];
+			bv->values[i] += grad * grad;
+			b->values[i] += pnet->learning_rate * grad / ((real)sqrt(bv->values[i]) + epsilon);
 		}
 	}
 }
@@ -885,6 +908,20 @@ static void optimize_rmsprop(PNetwork pnet)
 			real grad = g->values[i];
 			v->values[i] = beta * v->values[i] + one_minus_beta * grad * grad;
 			w->values[i] += pnet->learning_rate * grad / ((real)sqrt(v->values[i]) + epsilon);
+		}
+
+		// Update biases with RMSProp
+		PTensor bg = pnet->layers[layer].t_bias_grad;
+		PTensor bv = pnet->layers[layer].t_bias_v;
+		PTensor b = pnet->layers[layer].t_bias;
+
+		int bias_size = bg->cols;
+
+		for (int i = 0; i < bias_size; i++)
+		{
+			real grad = bg->values[i];
+			bv->values[i] = beta * bv->values[i] + one_minus_beta * grad * grad;
+			b->values[i] += pnet->learning_rate * grad / ((real)sqrt(bv->values[i]) + epsilon);
 		}
 	}
 }
@@ -932,6 +969,32 @@ static void optimize_adam(PNetwork pnet)
 
 			// Update weights: W = W + lr * mhat / (sqrt(vhat) + epsilon)
 			w->values[i] += pnet->learning_rate * mhat / ((real)sqrt(vhat) + epsilon);
+		}
+
+		// Update biases with Adam
+		PTensor bg = pnet->layers[layer].t_bias_grad;
+		PTensor bm = pnet->layers[layer].t_bias_m;
+		PTensor bv = pnet->layers[layer].t_bias_v;
+		PTensor b = pnet->layers[layer].t_bias;
+
+		int bias_size = bg->cols;
+
+		for (int i = 0; i < bias_size; i++)
+		{
+			real grad = bg->values[i];
+
+			// Update biased first moment estimate: bm = beta1 * bm + (1 - beta1) * g
+			bm->values[i] = beta1 * bm->values[i] + ((real)1.0 - beta1) * grad;
+
+			// Update biased second moment estimate: bv = beta2 * bv + (1 - beta2) * g^2
+			bv->values[i] = beta2 * bv->values[i] + ((real)1.0 - beta2) * grad * grad;
+
+			// Compute bias-corrected estimates
+			real mhat = bm->values[i] * bias_correction1;
+			real vhat = bv->values[i] * bias_correction2;
+
+			// Update biases: b = b + lr * mhat / (sqrt(vhat) + epsilon)
+			b->values[i] += pnet->learning_rate * mhat / ((real)sqrt(vhat) + epsilon);
 		}
 	}
 }
@@ -983,6 +1046,9 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 			pnet->layers[i].t_gradients = NULL;
 			pnet->layers[i].t_dl_dz		= NULL;
 			pnet->layers[i].t_bias		= NULL;
+			pnet->layers[i].t_bias_grad	= NULL;
+			pnet->layers[i].t_bias_m	= NULL;
+			pnet->layers[i].t_bias_v	= NULL;
 		}
 	}
 
@@ -1141,6 +1207,39 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
 			return ERR_ALLOC;
 		}
+
+		// Allocate bias accumulators for adaptive optimizers
+		pnet->layers[cur_layer - 1].t_bias_grad	= tensor_zeros(1, node_count);
+		pnet->layers[cur_layer - 1].t_bias_m	= tensor_zeros(1, node_count);
+		pnet->layers[cur_layer - 1].t_bias_v	= tensor_zeros(1, node_count);
+		if (pnet->layers[cur_layer - 1].t_bias_grad == NULL ||
+			pnet->layers[cur_layer - 1].t_bias_m == NULL ||
+			pnet->layers[cur_layer - 1].t_bias_v == NULL)
+		{
+			tensor_free(pnet->layers[cur_layer - 1].t_bias_grad);
+			tensor_free(pnet->layers[cur_layer - 1].t_bias_m);
+			tensor_free(pnet->layers[cur_layer - 1].t_bias_v);
+			tensor_free(pnet->layers[cur_layer - 1].t_bias);
+			tensor_free(pnet->layers[cur_layer - 1].t_dl_dz);
+			tensor_free(pnet->layers[cur_layer - 1].t_gradients);
+			tensor_free(pnet->layers[cur_layer - 1].t_m);
+			tensor_free(pnet->layers[cur_layer - 1].t_v);
+			tensor_free(pnet->layers[cur_layer - 1].t_weights);
+			tensor_free(pnet->layers[cur_layer].t_values);
+			pnet->layers[cur_layer - 1].t_bias_grad = NULL;
+			pnet->layers[cur_layer - 1].t_bias_m = NULL;
+			pnet->layers[cur_layer - 1].t_bias_v = NULL;
+			pnet->layers[cur_layer - 1].t_bias = NULL;
+			pnet->layers[cur_layer - 1].t_dl_dz = NULL;
+			pnet->layers[cur_layer - 1].t_gradients = NULL;
+			pnet->layers[cur_layer - 1].t_m = NULL;
+			pnet->layers[cur_layer - 1].t_v = NULL;
+			pnet->layers[cur_layer - 1].t_weights = NULL;
+			pnet->layers[cur_layer].t_values = NULL;
+			pnet->layer_count--;
+			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
+			return ERR_ALLOC;
+		}
 	}
 
 	return ERR_OK;
@@ -1182,6 +1281,9 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 		pnet->layers[i].t_gradients = NULL;
 		pnet->layers[i].t_dl_dz		= NULL;
 		pnet->layers[i].t_bias		= NULL;
+		pnet->layers[i].t_bias_grad	= NULL;
+		pnet->layers[i].t_bias_m	= NULL;
+		pnet->layers[i].t_bias_v	= NULL;
 	}
 
 	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
@@ -1308,6 +1410,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 			for (int layer = 0; layer < pnet->layer_count - 1; layer++)
 			{
 				tensor_fill(pnet->layers[layer].t_gradients, (real)0.0);
+				tensor_fill(pnet->layers[layer].t_bias_grad, (real)0.0);
 			}
 
 			loss = (real)0.0;
@@ -1502,6 +1605,9 @@ void ann_free_network(PNetwork pnet)
 			tensor_free(pnet->layers[layer].t_weights);
 			tensor_free(pnet->layers[layer].t_dl_dz);
 			tensor_free(pnet->layers[layer].t_bias);
+			tensor_free(pnet->layers[layer].t_bias_grad);
+			tensor_free(pnet->layers[layer].t_bias_m);
+			tensor_free(pnet->layers[layer].t_bias_v);
 		}
 	}
 

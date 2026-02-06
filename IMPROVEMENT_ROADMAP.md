@@ -17,9 +17,10 @@ A prioritized list of improvements and enhancements for the library.
   - ~~7 asserts in ann.c~~
   - All converted to proper error handling with return codes
 
-- [ ] **Add Bias Updates to AdaGrad/RMSProp/Adam**
-  - Current optimizer implementations only update weights, not biases
-  - Follow pattern from other optimizers that update both
+- [x] **Add Bias Updates to AdaGrad/RMSProp/Adam**
+  - ~~Current optimizer implementations only update weights, not biases~~
+  - ~~Follow pattern from other optimizers that update both~~
+  - All optimizers now properly update biases using their respective algorithms
 
 ## Medium Priority
 
@@ -70,3 +71,4 @@ _Move items here as they are finished:_
 - [x] Update README with new optimizer status
 - [x] Add missing functions to README documentation tables
 - [x] Convert all asserts to error callbacks (31 in tensor.c, 7 in ann.c)
+- [x] Add bias updates to AdaGrad/RMSProp/Adam optimizers

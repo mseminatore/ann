@@ -173,6 +173,9 @@ struct Layer
 	PTensor t_gradients;				// tensor of gradients for back propagation
 	PTensor t_dl_dz;					// tensor of dL_dz
 	PTensor t_bias;						// bias vector
+	PTensor t_bias_grad;				// tensor of gradients for bias
+	PTensor t_bias_m;					// tensor of momentums for bias (Adam)
+	PTensor t_bias_v;					// tensor of velocities for bias (AdaGrad/RMSProp/Adam)
 };
 
 //------------------------------

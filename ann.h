@@ -136,6 +136,17 @@ typedef enum {
 	OPT_DEFAULT = OPT_ADAM
 } Optimizer_type;
 
+//------------------------------
+// Weight initialization types
+//------------------------------
+typedef enum {
+	WEIGHT_INIT_UNIFORM,       // Uniform distribution [-limit, limit] (current default)
+	WEIGHT_INIT_XAVIER,        // Xavier/Glorot: std = sqrt(2 / (fan_in + fan_out)) - good for sigmoid/tanh
+	WEIGHT_INIT_HE,            // He: std = sqrt(2 / fan_in) - good for ReLU variants
+	WEIGHT_INIT_AUTO,          // Automatically choose based on activation function
+	WEIGHT_INIT_DEFAULT = WEIGHT_INIT_AUTO
+} Weight_init_type;
+
 
 //-----------------------------------------------
 // forward decls
@@ -202,6 +213,9 @@ struct Network
 	Loss_type loss_type;				// type of loss function used
 	Optimizer_type optimizer;
 	unsigned train_iteration;
+
+	real max_gradient;					// gradient clipping threshold (0 = disabled)
+	Weight_init_type weight_init;		// weight initialization strategy
 
 	Loss_func loss_func;				// the error function
 	Output_func print_func;				// print output function
@@ -462,6 +476,36 @@ void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
  * @param limit Loss threshold for convergence
  */
 void ann_set_convergence(PNetwork pnet, real limit);
+
+/**
+ * Set gradient clipping threshold for training stability.
+ * 
+ * Clips gradient magnitudes to [-max_grad, max_grad] to prevent
+ * exploding gradients, especially useful with ReLU activations.
+ * Set to 0 to disable gradient clipping (default).
+ * 
+ * Recommended values: 1.0 - 5.0 for most networks.
+ * 
+ * @param pnet Network to configure
+ * @param max_grad Maximum gradient magnitude (0 = disabled)
+ */
+void ann_set_gradient_clip(PNetwork pnet, real max_grad);
+
+/**
+ * Set weight initialization strategy.
+ * 
+ * Controls how initial weights are distributed:
+ * - WEIGHT_INIT_UNIFORM: Uniform distribution [-limit, limit]
+ * - WEIGHT_INIT_XAVIER: Xavier/Glorot init (good for sigmoid/tanh)
+ * - WEIGHT_INIT_HE: He init (good for ReLU variants)
+ * - WEIGHT_INIT_AUTO: Automatically choose based on layer activation (default)
+ * 
+ * Should be called before training. Has no effect after weights are initialized.
+ * 
+ * @param pnet Network to configure
+ * @param init_type Weight initialization strategy
+ */
+void ann_set_weight_init(PNetwork pnet, Weight_init_type init_type);
 
 /**
  * Print network properties and configuration to stdout.

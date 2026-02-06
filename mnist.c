@@ -207,7 +207,7 @@ int main(int argc, char *argv[])
 		printf("  Cores/Threads: %d/%d\n", openblas_get_num_procs(), openblas_get_num_threads());
 	#endif
 #else
-	printf("BLAS not enabled, using single-threaded C implementation\n");
+	printf("\nBLAS not enabled, using scalar single-threaded C implementation\n");
 #endif
 
 	// make a new network
@@ -283,7 +283,7 @@ int main(int argc, char *argv[])
 			printf("Exported trained network to ONNX file: %s\n", onnx_filename);
 		}
 	}
-	
+
 	// evaluate the network against the test data
 	real acc = ann_evaluate_accuracy(pnet, x_test, y_test);
 	printf("\nTest accuracy: %g%%\n", acc * 100);

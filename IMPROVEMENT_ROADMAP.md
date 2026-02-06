@@ -43,16 +43,16 @@ A prioritized list of improvements and enhancements for the library.
   - AdaGrad, RMSProp, and Adam have no dedicated tests
   - Add to test_network.c or create test_optimizers.c
 
-- [ ] **Gradient Clipping** *(~2-3 hours)*
+- [x] **Gradient Clipping** *(~2-3 hours)*
   - Prevents exploding gradients, especially with ReLU activation
-  - Clip gradient magnitudes during backprop: `grad = clip(grad, -max_val, max_val)`
-  - Add configurable `max_gradient` parameter to network
+  - Implemented via `ann_set_gradient_clip()` - clips to [-max_grad, max_grad]
+  - Applied in all optimizers before weight updates
 
-- [ ] **Activation-Aware Weight Initialization** *(~3-5 hours)*
-  - Current: uniform distribution with fixed `weight_limit`
-  - Add He initialization for ReLU: `std = sqrt(2/fan_in)` *(~2-3 hours)*
-  - Add Xavier/Glorot for sigmoid/tanh: `std = sqrt(2/(fan_in + fan_out))` *(~1-2 hours)*
-  - Requires `tensor_random_normal()` function in tensor library
+- [x] **Activation-Aware Weight Initialization** *(~3-5 hours)*
+  - He initialization for ReLU: `std = sqrt(2/fan_in)`
+  - Xavier/Glorot for sigmoid/tanh: `std = sqrt(2/(fan_in + fan_out))`
+  - Auto-selection based on layer activation (WEIGHT_INIT_AUTO)
+  - Added `tensor_random_normal()` and `tensor_clip()` to tensor library
 
 - [ ] **Batch Normalization Support** *(~8-16 hours)*
   - Would significantly improve training stability for deeper networks
@@ -120,3 +120,5 @@ _Move items here as they are finished:_
 - [x] Convert all asserts to error callbacks (31 in tensor.c, 7 in ann.c)
 - [x] Add bias updates to AdaGrad/RMSProp/Adam optimizers
 - [x] Complete activation function backpropagation (ReLU, LeakyReLU, Tanh, Softsign)
+- [x] Gradient clipping (`ann_set_gradient_clip()`, `tensor_clip()`)
+- [x] Activation-aware weight initialization (He/Xavier/Glorot, `tensor_random_normal()`)

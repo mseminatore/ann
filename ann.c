@@ -325,18 +325,62 @@ static void init_weights(PNetwork pnet)
 
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		// output layers don't have weights
-		//if (pnet->layers[layer].layer_type == LAYER_OUTPUT)
-		//	continue;
+		int fan_in = pnet->layers[layer - 1].node_count;
+		int fan_out = pnet->layers[layer].node_count;
+		Activation_type activation = pnet->layers[layer].activation;
 
-		// int weight_count	= pnet->layers[layer - 1].node_count;
-		// int node_count		= pnet->layers[layer].node_count;
+		// Determine initialization strategy
+		Weight_init_type init_type = pnet->weight_init;
 
-		// TODO - glorot uniform limits
-		//		real limit = (real)sqrt(6.0 / (weight_count + node_count));
-		//		real limit = (real)sqrt(1.0 / (weight_count));
-		tensor_random_uniform(pnet->layers[layer - 1].t_bias, (real)-pnet->weight_limit, (real)pnet->weight_limit);
-		tensor_random_uniform(pnet->layers[layer - 1].t_weights, (real)-pnet->weight_limit, (real)pnet->weight_limit);
+		if (init_type == WEIGHT_INIT_AUTO)
+		{
+			// Auto-select based on activation function
+			switch (activation)
+			{
+			case ACTIVATION_RELU:
+			case ACTIVATION_LEAKY_RELU:
+				init_type = WEIGHT_INIT_HE;
+				break;
+			case ACTIVATION_SIGMOID:
+			case ACTIVATION_TANH:
+			case ACTIVATION_SOFTSIGN:
+			case ACTIVATION_SOFTMAX:
+				init_type = WEIGHT_INIT_XAVIER;
+				break;
+			default:
+				init_type = WEIGHT_INIT_UNIFORM;
+				break;
+			}
+		}
+
+		// Initialize weights based on strategy
+		switch (init_type)
+		{
+		case WEIGHT_INIT_HE:
+			// He initialization: std = sqrt(2 / fan_in)
+			{
+				real std = (real)sqrt(2.0 / fan_in);
+				tensor_random_normal(pnet->layers[layer - 1].t_weights, (real)0.0, std);
+				tensor_fill(pnet->layers[layer - 1].t_bias, (real)0.0);
+			}
+			break;
+
+		case WEIGHT_INIT_XAVIER:
+			// Xavier/Glorot initialization: std = sqrt(2 / (fan_in + fan_out))
+			{
+				real std = (real)sqrt(2.0 / (fan_in + fan_out));
+				tensor_random_normal(pnet->layers[layer - 1].t_weights, (real)0.0, std);
+				tensor_fill(pnet->layers[layer - 1].t_bias, (real)0.0);
+			}
+			break;
+
+		default:
+		case WEIGHT_INIT_UNIFORM:
+			// Original uniform initialization
+			tensor_random_uniform(pnet->layers[layer - 1].t_bias, (real)-pnet->weight_limit, (real)pnet->weight_limit);
+			tensor_random_uniform(pnet->layers[layer - 1].t_weights, (real)-pnet->weight_limit, (real)pnet->weight_limit);
+			break;
+		}
 	}
 
 	pnet->weights_set = 1;
@@ -864,6 +908,22 @@ static void optimize_adapt(PNetwork pnet, real loss)
 }
 
 //--------------------------------------------------------
+// Clip gradients to prevent exploding gradients
+// Called before applying gradients if max_gradient > 0
+//--------------------------------------------------------
+static void clip_gradients(PNetwork pnet)
+{
+	if (pnet->max_gradient <= (real)0.0)
+		return;
+
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		tensor_clip(pnet->layers[layer].t_gradients, -pnet->max_gradient, pnet->max_gradient);
+		tensor_clip(pnet->layers[layer].t_bias_grad, -pnet->max_gradient, pnet->max_gradient);
+	}
+}
+
+//--------------------------------------------------------
 // Stochastic Gradient Descent (SGD)
 //
 // update the weights based on gradients
@@ -874,6 +934,8 @@ static void optimize_adapt(PNetwork pnet, real loss)
 //--------------------------------------------------------
 static void optimize_sgd(PNetwork pnet)
 {
+	clip_gradients(pnet);
+
 	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
 	{
 		// W = W + n * gradients
@@ -896,6 +958,8 @@ static void optimize_sgd(PNetwork pnet)
 //-----------------------------------------------
 static void optimize_momentum(PNetwork pnet)
 {
+	clip_gradients(pnet);
+
 	real beta = (real)0.9, one_minus_beta = (real)0.1;
 
 	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
@@ -923,6 +987,8 @@ static void optimize_momentum(PNetwork pnet)
 //-----------------------------------------------
 static void optimize_adagrad(PNetwork pnet)
 {
+	clip_gradients(pnet);
+
 	real epsilon = (real)1e-8;
 
 	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
@@ -965,6 +1031,8 @@ static void optimize_adagrad(PNetwork pnet)
 //-----------------------------------------------
 static void optimize_rmsprop(PNetwork pnet)
 {
+	clip_gradients(pnet);
+
 	real beta = (real)0.9;
 	real one_minus_beta = (real)0.1;
 	real epsilon = (real)1e-8;
@@ -1010,6 +1078,8 @@ static void optimize_rmsprop(PNetwork pnet)
 //-----------------------------------------------
 static void optimize_adam(PNetwork pnet)
 {
+	clip_gradients(pnet);
+
 	real beta1 = (real)0.9;
 	real beta2 = (real)0.999;
 	real epsilon = (real)1e-8;
@@ -1377,6 +1447,8 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->batchSize			= DEFAULT_BATCH_SIZE;
 	pnet->print_func		= ann_puts;
 	pnet->optimizer			= opt;
+	pnet->max_gradient		= (real)0.0;		// gradient clipping disabled by default
+	pnet->weight_init		= WEIGHT_INIT_AUTO;	// auto-select based on activation
 
 	switch(opt)
 	{
@@ -1641,6 +1713,28 @@ void ann_set_convergence(PNetwork pnet, real limit)
 		return;
 
 	pnet->convergence_epsilon = limit;
+}
+
+//------------------------------
+// set gradient clipping threshold
+//------------------------------
+void ann_set_gradient_clip(PNetwork pnet, real max_grad)
+{
+	if (!pnet)
+		return;
+
+	pnet->max_gradient = max_grad;
+}
+
+//------------------------------
+// set weight initialization strategy
+//------------------------------
+void ann_set_weight_init(PNetwork pnet, Weight_init_type init_type)
+{
+	if (!pnet)
+		return;
+
+	pnet->weight_init = init_type;
 }
 
 //------------------------------

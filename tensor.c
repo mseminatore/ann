@@ -247,7 +247,7 @@ void tensor_fill(PTensor t, real val)
 }
 
 //------------------------------
-// fill tensor with given value
+// fill tensor with uniform random values
 //------------------------------
 void tensor_random_uniform(PTensor t, real min, real max)
 {
@@ -265,6 +265,62 @@ void tensor_random_uniform(PTensor t, real min, real max)
 		r += min;
 
 		t->values[i] = r;
+	}
+}
+
+//---------------------------------------------
+// fill tensor with normal (Gaussian) random values
+// Uses Box-Muller transform for normal distribution
+//---------------------------------------------
+void tensor_random_normal(PTensor t, real mean, real std)
+{
+	if (!t)
+		return;
+
+	int limit = t->rows * t->cols;
+	int i = 0;
+
+	// Box-Muller generates pairs of values
+	for (; i + 1 < limit; i += 2)
+	{
+		real u1 = ((real)rand() + 1) / ((real)RAND_MAX + 1);  // (0, 1]
+		real u2 = (real)rand() / (real)RAND_MAX;               // [0, 1]
+
+		real mag = std * (real)sqrt(-2.0 * log(u1));
+		real z0 = mag * (real)cos(2.0 * 3.14159265358979323846 * u2) + mean;
+		real z1 = mag * (real)sin(2.0 * 3.14159265358979323846 * u2) + mean;
+
+		t->values[i] = z0;
+		t->values[i + 1] = z1;
+	}
+
+	// Handle odd count
+	if (i < limit)
+	{
+		real u1 = ((real)rand() + 1) / ((real)RAND_MAX + 1);
+		real u2 = (real)rand() / (real)RAND_MAX;
+
+		real mag = std * (real)sqrt(-2.0 * log(u1));
+		t->values[i] = mag * (real)cos(2.0 * 3.14159265358979323846 * u2) + mean;
+	}
+}
+
+//---------------------------------------------
+// clip tensor values to [min, max] range (in-place)
+//---------------------------------------------
+void tensor_clip(PTensor t, real min_val, real max_val)
+{
+	if (!t)
+		return;
+
+	int limit = t->rows * t->cols;
+
+	for (int i = 0; i < limit; i++)
+	{
+		if (t->values[i] < min_val)
+			t->values[i] = min_val;
+		else if (t->values[i] > max_val)
+			t->values[i] = max_val;
 	}
 }
 

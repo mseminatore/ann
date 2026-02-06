@@ -358,6 +358,24 @@ void tensor_fill(PTensor t, real val);
  */
 void tensor_random_uniform(PTensor t, real min, real max);
 
+/**
+ * Fill tensor with random normal (Gaussian) values (in-place).
+ * Uses Box-Muller transform to generate normally distributed values.
+ * @param t Tensor to fill
+ * @param mean Mean of the distribution
+ * @param std Standard deviation of the distribution
+ */
+void tensor_random_normal(PTensor t, real mean, real std);
+
+/**
+ * Clip tensor values to a specified range (in-place).
+ * Values below min_val are set to min_val, values above max_val are set to max_val.
+ * @param t Tensor to clip
+ * @param min_val Minimum allowed value
+ * @param max_val Maximum allowed value
+ */
+void tensor_clip(PTensor t, real min_val, real max_val);
+
 // ============================================================================
 // INPUT/OUTPUT
 // ============================================================================

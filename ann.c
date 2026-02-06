@@ -451,7 +451,11 @@ static real compute_ms_error(PNetwork pnet, PTensor outputs)
 	// get the output layer
 	PLayer poutput_layer = &pnet->layers[pnet->layer_count - 1];
 
-	assert(poutput_layer->layer_type == LAYER_OUTPUT);
+	if (poutput_layer->layer_type != LAYER_OUTPUT)
+	{
+		invoke_error_callback(ERR_INVALID, "compute_ms_error");
+		return (real)0.0;
+	}
 
 	real mse = (real)0.0, diff;
 
@@ -476,7 +480,11 @@ static real compute_cross_entropy(PNetwork pnet, PTensor outputs)
 	// get the output layer
 	PLayer poutput_layer = &pnet->layers[pnet->layer_count - 1];
 
-	assert(poutput_layer->layer_type == LAYER_OUTPUT);
+	if (poutput_layer->layer_type != LAYER_OUTPUT)
+	{
+		invoke_error_callback(ERR_INVALID, "compute_cross_entropy");
+		return (real)0.0;
+	}
 
 	real xe = (real)0.0;
 
@@ -663,8 +671,12 @@ static real train_pass_network(PNetwork pnet, PTensor inputs, PTensor outputs)
 	if (!pnet || !inputs || !outputs)
 		return 0.0;
 
-	assert(pnet->layers[0].layer_type == LAYER_INPUT);
-	assert(pnet->layers[pnet->layer_count - 1].layer_type == LAYER_OUTPUT);
+	if (pnet->layers[0].layer_type != LAYER_INPUT ||
+	    pnet->layers[pnet->layer_count - 1].layer_type != LAYER_OUTPUT)
+	{
+		invoke_error_callback(ERR_INVALID, "train_pass_network");
+		return 0.0;
+	}
 
 	// set the input values on the network
 	int node_count = pnet->layers[0].node_count;
@@ -762,9 +774,12 @@ static void optimize_adapt(PNetwork pnet, real loss)
 		{
 			pnet->learning_rate -= (real)DEFAULT_LEARN_SUB * pnet->learning_rate;
 
-			// don't let rate go below zero
+			// don't let rate go below minimum
 			if (pnet->learning_rate <= 0.0)
-				assert(0);
+			{
+				pnet->learning_rate = (real)1e-8;
+				invoke_error_callback(ERR_INVALID, "optimize_adaptive");
+			}
 		}
 	}
 
@@ -1010,7 +1025,6 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		break;
 
 	default:
-		assert(0);
 		invoke_error_callback(ERR_INVALID, "ann_add_layer");
 		return ERR_INVALID;
 	}
@@ -1032,7 +1046,12 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	// create the tensors
 	if (cur_layer > 0)
 	{
-		assert(pnet->layers[cur_layer - 1].t_weights == NULL);
+		// weights should not already be allocated
+		if (pnet->layers[cur_layer - 1].t_weights != NULL)
+		{
+			invoke_error_callback(ERR_INVALID, "ann_add_layer");
+			return ERR_INVALID;
+		}
 		pnet->layers[cur_layer - 1].t_weights	= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
 		if (pnet->layers[cur_layer - 1].t_weights == NULL)
 		{

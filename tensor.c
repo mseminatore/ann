@@ -174,8 +174,6 @@ PTensor tensor_create_from_array(int rows, int cols, const real *array)
 {
 	PTensor t = tensor_create(rows, cols);
 
-	assert(t);
-	assert(array);
 	if (!t || !array)
 		return NULL;
 
@@ -189,14 +187,11 @@ PTensor tensor_create_from_array(int rows, int cols, const real *array)
 //------------------------------
 void tensor_set_from_array(PTensor t, int rows, int cols, const real *array)
 {
-	assert(t);
-	assert(array);
 	if (!t || !array)
 		return;
 
 	if (t->rows != rows || t->cols != cols)
 	{
-		assert(0 && "tensor: invalid shape");
 		return;
 	}
 
@@ -241,7 +236,6 @@ PTensor tensor_copy(const PTensor t)
 //------------------------------
 void tensor_fill(PTensor t, real val)
 {
-	assert(t);
 	if (!t)
 		return;
 
@@ -257,7 +251,6 @@ void tensor_fill(PTensor t, real val)
 //------------------------------
 void tensor_random_uniform(PTensor t, real min, real max)
 {
-	assert(t);
 	if (!t)
 		return;
 
@@ -325,7 +318,6 @@ PTensor tensor_heaviside(const PTensor a)
 {
 	if (!a)
 	{
-		assert(0 && "tensor: invalid tensor.");
 		return NULL;
 	}
 
@@ -347,7 +339,6 @@ PTensor tensor_axpy(real alpha, const PTensor x, PTensor y)
 {
 	if (!x || !y || x->rows != y->rows || x->cols != y->cols)
 	{
-		assert(0 && "tensor: invalid shape.");
 		return NULL;
 	}
 
@@ -381,7 +372,6 @@ PTensor tensor_axpby(real alpha, const PTensor x, real beta, PTensor y)
 {
 	if (!x || !y || x->rows != y->rows || x->cols != y->cols)
 	{
-		assert(0 && "tensor: invalid shape.");
 		return NULL;
 	}
 
@@ -442,14 +432,12 @@ PTensor tensor_add(const PTensor a, const PTensor b)
 {
 	if (!a || !b)
 	{
-		assert(0 && "tensor_add: null tensor");
 		return NULL;
 	}
 
 	// shape must be the same
 	if (a->rows != b->rows || a->cols != b->cols)
 	{
-		assert(0 && "tensor_add shapes not equal");
 		return NULL;
 	}
 
@@ -469,14 +457,12 @@ PTensor tensor_sub(const PTensor a, const PTensor b)
 {
 	if (!a || !b)
 	{
-		assert(0 && "tensor_sub: null tensor");
 		return NULL;
 	}
 
 	// shape must be the same
 	if (a->rows != b->rows || a->cols != b->cols)
 	{
-		assert(0 && "tensor_sub shapes not equal");
 		return NULL;
 	}
 
@@ -535,14 +521,12 @@ PTensor tensor_mul(PTensor a, PTensor b)
 {
 	if (!a || !b)
 	{
-		assert(0 && "tensor_mul: null tensor");
 		return NULL;
 	}
 
 	// shape must be the same
 	if (a->rows != b->rows || a->cols != b->cols)
 	{
-		assert(0 && "tensor: invalid shape");
 		return NULL;
 	}
 
@@ -563,13 +547,11 @@ PTensor tensor_div(const PTensor a, const PTensor b)
 {
 	if (!a || !b)
 	{
-		assert(0 && "tensor_div: null tensor");
 		return NULL;
 	}
 
 	if (a->cols != b->cols || b->rows != 1)
 	{
-		assert(0 && "tensor: invalid shape");
 		return NULL;
 	}
 
@@ -636,7 +618,6 @@ PTensor tensor_slice_rows(const PTensor t, int row_start)
 {
 	PTensor r;
 
-	assert(t);
 	if (!t || row_start > t->rows)
 		return NULL;
 
@@ -654,7 +635,8 @@ PTensor tensor_slice_rows(const PTensor t, int row_start)
 
 	// release t's extra memory
 	t->values = trealloc(t->values, t->rows * t->cols * sizeof(real));
-	assert(t->values);
+	if (!t->values)
+		return NULL;
 
 	return r;
 }
@@ -666,7 +648,6 @@ PTensor tensor_slice_cols(const PTensor t, int col_start)
 {
 	PTensor r;
 
-	assert(t);
 	if (!t || col_start > t->cols)
 		return NULL;
 
@@ -703,7 +684,8 @@ PTensor tensor_slice_cols(const PTensor t, int col_start)
 
 	// release t's extra memory
 	t->values = trealloc(t->values, t->rows * t->cols * sizeof(real));
-	assert(t->values);
+	if (!t->values)
+		return NULL;
 
 	return r;
 }
@@ -713,9 +695,8 @@ PTensor tensor_slice_cols(const PTensor t, int col_start)
 //-------------------------------
 PTensor tensor_onehot(const PTensor t, int classes)
 {
-	if (t->cols > 1)
+	if (!t || t->cols > 1)
 	{
-		assert(t->cols == 1);
 		return NULL;
 	}
 
@@ -738,7 +719,6 @@ real tensor_sum(const PTensor t)
 
 	if (!t || t->rows > 1)
 	{
-		assert(0 && "tensor: invalid tensor");
 		return (real)0.0;
 	}
 
@@ -835,11 +815,16 @@ PTensor tensor_argmax(const PTensor t)
 //----------------------------------
 PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, real beta, const PTensor v, PTensor dest)
 {
+	if (!mtx || !v || !dest)
+		return NULL;
+
 	if (trans == Tensor_NoTranspose && mtx->cols != v->cols)
 	{
-		assert(0 && "tensor: invalid shape.");
 		return NULL;
 	}
+
+	if (dest->rows != 1)
+		return NULL;
 
 #ifdef USE_BLAS
 	cblas_sgemv(CblasRowMajor, (trans == Tensor_NoTranspose) ? CblasNoTrans : CblasTrans, mtx->rows, mtx->cols, alpha, mtx->values, mtx->cols, v->values, 1, beta, dest->values, 1);
@@ -849,8 +834,6 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, rea
 
 	if (trans == Tensor_NoTranspose)
 	{
-		assert(dest->rows == 1);
-
 		// for each row of the matrix
 		for (int mtx_row = 0; mtx_row < mtx->rows; mtx_row++)
 		{
@@ -866,8 +849,6 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, rea
 	}
 	else
 	{
-		assert(dest->rows == 1);
-
 		for (int mtx_col = 0; mtx_col < mtx->cols; mtx_col++)
 		{
 			sum = (real)0.0;
@@ -909,9 +890,11 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, rea
 //---------------------------------
 PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest)
 {
+	if (!a || !b || !dest)
+		return NULL;
+
 	if (a->cols != dest->rows || b->cols != dest->cols)
 	{
-		assert(0 && "tensor: invalid shape.");
 		return NULL;
 	}
 
@@ -997,8 +980,6 @@ PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTe
 //-------------------------------
 int tensor_save_to_file(const PTensor t, const char *filename)
 {
-	assert(filename);
-	assert(t);
 	if (!t || !filename)
 		return -1;
 
@@ -1029,7 +1010,6 @@ int tensor_save_to_file(const PTensor t, const char *filename)
 //------------------------------
 void tensor_print(const PTensor t)
 {
-	assert(t);
 	if (!t)
 		return;
 

@@ -963,35 +963,81 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, rea
 	cblas_sgemv(CblasRowMajor, (trans == Tensor_NoTranspose) ? CblasNoTrans : CblasTrans, mtx->rows, mtx->cols, alpha, mtx->values, mtx->cols, v->values, 1, beta, dest->values, 1);
 #else
 
-	real sum;
+	int rows = mtx->rows;
+	int cols = mtx->cols;
 
 	if (trans == Tensor_NoTranspose)
 	{
-		// for each row of the matrix
-		for (int mtx_row = 0; mtx_row < mtx->rows; mtx_row++)
+		// dest = alpha * A * v + beta * dest
+		// For each row of the matrix (cache-friendly: sequential row access)
+		for (int mtx_row = 0; mtx_row < rows; mtx_row++)
 		{
-			sum = (real)0.0;
+			real sum = (real)0.0;
+			real *row_ptr = mtx->values + mtx_row * cols;
 
-			for (int mtx_col = 0; mtx_col < mtx->cols; mtx_col++)
+			// Unrolled inner loop (4x)
+			int mtx_col = 0;
+			int unroll_limit = cols - 3;
+
+			for (; mtx_col < unroll_limit; mtx_col += 4)
 			{
-				sum += alpha * mtx->values[mtx_row * mtx->cols + mtx_col] * v->values[mtx_col];
+				sum += row_ptr[mtx_col] * v->values[mtx_col];
+				sum += row_ptr[mtx_col + 1] * v->values[mtx_col + 1];
+				sum += row_ptr[mtx_col + 2] * v->values[mtx_col + 2];
+				sum += row_ptr[mtx_col + 3] * v->values[mtx_col + 3];
 			}
 
-			dest->values[mtx_row] = beta * dest->values[mtx_row] + sum;
+			// Handle remainder
+			for (; mtx_col < cols; mtx_col++)
+			{
+				sum += row_ptr[mtx_col] * v->values[mtx_col];
+			}
+
+			dest->values[mtx_row] = beta * dest->values[mtx_row] + alpha * sum;
 		}
 	}
 	else
 	{
-		for (int mtx_col = 0; mtx_col < mtx->cols; mtx_col++)
+		// dest = alpha * A^T * v + beta * dest
+		// Transpose case: reorganized for cache-friendly row-major access
+		// Instead of column-wise (strided) access, use row-wise accumulation
+		
+		// First: apply beta scaling to dest
+		if (beta == (real)0.0)
 		{
-			sum = (real)0.0;
+			memset(dest->values, 0, cols * sizeof(real));
+		}
+		else if (beta != (real)1.0)
+		{
+			for (int i = 0; i < cols; i++)
+				dest->values[i] *= beta;
+		}
 
-			for (int mtx_row = 0; mtx_row < mtx->rows; mtx_row++)
+		// Second: accumulate row contributions (cache-friendly sequential access)
+		// For A^T * v: dest[col] += sum over rows of A[row,col] * v[row]
+		// Rewritten as: for each row, add A[row,:] * v[row] to dest
+		for (int mtx_row = 0; mtx_row < rows; mtx_row++)
+		{
+			real v_val = alpha * v->values[mtx_row];
+			real *row_ptr = mtx->values + mtx_row * cols;
+
+			// Unrolled accumulation (4x)
+			int mtx_col = 0;
+			int unroll_limit = cols - 3;
+
+			for (; mtx_col < unroll_limit; mtx_col += 4)
 			{
-				sum += alpha * mtx->values[mtx_row * mtx->cols + mtx_col] * v->values[mtx_row];
+				dest->values[mtx_col] += row_ptr[mtx_col] * v_val;
+				dest->values[mtx_col + 1] += row_ptr[mtx_col + 1] * v_val;
+				dest->values[mtx_col + 2] += row_ptr[mtx_col + 2] * v_val;
+				dest->values[mtx_col + 3] += row_ptr[mtx_col + 3] * v_val;
 			}
 
-			dest->values[mtx_col] = beta * dest->values[mtx_col] + sum;
+			// Handle remainder
+			for (; mtx_col < cols; mtx_col++)
+			{
+				dest->values[mtx_col] += row_ptr[mtx_col] * v_val;
+			}
 		}
 	}
 

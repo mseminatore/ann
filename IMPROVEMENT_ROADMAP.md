@@ -110,7 +110,7 @@ A prioritized list of improvements and enhancements for the library.
   - [ ] Profile and optimize training loop hot path *(~2-4 hours)*
   - [ ] **Optimize non-BLAS tensor operations:** *(~8-16 hours)*
     - [ ] `tensor_gemm`: Use loop tiling and i-k-j loop order for cache locality *(~4-6 hours)*
-    - [ ] `tensor_matvec` transpose: Improve cache access pattern for row-major storage *(~2-3 hours)*
+    - [x] `tensor_matvec` transpose: Cache-friendly row-major access pattern + 4x loop unrolling
     - [x] Element-wise ops: Loop unrolling (4x) for tensor_add/sub/mul/square/fill
     - [x] `tensor_copy`: Use memcpy instead of loop
     - [x] `tensor_fill(t, 0)`: Use memset for zero-fill case
@@ -143,3 +143,4 @@ _Move items here as they are finished:_
 - [x] Gradient clipping (`ann_set_gradient_clip()`, `tensor_clip()`)
 - [x] Activation-aware weight initialization (He/Xavier/Glorot, `tensor_random_normal()`)
 - [x] Tensor optimizations: memcpy for `tensor_copy`, memset for zero-fill, 4x loop unrolling for element-wise ops and `tensor_outer`, direct array access in `tensor_argmax`
+- [x] `tensor_matvec` transpose: cache-friendly row-major access + 4x unrolling (eliminates column-stride access)

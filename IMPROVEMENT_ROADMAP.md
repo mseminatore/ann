@@ -63,7 +63,27 @@ A prioritized list of improvements and enhancements for the library.
   - Scale activations at inference time (or use inverted dropout)
   - Add configurable dropout rate per layer
 
+- [ ] **ONNX JSON Import (Round-Trip)** *(~8-10 hours)*
+  - Import models from the JSON format libann exports via `ann_export_onnx()`
+  - Enables model exchange and editing outside C code
+  - Implementation:
+    - [ ] Add lightweight JSON parser (cJSON or minimal custom) *(~3-4 hours)*
+    - [ ] Parse graph topology and validate sequential dense structure *(~2-3 hours)*
+    - [ ] Extract weights/biases from initializers *(~2 hours)*
+    - [ ] Map ONNX ops to libann activations *(~1 hour)*
+  - Rejects unsupported ops (Conv, Pool, etc.) with clear error message
+
 ## Low Priority
+
+- [ ] **Complete Network Serialization for Resumable Training** *(~4-6 hours)*
+  - Current save/load works for inference (weights + biases saved)
+  - Missing properties for training checkpoint/resume:
+    - [ ] `learning_rate`, `batchSize`, `convergence_epsilon`, `epochLimit`
+    - [ ] `max_gradient` (gradient clipping threshold)
+    - [ ] `train_iteration` (critical for Adam optimizer bias correction)
+    - [ ] Optimizer state tensors (`t_m`, `t_v`, `t_bias_m`, `t_bias_v`)
+  - Consider separate "checkpoint" format vs lightweight "inference" format
+  - Would require incrementing `ANN_BINARY_FORMAT_VERSION` / `ANN_TEXT_FORMAT_VERSION`
 
 - [ ] **Vectorize Optimizer Loops with BLAS** *(~4-8 hours)*
   - Low ROI: optimizer runs once per batch, not the compute bottleneck
@@ -91,11 +111,11 @@ A prioritized list of improvements and enhancements for the library.
   - [ ] **Optimize non-BLAS tensor operations:** *(~8-16 hours)*
     - [ ] `tensor_gemm`: Use loop tiling and i-k-j loop order for cache locality *(~4-6 hours)*
     - [ ] `tensor_matvec` transpose: Improve cache access pattern for row-major storage *(~2-3 hours)*
-    - [ ] Element-wise ops: Loop unrolling (4x/8x) for tensor_add/sub/mul/square/fill *(~2-4 hours)*
-    - [ ] `tensor_copy`: Use memcpy instead of loop *(~30 min)*
-    - [ ] `tensor_fill(t, 0)`: Use memset for zero-fill case *(~30 min)*
-    - [ ] `tensor_argmax`: Use direct array access instead of get/set_element function calls *(~30 min)*
-    - [ ] `tensor_outer`: Loop unrolling for hot inner loop *(~1-2 hours)*
+    - [x] Element-wise ops: Loop unrolling (4x) for tensor_add/sub/mul/square/fill
+    - [x] `tensor_copy`: Use memcpy instead of loop
+    - [x] `tensor_fill(t, 0)`: Use memset for zero-fill case
+    - [x] `tensor_argmax`: Use direct array access instead of get/set_element function calls
+    - [x] `tensor_outer`: Loop unrolling (4x) for hot inner loop
 
 - [ ] **Additional Layer Types** *(~24-40 hours total)*
   - Currently only dense (fully-connected) layers supported
@@ -122,3 +142,4 @@ _Move items here as they are finished:_
 - [x] Complete activation function backpropagation (ReLU, LeakyReLU, Tanh, Softsign)
 - [x] Gradient clipping (`ann_set_gradient_clip()`, `tensor_clip()`)
 - [x] Activation-aware weight initialization (He/Xavier/Glorot, `tensor_random_normal()`)
+- [x] Tensor optimizations: memcpy for `tensor_copy`, memset for zero-fill, 4x loop unrolling for element-wise ops and `tensor_outer`, direct array access in `tensor_argmax`

@@ -27,6 +27,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 #include <math.h>
 #include "tensor.h"
 
@@ -222,11 +223,10 @@ void tensor_free(PTensor t)
 PTensor tensor_copy(const PTensor t)
 {
 	PTensor r = tensor_create(t->rows, t->cols);
+	if (!r)
+		return NULL;
 
-	int limit = t->rows * t->cols;
-
-	for (int i = 0; i < limit; i++)
-		r->values[i] = t->values[i];
+	memcpy(r->values, t->values, t->rows * t->cols * sizeof(real));
 
 	return r;
 }
@@ -240,8 +240,27 @@ void tensor_fill(PTensor t, real val)
 		return;
 
 	int limit = t->rows * t->cols;
-	int i = 0;
 
+	// Fast path: use memset for zero-fill
+	if (val == (real)0.0)
+	{
+		memset(t->values, 0, limit * sizeof(real));
+		return;
+	}
+
+	// Loop unrolling (4x) for non-zero fill
+	int i = 0;
+	int unroll_limit = limit - 3;
+
+	for (; i < unroll_limit; i += 4)
+	{
+		t->values[i] = val;
+		t->values[i + 1] = val;
+		t->values[i + 2] = val;
+		t->values[i + 3] = val;
+	}
+
+	// Handle remainder
 	for (; i < limit; i++)
 		t->values[i] = val;
 }
@@ -499,7 +518,18 @@ PTensor tensor_add(const PTensor a, const PTensor b)
 
 	int limit = a->rows * a->cols;
 	int i = 0;
+	int unroll_limit = limit - 3;
 
+	// 4x loop unrolling
+	for (; i < unroll_limit; i += 4)
+	{
+		a->values[i] += b->values[i];
+		a->values[i + 1] += b->values[i + 1];
+		a->values[i + 2] += b->values[i + 2];
+		a->values[i + 3] += b->values[i + 3];
+	}
+
+	// Handle remainder
 	for (; i < limit; i++)
 		a->values[i] += b->values[i];
 
@@ -524,7 +554,18 @@ PTensor tensor_sub(const PTensor a, const PTensor b)
 
 	int limit = a->rows * a->cols;
 	int i = 0;
-	
+	int unroll_limit = limit - 3;
+
+	// 4x loop unrolling
+	for (; i < unroll_limit; i += 4)
+	{
+		a->values[i] -= b->values[i];
+		a->values[i + 1] -= b->values[i + 1];
+		a->values[i + 2] -= b->values[i + 2];
+		a->values[i + 3] -= b->values[i + 3];
+	}
+
+	// Handle remainder
 	for (; i < limit; i++)
 		a->values[i] -= b->values[i];
 
@@ -541,7 +582,18 @@ PTensor tensor_square(PTensor t)
 
 	int limit = t->rows * t->cols;
 	int i = 0;
+	int unroll_limit = limit - 3;
 
+	// 4x loop unrolling
+	for (; i < unroll_limit; i += 4)
+	{
+		t->values[i] *= t->values[i];
+		t->values[i + 1] *= t->values[i + 1];
+		t->values[i + 2] *= t->values[i + 2];
+		t->values[i + 3] *= t->values[i + 3];
+	}
+
+	// Handle remainder
 	for (; i < limit; i++)
 		t->values[i] *= t->values[i];
 
@@ -588,7 +640,18 @@ PTensor tensor_mul(PTensor a, PTensor b)
 
 	int limit = a->rows * a->cols;
 	int i = 0;
+	int unroll_limit = limit - 3;
 
+	// 4x loop unrolling
+	for (; i < unroll_limit; i += 4)
+	{
+		a->values[i] *= b->values[i];
+		a->values[i + 1] *= b->values[i + 1];
+		a->values[i + 2] *= b->values[i + 2];
+		a->values[i + 3] *= b->values[i + 3];
+	}
+
+	// Handle remainder
 	for (; i < limit; i++)
 		a->values[i] *= b->values[i];
 
@@ -820,31 +883,45 @@ PTensor tensor_argmax(const PTensor t)
 		return NULL;
 
 	PTensor r = tensor_zeros(1, t->cols);
-	PTensor maxvals = tensor_zeros(1, t->cols);
+	if (!r)
+		return NULL;
 
+	int cols = t->cols;
+	int rows = t->rows;
+
+	// Use direct array access for performance
+	// For row-major: element[row, col] = values[row * cols + col]
+	
 	// Initialize with first row values
-	for (int col = 0; col < t->cols; col++)
+	real *maxvals = (real *)malloc(cols * sizeof(real));
+	if (!maxvals)
 	{
-		tensor_set_element(maxvals, 0, col, tensor_get_element(t, 0, col));
-		tensor_set_element(r, 0, col, 0);
+		tensor_free(r);
+		return NULL;
+	}
+
+	for (int col = 0; col < cols; col++)
+	{
+		maxvals[col] = t->values[col];  // First row: t->values[0 * cols + col]
+		r->values[col] = (real)0;
 	}
 
 	// Find max value and its index for each column
-	for (int row = 1; row < t->rows; row++)
+	for (int row = 1; row < rows; row++)
 	{
-		for (int col = 0; col < t->cols; col++)
+		real *row_ptr = t->values + row * cols;
+		for (int col = 0; col < cols; col++)
 		{
-			real current_max = tensor_get_element(maxvals, 0, col);
-			real val = tensor_get_element(t, row, col);
-			if (val > current_max)
+			real val = row_ptr[col];
+			if (val > maxvals[col])
 			{
-				tensor_set_element(maxvals, 0, col, val);
-				tensor_set_element(r, 0, col, (real)row);
+				maxvals[col] = val;
+				r->values[col] = (real)row;
 			}
 		}
 	}
 
-	tensor_free(maxvals);
+	free(maxvals);
 	return r;
 }
 
@@ -957,13 +1034,30 @@ PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest)
 #ifdef USE_BLAS
 	cblas_sger(CblasRowMajor, dest->rows, dest->cols, alpha, a->values, 1, b->values, 1, dest->values, dest->cols);
 #else
-	if (alpha == 1.0)
+	int b_cols = b->cols;
+	int unroll_limit = b_cols - 3;
+
+	if (alpha == (real)1.0)
 	{
 		for (int a_col = 0; a_col < a->cols; a_col++)
 		{
-			for (int b_col = 0; b_col < b->cols; b_col++)
+			real a_val = a->values[a_col];
+			real *dest_row = dest->values + a_col * b_cols;
+			int b_col = 0;
+
+			// 4x loop unrolling for inner loop
+			for (; b_col < unroll_limit; b_col += 4)
 			{
-				dest->values[a_col * b->cols + b_col] += a->values[a_col] * b->values[b_col];
+				dest_row[b_col] += a_val * b->values[b_col];
+				dest_row[b_col + 1] += a_val * b->values[b_col + 1];
+				dest_row[b_col + 2] += a_val * b->values[b_col + 2];
+				dest_row[b_col + 3] += a_val * b->values[b_col + 3];
+			}
+
+			// Handle remainder
+			for (; b_col < b_cols; b_col++)
+			{
+				dest_row[b_col] += a_val * b->values[b_col];
 			}
 		}
 	}
@@ -971,9 +1065,23 @@ PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest)
 	{
 		for (int a_col = 0; a_col < a->cols; a_col++)
 		{
-			for (int b_col = 0; b_col < b->cols; b_col++)
+			real scaled_a = alpha * a->values[a_col];
+			real *dest_row = dest->values + a_col * b_cols;
+			int b_col = 0;
+
+			// 4x loop unrolling for inner loop
+			for (; b_col < unroll_limit; b_col += 4)
 			{
-				dest->values[a_col * b->cols + b_col] += alpha * a->values[a_col] * b->values[b_col];
+				dest_row[b_col] += scaled_a * b->values[b_col];
+				dest_row[b_col + 1] += scaled_a * b->values[b_col + 1];
+				dest_row[b_col + 2] += scaled_a * b->values[b_col + 2];
+				dest_row[b_col + 3] += scaled_a * b->values[b_col + 3];
+			}
+
+			// Handle remainder
+			for (; b_col < b_cols; b_col++)
+			{
+				dest_row[b_col] += scaled_a * b->values[b_col];
 			}
 		}
 	}

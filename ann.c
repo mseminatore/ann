@@ -1403,6 +1403,11 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 		pnet->learning_rate = (real)0.001;
 		break;
 
+	case OPT_ADAGRAD:
+		pnet->optimize_func = optimize_adagrad;
+		pnet->learning_rate = (real)0.01;
+		break;
+
 	default:
 	case OPT_SGD:
 		pnet->optimize_func = optimize_sgd;

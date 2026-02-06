@@ -26,7 +26,9 @@
 |-----------|----------|---------------|
 | `OPT_ADAM` | Most tasks (recommended default) | 0.001 |
 | `OPT_SGD` | Simple problems, fine-tuning | 0.01-0.1 |
-| `OPT_MOMENTUM` | When SGD oscillates | 0.01-0.05 |
+| `OPT_MOMENTUM` | When SGD oscillates | 0.01 |
+| `OPT_RMSPROP` | Non-stationary problems | 0.001 |
+| `OPT_ADAGRAD` | Sparse gradients | 0.01 |
 | `OPT_ADAPT` | Legacy - may overshoot | 0.05 (auto-adjusts) |
 
 ## Convergence Settings

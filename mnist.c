@@ -199,10 +199,12 @@ int main(int argc, char *argv[])
 		printf("      CPU uArch: %s\n", openblas_get_corename());
 		printf("  Cores/Threads: %d/%d\n", openblas_get_num_procs(), openblas_get_num_threads());
 	#endif
+#else
+	printf("BLAS not enabled, using single-threaded C implementation\n");
 #endif
 
 	// make a new network
-	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_CATEGORICAL_CROSS_ENTROPY);
+	PNetwork pnet = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
 
 	// define our network
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);

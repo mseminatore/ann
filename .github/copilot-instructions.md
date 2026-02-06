@@ -30,11 +30,14 @@ ann_set_error_log_callback(my_handler);  // ErrorLogCallback signature in ann.h
 
 ### Network Construction Pattern
 ```c
-PNetwork pnet = ann_make_network(OPT_MOMENTUM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+PNetwork pnet = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+ann_set_learning_rate(pnet, 0.001);  // Adam works best with lr ~0.001
 ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);      // Input: always ACTIVATION_NULL
 ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);  // Hidden layers
 ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);   // Output: SOFTMAX for classification
 ```
+
+**Optimizer guidance**: Use `OPT_ADAM` for most tasks (stable, adaptive). Use `OPT_SGD` or `OPT_MOMENTUM` for simpler problems or when you need more control.
 
 ### BLAS Acceleration
 - Controlled by `USE_BLAS` in [ann_config.h](../ann_config.h) or via `-DUSE_BLAS=1` CMake flag

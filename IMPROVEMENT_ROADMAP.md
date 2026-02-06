@@ -44,6 +44,11 @@ A prioritized list of improvements and enhancements for the library.
 - [ ] **Batch Normalization Support**
   - Would significantly improve training stability for deeper networks
 
+- [ ] **Dropout Regularization**
+  - Randomly zero out neurons during training to prevent overfitting
+  - Scale activations at inference time (or use inverted dropout)
+  - Add configurable dropout rate per layer
+
 ## Low Priority
 
 - [ ] **Documentation Updates**
@@ -57,6 +62,21 @@ A prioritized list of improvements and enhancements for the library.
 - [ ] **Performance Improvements**
   - [ ] Consider OpenMP parallelization for non-BLAS builds
   - [ ] Profile and optimize training loop hot path
+  - [ ] **Optimize non-BLAS tensor operations:**
+    - [ ] `tensor_gemm`: Use loop tiling and i-k-j loop order for cache locality (current i-j-k causes column-wise access to B)
+    - [ ] `tensor_matvec` transpose: Improve cache access pattern for row-major storage
+    - [ ] Element-wise ops: Loop unrolling (4x/8x) for tensor_add/sub/mul/square/fill
+    - [ ] `tensor_copy`: Use memcpy instead of loop
+    - [ ] `tensor_fill(t, 0)`: Use memset for zero-fill case
+    - [ ] `tensor_argmax`: Use direct array access instead of get/set_element function calls
+    - [ ] `tensor_outer`: Loop unrolling for hot inner loop
+
+- [ ] **Additional Layer Types**
+  - Currently only dense (fully-connected) layers supported
+  - Potential additions (significant undertaking):
+    - [ ] Convolutional layers (Conv2D) for image processing
+    - [ ] Pooling layers (MaxPool, AvgPool)
+    - [ ] Flatten layer for 2D to 1D transitions
 
 ---
 

@@ -89,7 +89,9 @@ network is created via `ann_make_network()`.
 
 For training, the module provides **Stochastic Gradient Descent**,
 **Momentum**, **AdaGrad**, **RMSProp**, and **Adam** optimizers. This option 
-is set when a network is created via `ann_make_network()`.
+is set when a network is created via `ann_make_network()`. **Adam is 
+recommended as the default** for most use cases due to its adaptive per-parameter 
+learning rates and stable convergence.
 
 The layer activation types currently supported are **None**, **Sigmoid**, 
 **Softmax**, **ReLU**, **LeakyReLU**, **Tanh**, and **Softsign**.
@@ -178,7 +180,8 @@ int main(int argc, char *argv[])
     	ann_load_csv("and.csv", CSV_NO_HEADER, &data, &rows, &stride);
 
     // create a new empty network
-    PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_MSE);
+    PNetwork pnet = ann_make_network(OPT_ADAM, LOSS_MSE);
+    ann_set_learning_rate(pnet, 0.001);  // Adam works best with lower learning rates
 
     // setup training tensors
     PTensor x_train = tensor_create_from_array(rows, stride, data);

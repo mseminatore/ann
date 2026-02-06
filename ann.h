@@ -133,7 +133,7 @@ typedef enum {
 	OPT_RMSPROP,
 	OPT_ADAGRAD,
 	OPT_ADAM,
-	OPT_DEFAULT = OPT_SGD
+	OPT_DEFAULT = OPT_ADAM
 } Optimizer_type;
 
 

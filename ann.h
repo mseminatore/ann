@@ -508,6 +508,56 @@ void ann_set_gradient_clip(PNetwork pnet, real max_grad);
 void ann_set_weight_init(PNetwork pnet, Weight_init_type init_type);
 
 /**
+ * Set the mini-batch size for training.
+ * 
+ * Controls how many samples are processed before updating weights.
+ * Larger batches: more stable gradients, less noise
+ * Smaller batches: faster updates, more regularization effect
+ * Default: DEFAULT_BATCH_SIZE (32)
+ * 
+ * @param pnet Network to configure
+ * @param batch_size Number of samples per mini-batch (must be > 0)
+ */
+void ann_set_batch_size(PNetwork pnet, unsigned batch_size);
+
+/**
+ * Set the maximum number of training epochs.
+ * 
+ * Training stops after this many epochs even if convergence threshold
+ * is not reached. Default: 10000
+ * 
+ * @param pnet Network to configure
+ * @param limit Maximum number of epochs
+ */
+void ann_set_epoch_limit(PNetwork pnet, unsigned limit);
+
+/**
+ * Get the number of layers in the network.
+ * 
+ * @param pnet Network to query (must not be NULL)
+ * @return Number of layers, or -1 if pnet is NULL
+ */
+int ann_get_layer_count(const PNetwork pnet);
+
+/**
+ * Get the number of nodes in a specific layer.
+ * 
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @return Number of nodes in the layer, or -1 on error
+ */
+int ann_get_layer_nodes(const PNetwork pnet, int layer);
+
+/**
+ * Get the activation type of a specific layer.
+ * 
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @return Activation type, or ACTIVATION_NULL on error
+ */
+Activation_type ann_get_layer_activation(const PNetwork pnet, int layer);
+
+/**
  * Print network properties and configuration to stdout.
  * 
  * Displays: network topology, optimizer, loss function, mini-batch size, etc.

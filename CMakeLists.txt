@@ -17,6 +17,7 @@ add_test(NAME test_onnx_export COMMAND test_onnx_export)
 add_test(NAME test_loss_functions COMMAND test_loss_functions)
 add_test(NAME test_save_load COMMAND test_save_load)
 add_test(NAME test_optimizers COMMAND test_optimizers)
+add_test(NAME test_hypertune COMMAND test_hypertune)
 #add_test(NAME test_forward_pass COMMAND test_forward_pass)
 #add_test(NAME test_training_convergence COMMAND test_training_convergence)
 
@@ -54,9 +55,13 @@ else()
     set(BLAS_LIB "")
 endif()
 
-# add the library
+# add the core library
 add_library(libann STATIC ann.c tensor.c)
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
+
+# add the hypertuning library
+add_library(ann_hypertune STATIC ann_hypertune.c)
+target_link_libraries(ann_hypertune libann)# avoid liblibann on Unix
 
 #
 # add the executables
@@ -93,6 +98,9 @@ target_link_libraries(test_loss_functions libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_save_load test_save_load.c testy/test_main.c)
 target_link_libraries(test_save_load libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_hypertune test_hypertune.c testy/test_main.c)
+target_link_libraries(test_hypertune ann_hypertune libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_optimizers test_optimizers.c testy/test_main.c)
 target_link_libraries(test_optimizers libann ${BLAS_LIB} ${MATH_LIB})

@@ -120,6 +120,11 @@ ann_set_convergence | set the convergence threshold (optional)
 ann_evaluate_accuracy | evaluate accuracy of trained network using test data
 ann_set_learning_rate | override the default learning rate
 ann_set_loss_function | set the loss function
+ann_set_batch_size | set the mini-batch size
+ann_set_epoch_limit | set the maximum number of epochs
+ann_get_layer_count | get the number of layers in the network
+ann_get_layer_nodes | get the number of nodes in a layer
+ann_get_layer_activation | get the activation type of a layer
 ann_export_onnx | export trained network to ONNX JSON format
 ann_class_prediction | determine predicted class from output activations
 ann_print_props | print network properties and configuration
@@ -128,6 +133,176 @@ ann_strerror | convert error code to human-readable message
 ann_set_error_log_callback | install error logging callback
 ann_get_error_log_callback | get current error callback
 ann_clear_error_log_callback | disable error logging callback
+
+# Hyperparameter Tuning
+
+The `ann_hypertune` module provides automated hyperparameter search to find 
+optimal network configurations. It supports both **grid search** (exhaustive) 
+and **random search** (sampling-based) strategies.
+
+## Features
+
+- **Grid Search** - exhaustively tries all combinations of hyperparameters
+- **Random Search** - randomly samples from the hyperparameter space
+- **Data Splitting** - automatic train/validation holdout with optional shuffling
+- **Custom Scoring** - user-defined callback for optimization metric
+- **Progress Reporting** - callback for monitoring search progress
+- **Reproducibility** - seed support for reproducible random searches
+
+## Tunable Hyperparameters
+
+The following hyperparameters can be tuned:
+
+| Parameter | Description |
+|-----------|-------------|
+| Learning rate | Continuous range with linear or log-scale spacing |
+| Batch size | Discrete set of values to try |
+| Optimizer | SGD, Momentum, Adam, RMSProp, AdaGrad |
+| Hidden layers | Number of hidden layers (1-5) |
+| Layer size | Number of nodes per hidden layer |
+| Activation | Sigmoid, ReLU, LeakyReLU, Tanh, etc. |
+
+## Functions
+
+Function | Description
+-------- | -----------
+hypertune_space_init | initialize search space with defaults
+hypertune_options_init | initialize search options
+hypertune_result_init | initialize a result structure
+hypertune_split_data | split data into train/validation sets
+hypertune_free_split | free split tensors
+hypertune_grid_search | perform exhaustive grid search
+hypertune_random_search | perform random search
+hypertune_create_network | create network from result config
+hypertune_count_grid_trials | calculate total grid combinations
+hypertune_print_result | print a single result
+hypertune_print_summary | print top N results
+hypertune_score_accuracy | default scoring function (accuracy)
+
+## Example Usage
+
+```c
+#include "ann_hypertune.h"
+
+// Load your data
+PTensor inputs = /* your input data */;
+PTensor outputs = /* your output data */;
+
+// Split into train/validation (80/20)
+DataSplit split;
+hypertune_split_data(inputs, outputs, 0.8f, 1, 0, &split);
+
+// Configure search space
+HyperparamSpace space;
+hypertune_space_init(&space);
+
+// Customize the search space
+space.learning_rate_min = 0.001f;
+space.learning_rate_max = 0.1f;
+space.learning_rate_steps = 3;
+space.learning_rate_log_scale = 1;  // log-uniform sampling
+
+space.batch_sizes[0] = 32;
+space.batch_sizes[1] = 64;
+space.batch_size_count = 2;
+
+space.optimizers[0] = OPT_ADAM;
+space.optimizers[1] = OPT_SGD;
+space.optimizer_count = 2;
+
+space.hidden_layer_counts[0] = 1;
+space.hidden_layer_counts[1] = 2;
+space.hidden_layer_count_options = 2;
+
+space.hidden_layer_sizes[0] = 64;
+space.hidden_layer_sizes[1] = 128;
+space.hidden_layer_size_count = 2;
+
+space.hidden_activations[0] = ACTIVATION_RELU;
+space.hidden_activation_count = 1;
+
+space.epoch_limit = 500;
+
+// Configure options
+HypertuneOptions options;
+hypertune_options_init(&options);
+options.verbosity = 1;  // show progress
+
+// Run grid search
+HypertuneResult results[100];
+HypertuneResult best;
+int trials = hypertune_grid_search(
+    &space,
+    input_size,           // number of input features
+    output_size,          // number of output classes
+    ACTIVATION_SOFTMAX,   // output activation
+    LOSS_CATEGORICAL_CROSS_ENTROPY,
+    &split,
+    &options,
+    results, 100,
+    &best
+);
+
+printf("Completed %d trials\n", trials);
+hypertune_print_result(&best);
+
+// Create final network with best configuration
+PNetwork net = hypertune_create_network(
+    &best,
+    input_size,
+    output_size,
+    ACTIVATION_SOFTMAX,
+    LOSS_CATEGORICAL_CROSS_ENTROPY
+);
+
+// Train on full dataset, evaluate, etc.
+
+// Cleanup
+hypertune_free_split(&split);
+ann_free_network(net);
+```
+
+## Random Search Example
+
+For larger search spaces, random search is often more efficient:
+
+```c
+// Run random search with 50 trials
+int trials = hypertune_random_search(
+    &space,
+    50,                   // number of random trials
+    input_size,
+    output_size,
+    ACTIVATION_SOFTMAX,
+    LOSS_CATEGORICAL_CROSS_ENTROPY,
+    &split,
+    &options,
+    results, 100,
+    &best
+);
+
+// Print top 5 results
+hypertune_print_summary(results, trials, 5);
+```
+
+## Custom Scoring Function
+
+By default, hypertuning optimizes for accuracy. You can provide a custom 
+scoring function:
+
+```c
+// Custom scorer: optimize for F1 score, or minimize loss, etc.
+real my_custom_scorer(PNetwork net, PTensor val_in, PTensor val_out, void *data) {
+    // Your scoring logic here
+    // Return higher values for better configurations
+    real accuracy = ann_evaluate_accuracy(net, val_in, val_out);
+    return accuracy;  // or any custom metric
+}
+
+// Use custom scorer
+options.score_func = my_custom_scorer;
+options.user_data = NULL;  // optional context data
+```
 
 # Accelerating training with BLAS libraries
 

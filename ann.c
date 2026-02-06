@@ -1735,6 +1735,61 @@ void ann_set_weight_init(PNetwork pnet, Weight_init_type init_type)
 }
 
 //------------------------------
+// set the mini-batch size
+//------------------------------
+void ann_set_batch_size(PNetwork pnet, unsigned batch_size)
+{
+	if (!pnet || batch_size == 0)
+		return;
+
+	pnet->batchSize = batch_size;
+}
+
+//------------------------------
+// set the epoch limit
+//------------------------------
+void ann_set_epoch_limit(PNetwork pnet, unsigned limit)
+{
+	if (!pnet)
+		return;
+
+	pnet->epochLimit = limit;
+}
+
+//------------------------------
+// get the number of layers
+//------------------------------
+int ann_get_layer_count(const PNetwork pnet)
+{
+	if (!pnet)
+		return -1;
+
+	return pnet->layer_count;
+}
+
+//------------------------------
+// get the number of nodes in a layer
+//------------------------------
+int ann_get_layer_nodes(const PNetwork pnet, int layer)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return -1;
+
+	return pnet->layers[layer].node_count;
+}
+
+//------------------------------
+// get the activation type of a layer
+//------------------------------
+Activation_type ann_get_layer_activation(const PNetwork pnet, int layer)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return ACTIVATION_NULL;
+
+	return pnet->layers[layer].activation;
+}
+
+//------------------------------
 // set the loss function
 //------------------------------
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)

@@ -37,6 +37,7 @@
 static int threads = -1;
 static int batch_size = 8;
 static int epoch_count = 5;
+static int export_onnx = 0;
 
 //----------------------------------
 // get options from the command line
@@ -67,6 +68,12 @@ int getopt(int n, char *args[])
 			i++;
 		}
 
+		// export ONNX file
+		if (args[i][1] == 'x')
+		{
+			export_onnx = 1;
+			i++;
+		}
 	}
 
 	return i;
@@ -261,6 +268,21 @@ int main(int argc, char *argv[])
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows);
+	
+	// if export ONNX flag is set, export the trained network to an ONNX file
+	if (export_onnx)
+	{
+		char *onnx_filename = "fashion_mnist.onnx";
+		if (ERR_OK != ann_export_onnx(pnet, onnx_filename))
+		{
+			printf("Error: failed to export ONNX file - %s\n", onnx_filename);
+			return ERR_FAIL;
+		}
+		else
+		{
+			printf("Exported trained network to ONNX file: %s\n", onnx_filename);
+		}
+	}
 	
 	// evaluate the network against the test data
 	real acc = ann_evaluate_accuracy(pnet, x_test, y_test);

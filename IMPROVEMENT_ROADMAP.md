@@ -43,6 +43,17 @@ A prioritized list of improvements and enhancements for the library.
   - AdaGrad, RMSProp, and Adam have no dedicated tests
   - Add to test_network.c or create test_optimizers.c
 
+- [ ] **Gradient Clipping** *(~2-3 hours)*
+  - Prevents exploding gradients, especially with ReLU activation
+  - Clip gradient magnitudes during backprop: `grad = clip(grad, -max_val, max_val)`
+  - Add configurable `max_gradient` parameter to network
+
+- [ ] **Activation-Aware Weight Initialization** *(~3-5 hours)*
+  - Current: uniform distribution with fixed `weight_limit`
+  - Add He initialization for ReLU: `std = sqrt(2/fan_in)` *(~2-3 hours)*
+  - Add Xavier/Glorot for sigmoid/tanh: `std = sqrt(2/(fan_in + fan_out))` *(~1-2 hours)*
+  - Requires `tensor_random_normal()` function in tensor library
+
 - [ ] **Batch Normalization Support** *(~8-16 hours)*
   - Would significantly improve training stability for deeper networks
   - Requires forward pass normalization, learnable gamma/beta, and backward pass gradients

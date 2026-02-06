@@ -107,7 +107,10 @@ A prioritized list of improvements and enhancements for the library.
 
 - [ ] **Performance Improvements** *(~16-32 hours total)*
   - [ ] Consider OpenMP parallelization for non-BLAS builds *(~4-8 hours)*
-  - [ ] Profile and optimize training loop hot path *(~2-4 hours)*
+  - [x] Profile and optimize training loop hot path
+    - Replaced element-by-element input copy with memcpy in `train_pass_network`
+    - Removed unused variables in training loop
+    - Moved progress indicator outside inner loop (per-batch instead of per-sample)
   - [ ] **Optimize non-BLAS tensor operations:** *(~8-16 hours)*
     - [ ] `tensor_gemm`: Use loop tiling and i-k-j loop order for cache locality *(~4-6 hours)*
     - [x] `tensor_matvec` transpose: Cache-friendly row-major access pattern + 4x loop unrolling
@@ -144,3 +147,4 @@ _Move items here as they are finished:_
 - [x] Activation-aware weight initialization (He/Xavier/Glorot, `tensor_random_normal()`)
 - [x] Tensor optimizations: memcpy for `tensor_copy`, memset for zero-fill, 4x loop unrolling for element-wise ops and `tensor_outer`, direct array access in `tensor_argmax`
 - [x] `tensor_matvec` transpose: cache-friendly row-major access + 4x unrolling (eliminates column-stride access)
+- [x] Training loop hot path: memcpy for input copy, removed redundant variables, per-batch progress output

@@ -798,13 +798,9 @@ static real train_pass_network(PNetwork pnet, PTensor inputs, PTensor outputs)
 		return 0.0;
 	}
 
-	// set the input values on the network
-	int node_count = pnet->layers[0].node_count;
-	PLayer pLayer = &pnet->layers[0];
-	for (int node = 0; node < node_count; node++)
-	{
-		pLayer->t_values->values[node] = inputs->values[node];
-	}
+	// set the input values on the network using memcpy (faster than element loop)
+	memcpy(pnet->layers[0].t_values->values, inputs->values, 
+	       pnet->layers[0].node_count * sizeof(real));
 
 	// forward evaluate the network
 	eval_network(pnet);
@@ -1533,7 +1529,6 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		input_indices[i] = i;
 	}
 
-	int inc = max(1, rows / 20);
 	int input_node_count = (pnet->layers[0].node_count);
 	int output_node_count = (pnet->layers[pnet->layer_count - 1].node_count);
 
@@ -1575,18 +1570,14 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 			{
 				row = batch * pnet->batchSize + batch_index;
 
-				real *ins = inputs->values + input_indices[row] * input_node_count;
-				real *outs = outputs->values + input_indices[row] * output_node_count;
+				// Copy input/output data for this sample
+				int input_offset = input_indices[row] * input_node_count;
+				int output_offset = input_indices[row] * output_node_count;
 
-				memcpy(input_batch->values, inputs->values + input_indices[row] * input_node_count, input_node_count * sizeof(real));
-				memcpy(output_batch->values, outputs->values + input_indices[row] * output_node_count, output_node_count * sizeof(real));
+				memcpy(input_batch->values, inputs->values + input_offset, input_node_count * sizeof(real));
+				memcpy(output_batch->values, outputs->values + output_offset, output_node_count * sizeof(real));
 
 				loss += train_pass_network(pnet, input_batch, output_batch);
-
-				if (row % inc == 0)
-				{
-					putchar('=');
-				}
 			}
 
 			// average loss over batch-size
@@ -1595,6 +1586,12 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 			// update weights based on batched gradients
 			// using the chosen optimization function
 			pnet->optimize_func(pnet);
+
+			// Progress indicator: show one '=' per ~5% of batches
+			if (batch % max(1, batch_count / 20) == 0)
+			{
+				putchar('=');
+			}
 		}
 
 		ann_printf(pnet, "] - loss: %3.2g - LR: %3.2g\n", loss, pnet->learning_rate);

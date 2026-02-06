@@ -816,81 +816,109 @@ static void optimize_momentum(PNetwork pnet)
 
 //-----------------------------------------------
 // Adaptive gradient descent
+// Accumulates squared gradients and scales learning
+// rate by inverse square root of accumulated sum.
+// Good for sparse gradients but learning rate
+// monotonically decreases (may stop learning).
 //-----------------------------------------------
 static void optimize_adagrad(PNetwork pnet)
 {
+	real epsilon = (real)1e-8;
 
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		PTensor g = pnet->layers[layer].t_gradients;
+		PTensor v = pnet->layers[layer].t_v;
+		PTensor w = pnet->layers[layer].t_weights;
+
+		int size = g->rows * g->cols;
+
+		// v = v + g^2, then W = W + lr * g / (sqrt(v) + epsilon)
+		for (int i = 0; i < size; i++)
+		{
+			real grad = g->values[i];
+			v->values[i] += grad * grad;
+			w->values[i] += pnet->learning_rate * grad / ((real)sqrt(v->values[i]) + epsilon);
+		}
+	}
 }
 
 //-----------------------------------------------
-// Gradient descent with adaptive learning
+// RMSProp - Root Mean Square Propagation
+// Uses exponential moving average of squared gradients
+// to scale learning rate. Fixes AdaGrad's diminishing
+// learning rate by using decay factor beta.
 //-----------------------------------------------
 static void optimize_rmsprop(PNetwork pnet)
 {
-	//real beta = (real)0.9, one_minus_beta = (real)0.1;
-	//real epsilon = (real)1e-6;
-	//real v, gradient;
+	real beta = (real)0.9;
+	real one_minus_beta = (real)0.1;
+	real epsilon = (real)1e-8;
 
-	//// for each layer after input
-	//for (int layer = 1; layer < pnet->layer_count; layer++)
-	//{
-	//	// for each node in the layer
-	//	int node_count = pnet->layers[layer].node_count;
-	//	for (int node = 1; node < node_count; node++)
-	//	{
-	//		// for each node in previous layer
-	//		int prev_node_count = pnet->layers[layer - 1].node_count;
-	//		for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
-	//		{
-	//			// update the weights by the change
-	//			gradient = pnet->layers[layer].nodes[node].gradients[prev_node];
-	//			v = beta * pnet->layers[layer].nodes[node].v[prev_node] + one_minus_beta * gradient * gradient;
-	//			pnet->layers[layer].nodes[node].v[prev_node] = v;
-	//			pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * gradient / (real)(sqrt(v) + epsilon);
-	//		}
-	//	}
-	//}
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		PTensor g = pnet->layers[layer].t_gradients;
+		PTensor v = pnet->layers[layer].t_v;
+		PTensor w = pnet->layers[layer].t_weights;
+
+		int size = g->rows * g->cols;
+
+		// v = beta * v + (1 - beta) * g^2
+		// W = W + lr * g / (sqrt(v) + epsilon)
+		for (int i = 0; i < size; i++)
+		{
+			real grad = g->values[i];
+			v->values[i] = beta * v->values[i] + one_minus_beta * grad * grad;
+			w->values[i] += pnet->learning_rate * grad / ((real)sqrt(v->values[i]) + epsilon);
+		}
+	}
 }
 
 //-----------------------------------------------
-// Adaptive moment estimation
+// Adam - Adaptive Moment Estimation
+// Combines momentum (first moment) and RMSProp (second moment)
+// with bias correction for both. Generally the best default
+// optimizer for most deep learning tasks.
 //-----------------------------------------------
 static void optimize_adam(PNetwork pnet)
 {
-	//real beta1 = (real)0.9, one_minus_beta1 = (real)0.1;
-	//real beta2 = (real)0.999, one_minus_beta2 = (real)0.001;
-	//real epsilon = (real)1e-8;
-	//real m, v, mhat, vhat, gradient;
+	real beta1 = (real)0.9;
+	real beta2 = (real)0.999;
+	real epsilon = (real)1e-8;
 
-	//pnet->train_iteration++;
+	pnet->train_iteration++;
 
-	//real one_minus_beta1_t = (real)1.0 / (real)(1.0 - pow(beta1, pnet->train_iteration));
-	//real one_minus_beta2_t = (real)1.0 / (real)(1.0 - pow(beta2, pnet->train_iteration));
+	// Bias correction factors
+	real bias_correction1 = (real)1.0 / ((real)1.0 - (real)pow(beta1, pnet->train_iteration));
+	real bias_correction2 = (real)1.0 / ((real)1.0 - (real)pow(beta2, pnet->train_iteration));
 
-	//// for each layer after input
-	//for (int layer = 1; layer < pnet->layer_count; layer++)
-	//{
-	//	// for each node in the layer
-	//	int node_count = pnet->layers[layer].node_count;
-	//	for (int node = 1; node < node_count; node++)
-	//	{
-	//		// for each node in previous layer
-	//		int prev_node_count = pnet->layers[layer - 1].node_count;
-	//		for (int prev_node = 0; prev_node < prev_node_count; prev_node++)
-	//		{
-	//			// update the weights by the change
-	//			gradient = pnet->layers[layer].nodes[node].gradients[prev_node];
-	//			m = beta1 * pnet->layers[layer].nodes[node].m[prev_node] + one_minus_beta1 * gradient;
-	//			v = beta2 * pnet->layers[layer].nodes[node].v[prev_node] + one_minus_beta2 * gradient * gradient;
-	//			mhat = m * one_minus_beta1_t;
-	//			vhat = v * one_minus_beta2_t;
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		PTensor g = pnet->layers[layer].t_gradients;
+		PTensor m = pnet->layers[layer].t_m;
+		PTensor v = pnet->layers[layer].t_v;
+		PTensor w = pnet->layers[layer].t_weights;
 
-	//			pnet->layers[layer].nodes[node].m[prev_node] = m;
-	//			pnet->layers[layer].nodes[node].v[prev_node] = v;
-	//			pnet->layers[layer].nodes[node].weights[prev_node] += pnet->learning_rate * mhat / (real)(sqrt(vhat) + epsilon);
-	//		}
-	//	}
-	//}
+		int size = g->rows * g->cols;
+
+		for (int i = 0; i < size; i++)
+		{
+			real grad = g->values[i];
+
+			// Update biased first moment estimate: m = beta1 * m + (1 - beta1) * g
+			m->values[i] = beta1 * m->values[i] + ((real)1.0 - beta1) * grad;
+
+			// Update biased second moment estimate: v = beta2 * v + (1 - beta2) * g^2
+			v->values[i] = beta2 * v->values[i] + ((real)1.0 - beta2) * grad * grad;
+
+			// Compute bias-corrected estimates
+			real mhat = m->values[i] * bias_correction1;
+			real vhat = v->values[i] * bias_correction2;
+
+			// Update weights: W = W + lr * mhat / (sqrt(vhat) + epsilon)
+			w->values[i] += pnet->learning_rate * mhat / ((real)sqrt(vhat) + epsilon);
+		}
+	}
 }
 
 //[]---------------------------------------------[]

@@ -87,10 +87,9 @@ The module supports both **Mean-Squared Error** and
 **Categorical Cross Entropy** for loss functions. This option is set when a 
 network is created via `ann_make_network()`.
 
-For training, the module provides **Stochastic Gradient Descent**, and 
-**Momentum** optimizers. Support for **RMSProp**, **AdaGrad** and **Adam** is
-in progress. This option is also set when a network is created via 
-`ann_make_network()`.
+For training, the module provides **Stochastic Gradient Descent**,
+**Momentum**, **AdaGrad**, **RMSProp**, and **Adam** optimizers. This option 
+is set when a network is created via `ann_make_network()`.
 
 The layer activation types currently supported are **None**, **Sigmoid** and 
 **Softmax**. Support for **RELU** is currently in progress.
@@ -156,9 +155,6 @@ There are a few portions of the library that are currently under construction.
 These are:
 
 - RELU, leaky RELU, Tanh and softsign activation not yet functional
-- Adagrad optimizer not yet vectorized
-- RMSProp optimizer not yet vectorized
-- Adam optimizer not yet vectorized
 
 # Example usage
 

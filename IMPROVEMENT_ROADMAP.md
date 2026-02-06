@@ -39,9 +39,9 @@ A prioritized list of improvements and enhancements for the library.
 
 ## Medium Priority
 
-- [ ] **Add Unit Tests for New Optimizers** *(~2-4 hours)*
-  - AdaGrad, RMSProp, and Adam have no dedicated tests
-  - Add to test_network.c or create test_optimizers.c
+- [x] **Add Unit Tests for New Optimizers** *(~2-4 hours)*
+  - AdaGrad, RMSProp, and Adam now have dedicated tests in test_optimizers.c
+  - Tests verify convergence on XOR problem and proper state tensor allocation
 
 - [x] **Gradient Clipping** *(~2-3 hours)*
   - Prevents exploding gradients, especially with ReLU activation

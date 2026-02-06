@@ -16,6 +16,7 @@ add_test(NAME test_activations COMMAND test_activations)
 add_test(NAME test_onnx_export COMMAND test_onnx_export)
 add_test(NAME test_loss_functions COMMAND test_loss_functions)
 add_test(NAME test_save_load COMMAND test_save_load)
+add_test(NAME test_optimizers COMMAND test_optimizers)
 #add_test(NAME test_forward_pass COMMAND test_forward_pass)
 #add_test(NAME test_training_convergence COMMAND test_training_convergence)
 
@@ -92,6 +93,9 @@ target_link_libraries(test_loss_functions libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_save_load test_save_load.c testy/test_main.c)
 target_link_libraries(test_save_load libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_optimizers test_optimizers.c testy/test_main.c)
+target_link_libraries(test_optimizers libann ${BLAS_LIB} ${MATH_LIB})
 
 #add_executable(test_forward_pass test_forward_pass.c testy/test_main.c)
 #target_link_libraries(test_forward_pass ann ${BLAS_LIB} ${MATH_LIB})

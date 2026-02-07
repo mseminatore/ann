@@ -951,16 +951,31 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, rea
 	if (!mtx || !v || !dest)
 		return NULL;
 
-	if (trans == Tensor_NoTranspose && mtx->cols != v->cols)
-	{
-		return NULL;
+	// Dimension validation
+	// For NoTrans: y = A*x where A is MxN, x has N elements, y has M elements
+	// For Trans: y = A^T*x where A is MxN, x has M elements, y has N elements
+	if (trans == Tensor_NoTranspose) {
+		if (mtx->cols != v->cols || dest->cols != mtx->rows)
+			return NULL;
+	} else {
+		if (mtx->rows != v->cols || dest->cols != mtx->cols)
+			return NULL;
 	}
 
 	if (dest->rows != 1)
 		return NULL;
 
+	// Handle empty matrices - nothing to compute
+	if (mtx->rows <= 0 || mtx->cols <= 0)
+		return dest;
+
 #ifdef USE_BLAS
-	cblas_sgemv(CblasRowMajor, (trans == Tensor_NoTranspose) ? CblasNoTrans : CblasTrans, mtx->rows, mtx->cols, alpha, mtx->values, mtx->cols, v->values, 1, beta, dest->values, 1);
+	// BLAS requires lda >= n for row-major, and m,n > 0
+	int m = mtx->rows;
+	int n = mtx->cols;
+	int lda = n;
+	
+	cblas_sgemv(CblasRowMajor, (trans == Tensor_NoTranspose) ? CblasNoTrans : CblasTrans, m, n, alpha, mtx->values, lda, v->values, 1, beta, dest->values, 1);
 #else
 
 	int rows = mtx->rows;
@@ -1077,8 +1092,14 @@ PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest)
 		return NULL;
 	}
 
+	// Handle empty tensors - nothing to compute
+	if (dest->rows == 0 || dest->cols == 0)
+		return dest;
+
 #ifdef USE_BLAS
-	cblas_sger(CblasRowMajor, dest->rows, dest->cols, alpha, a->values, 1, b->values, 1, dest->values, dest->cols);
+	// BLAS requires lda >= max(1, cols) for row-major
+	int lda = dest->cols > 0 ? dest->cols : 1;
+	cblas_sger(CblasRowMajor, dest->rows, dest->cols, alpha, a->values, 1, b->values, 1, dest->values, lda);
 #else
 	int b_cols = b->cols;
 	int unroll_limit = b_cols - 3;
@@ -1154,6 +1175,10 @@ PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTe
 	int M = A->rows;
 	int K = A->cols;
 	int N = B->cols;
+
+	// Handle empty matrices - nothing to compute
+	if (M == 0 || N == 0 || K == 0)
+		return C;
 
 #ifdef USE_BLAS
 	cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,

@@ -144,6 +144,7 @@ and **random search** (sampling-based) strategies.
 
 - **Grid Search** - exhaustively tries all combinations of hyperparameters
 - **Random Search** - randomly samples from the hyperparameter space
+- **Bayesian Optimization** - intelligent search using Gaussian Process surrogate
 - **Topology Patterns** - automatic layer size generation (pyramid, funnel, etc.)
 - **Per-Layer Activations** - different activation function for each layer
 - **Data Splitting** - automatic train/validation holdout with optional shuffling
@@ -176,6 +177,7 @@ hypertune_split_data | split data into train/validation sets
 hypertune_free_split | free split tensors
 hypertune_grid_search | perform exhaustive grid search
 hypertune_random_search | perform random search
+hypertune_bayesian_search | perform Bayesian optimization search
 hypertune_create_network | create network from result config
 hypertune_count_grid_trials | calculate total grid combinations
 hypertune_print_result | print a single result
@@ -183,6 +185,11 @@ hypertune_print_summary | print top N results
 hypertune_score_accuracy | default scoring function (accuracy)
 hypertune_generate_topology | generate layer sizes from pattern
 hypertune_topology_name | get string name for topology pattern
+gp_init | initialize Gaussian Process state
+gp_add_observation | add observation to GP
+gp_predict | predict mean and variance at a point
+gp_expected_improvement | compute expected improvement
+bayesian_options_init | initialize Bayesian optimization options
 
 ## Example Usage
 
@@ -349,6 +356,53 @@ space.search_per_layer_activation = 1;  // enable per-layer search
 
 When `search_per_layer_activation` is enabled, random search will assign 
 different activations to each layer independently.
+
+## Bayesian Optimization
+
+For more efficient hyperparameter search, Bayesian optimization uses a Gaussian 
+Process surrogate model to intelligently explore the search space:
+
+```c
+#include "ann_hypertune.h"
+
+// Configure search space
+HyperparamSpace space;
+hypertune_space_init(&space);
+space.learning_rate_min = 0.001f;
+space.learning_rate_max = 0.1f;
+space.batch_sizes[0] = 16;
+space.batch_sizes[1] = 32;
+space.batch_sizes[2] = 64;
+space.batch_size_count = 3;
+// ... other fixed hyperparameters
+
+// Configure Bayesian optimization
+BayesianOptions bo_opts;
+bayesian_options_init(&bo_opts);
+bo_opts.n_initial = 10;      // Random samples to initialize GP
+bo_opts.n_iterations = 20;   // BO iterations after initialization
+bo_opts.n_candidates = 100;  // Candidates to evaluate per iteration
+
+// Run Bayesian optimization
+HypertuneResult results[50], best;
+int trials = hypertune_bayesian_search(
+    &space, input_size, output_size,
+    ACTIVATION_SOFTMAX, LOSS_CROSS_ENTROPY,
+    &split, &tune_opts, &bo_opts,
+    results, 50, &best
+);
+```
+
+**How it works:**
+1. **Initial phase**: Randomly samples `n_initial` configurations
+2. **BO phase**: Uses Gaussian Process to predict performance, selects points 
+   with highest Expected Improvement (EI)
+3. **Optimizes**: Learning rate (log-scale) and batch size
+
+**When to use Bayesian optimization:**
+- Expensive evaluations (long training times)
+- Smooth objective function
+- 2-5 hyperparameters to tune
 
 # Accelerating training with BLAS libraries
 

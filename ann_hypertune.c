@@ -768,3 +768,439 @@ int hypertune_random_search(
     
     return num_trials;
 }
+
+// ============================================================================
+// BAYESIAN OPTIMIZATION - GAUSSIAN PROCESS
+// ============================================================================
+
+// Standard normal CDF approximation (Abramowitz and Stegun)
+static real standard_normal_cdf(real x)
+{
+    const real a1 =  0.254829592f;
+    const real a2 = -0.284496736f;
+    const real a3 =  1.421413741f;
+    const real a4 = -1.453152027f;
+    const real a5 =  1.061405429f;
+    const real p  =  0.3275911f;
+    
+    int sign = (x < 0) ? -1 : 1;
+    x = (real)fabs(x);
+    
+    real t = 1.0f / (1.0f + p * x);
+    real y = 1.0f - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (real)exp(-x * x / 2.0f);
+    
+    return 0.5f * (1.0f + sign * y);
+}
+
+// Standard normal PDF
+static real standard_normal_pdf(real x)
+{
+    const real inv_sqrt_2pi = 0.3989422804f;
+    return inv_sqrt_2pi * (real)exp(-0.5f * x * x);
+}
+
+// RBF (squared exponential) kernel
+static real rbf_kernel(const real *x1, const real *x2, int n_dims, real length_scale, real signal_var)
+{
+    real sq_dist = 0.0f;
+    for (int i = 0; i < n_dims; i++) {
+        real diff = x1[i] - x2[i];
+        sq_dist += diff * diff;
+    }
+    return signal_var * (real)exp(-0.5f * sq_dist / (length_scale * length_scale));
+}
+
+void gp_init(GaussianProcess *gp, int n_dims)
+{
+    if (!gp) return;
+    
+    memset(gp, 0, sizeof(GaussianProcess));
+    gp->n_dims = n_dims;
+    gp->length_scale = 0.3f;      // Default length scale
+    gp->noise_variance = 0.01f;   // Observation noise
+    gp->signal_variance = 1.0f;   // Signal amplitude
+}
+
+int gp_add_observation(GaussianProcess *gp, const real *x, real y)
+{
+    if (!gp || !x)
+        return ERR_NULL_PTR;
+    
+    if (gp->n_observations >= GP_MAX_OBSERVATIONS)
+        return ERR_INVALID;
+    
+    int idx = gp->n_observations;
+    for (int i = 0; i < gp->n_dims && i < 2; i++) {
+        gp->X[idx][i] = x[i];
+    }
+    gp->y[idx] = y;
+    gp->n_observations++;
+    
+    return ERR_OK;
+}
+
+void gp_predict(const GaussianProcess *gp, const real *x, real *mean, real *variance)
+{
+    if (!gp || !x || !mean || !variance) return;
+    
+    int n = gp->n_observations;
+    
+    if (n == 0) {
+        *mean = 0.0f;
+        *variance = gp->signal_variance;
+        return;
+    }
+    
+    // Allocate working memory on stack for small GP
+    // K = kernel matrix (n x n), k_star = kernel vector (n), alpha = K^-1 * y
+    real K[GP_MAX_OBSERVATIONS * GP_MAX_OBSERVATIONS];
+    real k_star[GP_MAX_OBSERVATIONS];
+    real alpha[GP_MAX_OBSERVATIONS];
+    real L[GP_MAX_OBSERVATIONS * GP_MAX_OBSERVATIONS];  // Cholesky factor
+    
+    // Build kernel matrix K with noise on diagonal
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            K[i * n + j] = rbf_kernel(gp->X[i], gp->X[j], gp->n_dims, 
+                                      gp->length_scale, gp->signal_variance);
+            if (i == j) {
+                K[i * n + j] += gp->noise_variance;
+            }
+        }
+    }
+    
+    // Build k_star vector (kernel between x and training points)
+    for (int i = 0; i < n; i++) {
+        k_star[i] = rbf_kernel(x, gp->X[i], gp->n_dims, 
+                               gp->length_scale, gp->signal_variance);
+    }
+    
+    // Cholesky decomposition: K = L * L^T
+    memset(L, 0, n * n * sizeof(real));
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j <= i; j++) {
+            real sum = K[i * n + j];
+            for (int k = 0; k < j; k++) {
+                sum -= L[i * n + k] * L[j * n + k];
+            }
+            if (i == j) {
+                L[i * n + j] = (real)sqrt(sum > 0 ? sum : 1e-10f);
+            } else {
+                L[i * n + j] = sum / (L[j * n + j] + 1e-10f);
+            }
+        }
+    }
+    
+    // Solve L * z = y for z (forward substitution)
+    real z[GP_MAX_OBSERVATIONS];
+    for (int i = 0; i < n; i++) {
+        real sum = gp->y[i];
+        for (int j = 0; j < i; j++) {
+            sum -= L[i * n + j] * z[j];
+        }
+        z[i] = sum / (L[i * n + i] + 1e-10f);
+    }
+    
+    // Solve L^T * alpha = z for alpha (backward substitution)
+    for (int i = n - 1; i >= 0; i--) {
+        real sum = z[i];
+        for (int j = i + 1; j < n; j++) {
+            sum -= L[j * n + i] * alpha[j];
+        }
+        alpha[i] = sum / (L[i * n + i] + 1e-10f);
+    }
+    
+    // Predicted mean: k_star^T * alpha
+    *mean = 0.0f;
+    for (int i = 0; i < n; i++) {
+        *mean += k_star[i] * alpha[i];
+    }
+    
+    // Solve L * v = k_star for v
+    real v[GP_MAX_OBSERVATIONS];
+    for (int i = 0; i < n; i++) {
+        real sum = k_star[i];
+        for (int j = 0; j < i; j++) {
+            sum -= L[i * n + j] * v[j];
+        }
+        v[i] = sum / (L[i * n + i] + 1e-10f);
+    }
+    
+    // Predicted variance: k(x,x) - v^T * v
+    real k_xx = rbf_kernel(x, x, gp->n_dims, gp->length_scale, gp->signal_variance);
+    real v_dot_v = 0.0f;
+    for (int i = 0; i < n; i++) {
+        v_dot_v += v[i] * v[i];
+    }
+    *variance = k_xx - v_dot_v;
+    if (*variance < 1e-10f) *variance = 1e-10f;
+}
+
+real gp_expected_improvement(real mean, real variance, real best_y, real xi)
+{
+    if (variance <= 0.0f)
+        return 0.0f;
+    
+    real std = (real)sqrt(variance);
+    real z = (mean - best_y - xi) / std;
+    
+    return (mean - best_y - xi) * standard_normal_cdf(z) + std * standard_normal_pdf(z);
+}
+
+void bayesian_options_init(BayesianOptions *opts)
+{
+    if (!opts) return;
+    
+    opts->n_initial = 10;
+    opts->n_iterations = 20;
+    opts->n_candidates = 100;
+    opts->exploration_weight = 0.01f;
+}
+
+// ============================================================================
+// BAYESIAN OPTIMIZATION SEARCH
+// ============================================================================
+
+// Normalize learning rate to [0,1] using log scale
+static real normalize_lr(real lr, real lr_min, real lr_max)
+{
+    real log_min = (real)log(lr_min);
+    real log_max = (real)log(lr_max);
+    real log_lr = (real)log(lr);
+    return (log_lr - log_min) / (log_max - log_min + 1e-10f);
+}
+
+// Denormalize learning rate from [0,1]
+static real denormalize_lr(real norm, real lr_min, real lr_max)
+{
+    real log_min = (real)log(lr_min);
+    real log_max = (real)log(lr_max);
+    return (real)exp(log_min + norm * (log_max - log_min));
+}
+
+// Normalize batch size to [0,1]
+static real normalize_batch(unsigned batch, const unsigned *batches, int count)
+{
+    for (int i = 0; i < count; i++) {
+        if (batches[i] == batch) {
+            return (real)i / (real)(count - 1 + 1e-10f);
+        }
+    }
+    return 0.0f;
+}
+
+// Denormalize batch size from [0,1] to nearest valid batch
+static unsigned denormalize_batch(real norm, const unsigned *batches, int count)
+{
+    int idx = (int)(norm * (count - 1) + 0.5f);
+    if (idx < 0) idx = 0;
+    if (idx >= count) idx = count - 1;
+    return batches[idx];
+}
+
+int hypertune_bayesian_search(
+    const HyperparamSpace *space,
+    int input_size,
+    int output_size,
+    Activation_type output_activation,
+    Loss_type loss_type,
+    const DataSplit *split,
+    const HypertuneOptions *tune_options,
+    const BayesianOptions *bayes_options,
+    HypertuneResult *results,
+    int max_results,
+    HypertuneResult *best_result)
+{
+    if (!space || !split || !tune_options || !tune_options->score_func || !bayes_options)
+        return ERR_NULL_PTR;
+    
+    int total_trials = bayes_options->n_initial + bayes_options->n_iterations;
+    
+    if (tune_options->verbosity >= 1) {
+        printf("Starting Bayesian optimization: %d initial + %d BO iterations\n",
+               bayes_options->n_initial, bayes_options->n_iterations);
+    }
+    
+    // Initialize GP
+    GaussianProcess gp;
+    gp_init(&gp, 2);  // 2D: learning rate + batch size
+    
+    HypertuneResult best;
+    hypertune_result_init(&best);
+    best.score = -999999.0f;
+    
+    int trial = 0;
+    
+    // Use other hyperparams from space (fixed during BO)
+    int layer_count = space->hidden_layer_counts[0];
+    int layer_size = space->hidden_layer_sizes[0];
+    Activation_type act = space->hidden_activations[0];
+    Optimizer_type opt = space->optimizers[0];
+    TopologyPattern topo = (space->topology_pattern_count > 0) ? 
+                           space->topology_patterns[0] : TOPOLOGY_CONSTANT;
+    
+    // Phase 1: Initial random sampling
+    unsigned seed = tune_options->seed ? tune_options->seed : (unsigned)time(NULL);
+    srand(seed);
+    
+    for (int i = 0; i < bayes_options->n_initial && trial < total_trials; i++) {
+        // Random point in normalized space
+        real x[2];
+        x[0] = (real)rand() / (real)RAND_MAX;  // normalized LR
+        x[1] = (real)rand() / (real)RAND_MAX;  // normalized batch
+        
+        // Denormalize
+        real lr = denormalize_lr(x[0], space->learning_rate_min, space->learning_rate_max);
+        unsigned batch = denormalize_batch(x[1], space->batch_sizes, space->batch_size_count);
+        
+        // Build config
+        HypertuneResult current;
+        hypertune_result_init(&current);
+        current.trial_id = trial + 1;
+        current.learning_rate = lr;
+        current.batch_size = batch;
+        current.optimizer = opt;
+        current.hidden_layer_count = layer_count;
+        current.topology_pattern = topo;
+        
+        hypertune_generate_topology(topo, layer_size, layer_count, current.hidden_layer_sizes);
+        for (int l = 0; l < layer_count; l++) {
+            current.hidden_activations[l] = act;
+        }
+        
+        // Train and evaluate
+        PNetwork net = hypertune_create_network(&current, input_size, output_size,
+                                                output_activation, loss_type);
+        if (!net) {
+            current.score = -1.0f;
+        } else {
+            ann_set_epoch_limit(net, space->epoch_limit);
+            ann_set_convergence(net, space->convergence_epsilon);
+            
+            double start_time = get_time_ms();
+            ann_train_network(net, split->train_inputs, split->train_outputs, split->train_rows);
+            double end_time = get_time_ms();
+            
+            current.training_time_ms = (real)(end_time - start_time);
+            current.score = tune_options->score_func(net, split->val_inputs, 
+                                                     split->val_outputs, tune_options->user_data);
+            ann_free_network(net);
+        }
+        
+        // Add to GP
+        gp_add_observation(&gp, x, current.score);
+        
+        // Store result
+        if (results && trial < max_results)
+            results[trial] = current;
+        
+        // Update best
+        if (current.score > best.score)
+            best = current;
+        
+        // Progress
+        if (tune_options->progress_func) {
+            tune_options->progress_func(trial + 1, total_trials, &best, &current, 
+                                       tune_options->user_data);
+        } else if (tune_options->verbosity >= 1) {
+            printf("[%d/%d] (init) ", trial + 1, total_trials);
+            hypertune_print_result(&current);
+        }
+        
+        trial++;
+    }
+    
+    // Phase 2: Bayesian optimization iterations
+    for (int iter = 0; iter < bayes_options->n_iterations && trial < total_trials; iter++) {
+        // Find next point by maximizing Expected Improvement
+        real best_x[2] = {0.0f, 0.0f};
+        real best_ei = -999999.0f;
+        
+        for (int c = 0; c < bayes_options->n_candidates; c++) {
+            real x[2];
+            x[0] = (real)rand() / (real)RAND_MAX;
+            x[1] = (real)rand() / (real)RAND_MAX;
+            
+            real mean, variance;
+            gp_predict(&gp, x, &mean, &variance);
+            
+            real ei = gp_expected_improvement(mean, variance, best.score, 
+                                              bayes_options->exploration_weight);
+            
+            if (ei > best_ei) {
+                best_ei = ei;
+                best_x[0] = x[0];
+                best_x[1] = x[1];
+            }
+        }
+        
+        // Evaluate at best candidate
+        real lr = denormalize_lr(best_x[0], space->learning_rate_min, space->learning_rate_max);
+        unsigned batch = denormalize_batch(best_x[1], space->batch_sizes, space->batch_size_count);
+        
+        HypertuneResult current;
+        hypertune_result_init(&current);
+        current.trial_id = trial + 1;
+        current.learning_rate = lr;
+        current.batch_size = batch;
+        current.optimizer = opt;
+        current.hidden_layer_count = layer_count;
+        current.topology_pattern = topo;
+        
+        hypertune_generate_topology(topo, layer_size, layer_count, current.hidden_layer_sizes);
+        for (int l = 0; l < layer_count; l++) {
+            current.hidden_activations[l] = act;
+        }
+        
+        // Train and evaluate
+        PNetwork net = hypertune_create_network(&current, input_size, output_size,
+                                                output_activation, loss_type);
+        if (!net) {
+            current.score = -1.0f;
+        } else {
+            ann_set_epoch_limit(net, space->epoch_limit);
+            ann_set_convergence(net, space->convergence_epsilon);
+            
+            double start_time = get_time_ms();
+            ann_train_network(net, split->train_inputs, split->train_outputs, split->train_rows);
+            double end_time = get_time_ms();
+            
+            current.training_time_ms = (real)(end_time - start_time);
+            current.score = tune_options->score_func(net, split->val_inputs, 
+                                                     split->val_outputs, tune_options->user_data);
+            ann_free_network(net);
+        }
+        
+        // Add to GP
+        gp_add_observation(&gp, best_x, current.score);
+        
+        // Store result
+        if (results && trial < max_results)
+            results[trial] = current;
+        
+        // Update best
+        if (current.score > best.score)
+            best = current;
+        
+        // Progress
+        if (tune_options->progress_func) {
+            tune_options->progress_func(trial + 1, total_trials, &best, &current, 
+                                       tune_options->user_data);
+        } else if (tune_options->verbosity >= 1) {
+            printf("[%d/%d] (BO, EI=%.4f) ", trial + 1, total_trials, best_ei);
+            hypertune_print_result(&current);
+        }
+        
+        trial++;
+    }
+    
+    if (best_result)
+        *best_result = best;
+    
+    if (tune_options->verbosity >= 1) {
+        printf("\nBest result: ");
+        hypertune_print_result(&best);
+    }
+    
+    return trial;
+}

@@ -401,6 +401,117 @@ void hypertune_generate_topology(
  */
 const char* hypertune_topology_name(TopologyPattern pattern);
 
+// ============================================================================
+// BAYESIAN OPTIMIZATION
+// ============================================================================
+
+/**
+ * Maximum observations for Gaussian Process.
+ * Limits memory usage and keeps GP computations tractable.
+ */
+#define GP_MAX_OBSERVATIONS 100
+
+/**
+ * Gaussian Process state for Bayesian optimization.
+ * Maintains observed points and their scores for the surrogate model.
+ */
+typedef struct {
+    int n_observations;                      // Number of observations so far
+    int n_dims;                              // Number of dimensions (2 for lr+batch)
+    real X[GP_MAX_OBSERVATIONS][2];          // Observed points (normalized to [0,1])
+    real y[GP_MAX_OBSERVATIONS];             // Observed scores
+    real length_scale;                       // RBF kernel length scale
+    real noise_variance;                     // Observation noise variance
+    real signal_variance;                    // Signal variance (amplitude)
+} GaussianProcess;
+
+/**
+ * Bayesian optimization options.
+ */
+typedef struct {
+    int n_initial;                           // Initial random samples (default: 10)
+    int n_iterations;                        // BO iterations after initial (default: 20)
+    int n_candidates;                        // Candidates to evaluate for EI (default: 100)
+    real exploration_weight;                 // Exploration vs exploitation (default: 0.01)
+} BayesianOptions;
+
+/**
+ * Initialize Gaussian Process state.
+ *
+ * @param gp GP state to initialize
+ * @param n_dims Number of dimensions
+ */
+void gp_init(GaussianProcess *gp, int n_dims);
+
+/**
+ * Add an observation to the GP.
+ *
+ * @param gp GP state
+ * @param x Normalized point (array of n_dims values in [0,1])
+ * @param y Observed score
+ * @return ERR_OK on success, error code otherwise
+ */
+int gp_add_observation(GaussianProcess *gp, const real *x, real y);
+
+/**
+ * Predict mean and variance at a point using the GP.
+ *
+ * @param gp GP state
+ * @param x Normalized point to predict
+ * @param mean Output: predicted mean
+ * @param variance Output: predicted variance
+ */
+void gp_predict(const GaussianProcess *gp, const real *x, real *mean, real *variance);
+
+/**
+ * Compute Expected Improvement at a point.
+ *
+ * @param mean Predicted mean at point
+ * @param variance Predicted variance at point
+ * @param best_y Best observed score so far
+ * @param xi Exploration parameter (typically 0.01)
+ * @return Expected improvement value
+ */
+real gp_expected_improvement(real mean, real variance, real best_y, real xi);
+
+/**
+ * Initialize Bayesian optimization options with defaults.
+ *
+ * @param opts Options to initialize
+ */
+void bayesian_options_init(BayesianOptions *opts);
+
+/**
+ * Perform Bayesian optimization over hyperparameter space.
+ * Optimizes learning rate and batch size using Gaussian Process surrogate.
+ *
+ * @param space Hyperparameter search space
+ * @param input_size Number of input features
+ * @param output_size Number of output classes/values
+ * @param output_activation Activation for output layer
+ * @param loss_type Loss function to use
+ * @param split Training/validation data split
+ * @param tune_options Hypertuning options (score function, callbacks)
+ * @param bayes_options Bayesian optimization options
+ * @param results Array to store results (caller allocates)
+ * @param max_results Maximum results to store
+ * @param best_result Output: best result found
+ * @return Number of trials completed, or negative error code
+ */
+int hypertune_bayesian_search(
+    const HyperparamSpace *space,
+    int input_size,
+    int output_size,
+    Activation_type output_activation,
+    Loss_type loss_type,
+    const DataSplit *split,
+    const HypertuneOptions *tune_options,
+    const BayesianOptions *bayes_options,
+    HypertuneResult *results,
+    int max_results,
+    HypertuneResult *best_result
+);
+
 #ifdef __cplusplus
 }
 #endif

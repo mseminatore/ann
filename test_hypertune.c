@@ -317,4 +317,92 @@ void test_main(int argc, char *argv[]) {
     hypertune_free_split(&xor_split);
     tensor_free(xor_in);
     tensor_free(xor_out);
+
+    // ========================================================================
+    SUITE("Gaussian Process");
+    COMMENT("Testing GP prediction and expected improvement...");
+
+    GaussianProcess gp;
+    gp_init(&gp, 1);  // 1D for simple testing
+    
+    TESTEX("GP init: n_observations = 0", (gp.n_observations == 0));
+    TESTEX("GP init: n_dims = 1", (gp.n_dims == 1));
+    
+    // Add some observations
+    real x1[2] = {0.0f, 0.0f};
+    real x2[2] = {0.5f, 0.0f};
+    real x3[2] = {1.0f, 0.0f};
+    
+    gp_add_observation(&gp, x1, 0.5f);
+    gp_add_observation(&gp, x2, 0.9f);  // best point
+    gp_add_observation(&gp, x3, 0.6f);
+    
+    TESTEX("GP has 3 observations", (gp.n_observations == 3));
+    
+    // Predict at observed point - should be close to observed value
+    real mean, variance;
+    gp_predict(&gp, x2, &mean, &variance);
+    TESTEX("GP predict at x2: mean close to 0.9", (fabs(mean - 0.9f) < 0.1f));
+    TESTEX("GP predict at x2: low variance", (variance < 0.1f));
+    
+    // Predict at unobserved point - should have higher variance
+    real x_new[2] = {0.25f, 0.0f};
+    gp_predict(&gp, x_new, &mean, &variance);
+    TESTEX("GP predict at new point: has variance", (variance > 0.0f));
+    
+    // Test Expected Improvement
+    real ei = gp_expected_improvement(0.8f, 0.1f, 0.9f, 0.01f);
+    TESTEX("EI for point below best: small", (ei >= 0.0f));
+    
+    real ei2 = gp_expected_improvement(1.0f, 0.1f, 0.9f, 0.01f);
+    TESTEX("EI for point above best: larger", (ei2 > ei));
+
+    // ========================================================================
+    SUITE("Bayesian Optimization");
+    COMMENT("Testing Bayesian search with minimal configuration...");
+
+    // Create XOR data for Bayesian optimization test
+    xor_in = tensor_create_from_array(8, 2, xor_inputs);
+    xor_out = tensor_create_from_array(8, 1, xor_outputs);
+    hypertune_split_data(xor_in, xor_out, 0.75f, 0, 0, &xor_split);
+    
+    // Minimal search space
+    HyperparamSpace bo_space;
+    hypertune_space_init(&bo_space);
+    bo_space.learning_rate_min = 0.01f;
+    bo_space.learning_rate_max = 0.5f;
+    bo_space.batch_sizes[0] = 4;
+    bo_space.batch_sizes[1] = 8;
+    bo_space.batch_size_count = 2;
+    bo_space.optimizers[0] = OPT_SGD;
+    bo_space.optimizer_count = 1;
+    bo_space.hidden_layer_counts[0] = 1;
+    bo_space.hidden_layer_count_options = 1;
+    bo_space.hidden_layer_sizes[0] = 4;
+    bo_space.hidden_layer_size_count = 1;
+    bo_space.hidden_activations[0] = ACTIVATION_SIGMOID;
+    bo_space.hidden_activation_count = 1;
+    bo_space.epoch_limit = 50;
+    
+    // Bayesian options - small for testing
+    BayesianOptions bo_opts;
+    bayesian_options_init(&bo_opts);
+    bo_opts.n_initial = 3;
+    bo_opts.n_iterations = 2;
+    bo_opts.n_candidates = 20;
+    
+    opts.verbosity = 0;
+    
+    trials = hypertune_bayesian_search(
+        &bo_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &opts, &bo_opts, results, 10, &best);
+    
+    TESTEX("Bayesian search returns 5 trials (3 init + 2 BO)", (trials == 5));
+    TESTEX("Bayesian search best has valid score", (best.score >= 0.0f));
+    TESTEX("All results have learning rates in range", 
+           (results[0].learning_rate >= 0.01f && results[0].learning_rate <= 0.5f));
+    
+    hypertune_free_split(&xor_split);
+    tensor_free(xor_in);
+    tensor_free(xor_out);
 }

@@ -194,7 +194,8 @@ int main(int argc, char *argv[])
 		cblas_init(CBLAS_DEFAULT_THREADS);
 		if (threads != -1)
 			cblas_set_num_threads(threads);
-			
+		
+		// cblas_autotune_thresholds();	
 		printf( "%s\n", cblas_get_config());
 		printf("      CPU uArch: %s\n", cblas_get_corename());
 		printf("  Cores/Threads: %d/%d\n", cblas_get_num_procs(), cblas_get_num_threads());
@@ -287,6 +288,10 @@ int main(int argc, char *argv[])
 	// evaluate the network against the test data
 	real acc = ann_evaluate_accuracy(pnet, x_test, y_test);
 	printf("\nTest accuracy: %g%%\n", acc * 100);
+
+#if defined(USE_CBLAS) || defined(CBLAS)
+	cblas_print_stats();
+#endif
 
 	// free memory
 	ann_free_network(pnet);

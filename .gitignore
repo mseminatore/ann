@@ -12,6 +12,7 @@ test_forward_pass
 test_loss_functions
 test_save_load
 test_training_convergence
+test_optimizers
 
 # Object files
 *.o

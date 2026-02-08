@@ -155,6 +155,40 @@ static const char *loss_types[] = {
 };
 
 //-----------------------------------------------
+// ANSI color codes for terminal output
+// Disabled if ANN_NO_COLOR environment variable is set
+//-----------------------------------------------
+static int g_colors_enabled = -1;  // -1 = not checked yet
+
+static int colors_enabled(void)
+{
+	if (g_colors_enabled == -1)
+	{
+		const char *no_color = getenv("ANN_NO_COLOR");
+		g_colors_enabled = (no_color == NULL || no_color[0] == '\0') ? 1 : 0;
+	}
+	return g_colors_enabled;
+}
+
+// ANSI color codes
+#define ANSI_RESET      "\033[0m"
+#define ANSI_BOLD       "\033[1m"
+#define ANSI_RED        "\033[31m"
+#define ANSI_GREEN      "\033[32m"
+#define ANSI_YELLOW     "\033[33m"
+#define ANSI_BLUE       "\033[34m"
+#define ANSI_MAGENTA    "\033[35m"
+#define ANSI_CYAN       "\033[36m"
+#define ANSI_WHITE      "\033[37m"
+#define ANSI_BOLD_GREEN "\033[1;32m"
+#define ANSI_BOLD_CYAN  "\033[1;36m"
+#define ANSI_BOLD_WHITE "\033[1;37m"
+
+// Helper macros for conditional color output
+#define COLOR(code) (colors_enabled() ? (code) : "")
+#define RESET()     (colors_enabled() ? ANSI_RESET : "")
+
+//-----------------------------------------------
 // default lib output function
 //-----------------------------------------------
 static void ann_puts(const char *s)
@@ -1997,10 +2031,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	if (outputs->rows != rows)
 		return 0.0;
 
-	ann_printf(pnet,	"\nTraining ANN\n"
-						"------------\n");
+	ann_printf(pnet,	"\n%sTraining ANN%s\n"
+						"------------\n", COLOR(ANSI_BOLD_CYAN), RESET());
 	ann_print_props(pnet);
-	ann_printf(pnet, "  Training size: %u rows\n\n", rows);
+	ann_printf(pnet, "  Training size: %s%u%s rows\n\n", COLOR(ANSI_WHITE), rows, RESET());
 
 	time_t time_start = time(NULL);
 
@@ -2054,7 +2088,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		shuffle_indices(input_indices, rows);
 		
 		// iterate over all sets of inputs in this epoch/minibatch
-		ann_printf(pnet, "Epoch %u/%u\n[", ++epoch, pnet->epochLimit);
+		ann_printf(pnet, "%sEpoch %u/%u%s\n[", COLOR(ANSI_BOLD_WHITE), ++epoch, pnet->epochLimit, RESET());
 		loss = (real)0.0;
 
 		// iterate over all batches
@@ -2102,11 +2136,16 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 			// Progress indicator: show one '=' per ~5% of batches
 			if (batch % max(1, batch_count / 20) == 0)
 			{
-				putchar('=');
+				if (colors_enabled())
+					fputs(ANSI_GREEN "=" ANSI_RESET, stdout);
+				else
+					putchar('=');
 			}
 		}
 
-		ann_printf(pnet, "] - loss: %3.2g - LR: %3.2g\n", loss, pnet->learning_rate);
+		ann_printf(pnet, "] - loss: %s%3.2g%s - LR: %s%3.2g%s\n", 
+			COLOR(ANSI_YELLOW), loss, RESET(),
+			COLOR(ANSI_BLUE), pnet->learning_rate, RESET());
 
 		// optimize learning once per epoch
 		if (pnet->optimizer == OPT_SGD_WITH_DECAY || pnet->optimizer == OPT_MOMENTUM)
@@ -2116,9 +2155,12 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 
 		if (loss < pnet->convergence_epsilon)
 		{
-			ann_printf(pnet, "Network converged with loss: %3.2g out of %3.2g\n", loss, pnet->convergence_epsilon);
+			ann_printf(pnet, "%sNetwork converged%s with loss: %s%3.2g%s out of %3.2g\n", 
+				COLOR(ANSI_BOLD_GREEN), RESET(),
+				COLOR(ANSI_GREEN), loss, RESET(), 
+				pnet->convergence_epsilon);
 			converged = 1;
-		}		
+		}
 
 		// check for no convergence
 		if (epoch >= pnet->epochLimit)
@@ -2134,7 +2176,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	double diff_t = (double)(time_end - time_start);
 	double per_step = 1000.0 * diff_t / (rows * epoch);
 
-	ann_printf(pnet, "\nTraining time: %f seconds, %f ms/step\n", diff_t, per_step);
+	ann_printf(pnet, "\n%sTraining time:%s %s%.1f%s seconds, %s%.3f%s ms/step\n", 
+		COLOR(ANSI_BOLD_WHITE), RESET(),
+		COLOR(ANSI_GREEN), diff_t, RESET(),
+		COLOR(ANSI_GREEN), per_step, RESET());
 
 	return loss;
 }
@@ -2601,7 +2646,9 @@ PNetwork ann_load_network_binary(const char *filename)
 		return NULL;
 	}
 
-	ann_printf(pnet, "loading network %s...", filename);
+	ann_printf(pnet, "%sloading network%s %s%s%s...", 
+		COLOR(ANSI_CYAN), RESET(),
+		COLOR(ANSI_WHITE), filename, RESET());
 
 	// create layers
 	for (int layer = 0; layer < layer_count; layer++)
@@ -2629,7 +2676,7 @@ PNetwork ann_load_network_binary(const char *filename)
 		}
 	}
 
-	ann_printf(pnet, "done.\n");
+	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
 
 	fclose(fptr);
 	return pnet;
@@ -2730,7 +2777,9 @@ PNetwork ann_load_network(const char *filename)
 		return NULL;
 	}
 
-	ann_printf(pnet, "loading network %s...", filename);
+	ann_printf(pnet, "%sloading network%s %s%s%s...", 
+		COLOR(ANSI_CYAN), RESET(),
+		COLOR(ANSI_WHITE), filename, RESET());
 
 	// create layers
 	for (int layer = 0; layer < layer_count; layer++)
@@ -2758,7 +2807,7 @@ PNetwork ann_load_network(const char *filename)
 		}
 	}
 
-	ann_printf(pnet, "done.\n");
+	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
 
 	fclose(fptr);
 	return pnet;
@@ -2769,7 +2818,7 @@ PNetwork ann_load_network(const char *filename)
 //-----------------------------------------------
 void ann_print_props(const PNetwork pnet)
 {
-	ann_printf(pnet, "  Network shape: ");
+	ann_printf(pnet, "  Network shape: %s", COLOR(ANSI_CYAN));
 
 	for (int i = 0; i < pnet->layer_count; i++)
 	{
@@ -2777,11 +2826,11 @@ void ann_print_props(const PNetwork pnet)
 			ann_printf(pnet, "-");
 		ann_printf(pnet, "%d", pnet->layers[i].node_count);
 	}
-	ann_printf(pnet, "\n");
+	ann_printf(pnet, "%s\n", RESET());
 
-	ann_printf(pnet, "      Optimizer: %s\n", optimizers[pnet->optimizer]);
-	ann_printf(pnet, "  Loss function: %s\n", loss_types[pnet->loss_type]);
-	ann_printf(pnet, "Mini-batch size: %u\n", pnet->batchSize);
+	ann_printf(pnet, "      Optimizer: %s%s%s\n", COLOR(ANSI_WHITE), optimizers[pnet->optimizer], RESET());
+	ann_printf(pnet, "  Loss function: %s%s%s\n", COLOR(ANSI_WHITE), loss_types[pnet->loss_type], RESET());
+	ann_printf(pnet, "Mini-batch size: %s%u%s\n", COLOR(ANSI_WHITE), pnet->batchSize, RESET());
 }
 
 //-----------------------------------------------

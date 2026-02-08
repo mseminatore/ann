@@ -4,10 +4,18 @@
 #include "tensor.h"
 #include "testy/test.h"
 
+#if defined(USE_CBLAS)
+#	include <cblas.h>
+#endif
+
 void test_main(int argc, char* argv[])
 {
     (void)argc;
     (void)argv;
+
+#if defined(USE_CBLAS)
+	cblas_init(CBLAS_DEFAULT_THREADS);
+#endif
 
     MODULE("Loss Functions");
 
@@ -22,6 +30,7 @@ void test_main(int argc, char* argv[])
         PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
         TESTEX("MSE network created", net != NULL);
         
+        ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
         ann_set_learning_rate(net, 0.5f);
@@ -47,6 +56,7 @@ void test_main(int argc, char* argv[])
         PNetwork net = ann_make_network(OPT_SGD, LOSS_CATEGORICAL_CROSS_ENTROPY);
         TESTEX("CE network created", net != NULL);
         
+        ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net, 6, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
         ann_set_learning_rate(net, 0.05f);
@@ -70,6 +80,7 @@ void test_main(int argc, char* argv[])
         PTensor target = tensor_create_from_array(1, 1, simple_targets);
         
         PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
         
         ann_train_network(net, input, target, 1);

@@ -187,6 +187,11 @@ struct Layer
 	PTensor t_bias_grad;				// tensor of gradients for bias
 	PTensor t_bias_m;					// tensor of momentums for bias (Adam)
 	PTensor t_bias_v;					// tensor of velocities for bias (AdaGrad/RMSProp/Adam)
+
+	// Batched training tensors (batch_size × node_count)
+	PTensor t_batch_values;				// batch activations for forward pass
+	PTensor t_batch_dl_dz;				// batch gradients for backward pass
+	PTensor t_batch_z;					// batch pre-activation values (for activation derivatives)
 };
 
 //------------------------------
@@ -220,6 +225,8 @@ struct Network
 	Loss_func loss_func;				// the error function
 	Output_func print_func;				// print output function
 	Optimization_func optimize_func;	// learning rate/weight optimizer
+
+	unsigned current_batch_size;		// current allocated batch size for batch tensors
 };
 
 //------------------------------

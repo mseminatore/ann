@@ -426,6 +426,53 @@ should also work with appropriate build setup.
 The `USE_BLAS` define controls whether the provided scalar tensor code
 path is used or the BLAS code path.
 
+# Error Handling
+
+All public API functions return error codes to indicate success or failure. The library provides a callback mechanism for custom error logging and monitoring.
+
+## Error Codes
+
+| Code | Constant | Description |
+|------|----------|-------------|
+| 0 | `ERR_OK` | Success, no error |
+| 1 | `ERR_NULL_PTR` | NULL pointer passed to function |
+| 2 | `ERR_ALLOC` | Memory allocation failed |
+| 3 | `ERR_INVALID` | Invalid parameter or state |
+| 4 | `ERR_IO` | File I/O error |
+| 5 | `ERR_FAIL` | General failure |
+
+Use `ann_strerror(code)` to convert an error code to a human-readable message.
+
+## Error Callback
+
+Install a custom callback to receive error notifications:
+
+```c
+// Define your error handler
+void my_error_handler(int code, const char *msg, const char *func) {
+    fprintf(stderr, "[%s] Error %d: %s\n", func, code, msg);
+    // Optionally log to monitoring system, trigger alerts, etc.
+}
+
+// Install the callback
+ann_set_error_log_callback(my_error_handler);
+
+// Use the library - errors will invoke your callback
+PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+ann_add_layer(net, 0, LAYER_INPUT, ACTIVATION_NULL);  // Error: 0 nodes
+
+// Get current callback (for chaining)
+ErrorLogCallback prev = ann_get_error_log_callback();
+
+// Disable callback
+ann_clear_error_log_callback();
+```
+
+The callback signature is:
+```c
+typedef void (*ErrorLogCallback)(int error_code, const char *error_message, const char *function_name);
+```
+
 # Known Issues
 
 No known issues at this time.

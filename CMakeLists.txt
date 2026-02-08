@@ -19,7 +19,6 @@ add_test(NAME test_save_load COMMAND test_save_load)
 add_test(NAME test_optimizers COMMAND test_optimizers)
 add_test(NAME test_hypertune COMMAND test_hypertune)
 #add_test(NAME test_forward_pass COMMAND test_forward_pass)
-#add_test(NAME test_training_convergence COMMAND test_training_convergence)
 
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
@@ -47,11 +46,13 @@ if ( USE_BLAS OR USE_CBLAS)
         # CBLAS requires C11 atomics
         if ("${CMAKE_C_COMPILER_ID}" STREQUAL "MSVC")
             add_compile_options(/std:c11 /experimental:c11atomics)
+            include_directories("C:/opt/cblas/include")
+            link_directories("C:/opt/cblas/lib")
         else()
             add_compile_options(-std=c11)
+            include_directories("/opt/cblas/include")
+            link_directories("/opt/cblas/lib")
         endif()
-        include_directories("/opt/cblas/include")
-        link_directories("/opt/cblas/lib")
     else()
         set(BLAS_LIB "openblas")
         message("OpenBLAS library used")
@@ -112,9 +113,10 @@ target_link_libraries(test_hypertune ann_hypertune libann ${BLAS_LIB} ${MATH_LIB
 add_executable(test_optimizers test_optimizers.c testy/test_main.c)
 target_link_libraries(test_optimizers libann ${BLAS_LIB} ${MATH_LIB})
 
+add_executable(test_training_convergence test_training_convergence.c testy/test_main.c)
+target_link_libraries(test_training_convergence libann ${BLAS_LIB} ${MATH_LIB})
+add_test(NAME test_training_convergence COMMAND test_training_convergence)
+
 #add_executable(test_forward_pass test_forward_pass.c testy/test_main.c)
 #target_link_libraries(test_forward_pass ann ${BLAS_LIB} ${MATH_LIB})
-
-#add_executable(test_training_convergence test_training_convergence.c testy/test_main.c)
-#target_link_libraries(test_training_convergence ann ${BLAS_LIB} ${MATH_LIB})
 

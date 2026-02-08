@@ -1211,6 +1211,100 @@ PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTe
 }
 
 //-------------------------------
+// gemm with B transposed: C = alpha * A * B^T + beta * C
+// For batched forward pass: Y = X * W^T
+// A is M×K, B is N×K (transposed to K×N), C is M×N
+//-------------------------------
+PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real beta, PTensor C)
+{
+	if (!A || !B || !C)
+		return NULL;
+
+	// Check dimensions: A(M×K) * B^T(K×N) = C(M×N), where B is stored as N×K
+	if (A->cols != B->cols || A->rows != C->rows || B->rows != C->cols)
+		return NULL;
+
+	int M = A->rows;
+	int K = A->cols;
+	int N = B->rows;
+
+	if (M == 0 || N == 0 || K == 0)
+		return C;
+
+	// Note: Many CBLAS implementations don't support CblasTrans properly,
+	// so we use a scalar implementation for transposed operations.
+	// This is still efficient for typical neural network batch sizes.
+
+	// First scale C by beta
+	for (int i = 0; i < M * N; i++)
+		C->values[i] *= beta;
+
+	// Then add alpha * A * B^T
+	for (int i = 0; i < M; i++)
+	{
+		for (int j = 0; j < N; j++)
+		{
+			real sum = 0;
+			for (int k = 0; k < K; k++)
+			{
+				// A[i,k] * B^T[k,j] = A[i,k] * B[j,k]
+				sum += A->values[i * K + k] * B->values[j * K + k];
+			}
+			C->values[i * N + j] += alpha * sum;
+		}
+	}
+
+	return C;
+}
+
+//-------------------------------
+// gemm with A transposed: C = alpha * A^T * B + beta * C
+// For batched gradient computation: dW = delta^T * A
+// A is K×M (transposed to M×K), B is K×N, C is M×N
+//-------------------------------
+PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real beta, PTensor C)
+{
+	if (!A || !B || !C)
+		return NULL;
+
+	// Check dimensions: A^T(M×K) * B(K×N) = C(M×N), where A is stored as K×M
+	if (A->rows != B->rows || A->cols != C->rows || B->cols != C->cols)
+		return NULL;
+
+	int M = A->cols;
+	int K = A->rows;
+	int N = B->cols;
+
+	if (M == 0 || N == 0 || K == 0)
+		return C;
+
+	// Note: Many CBLAS implementations don't support CblasTrans properly,
+	// so we use a scalar implementation for transposed operations.
+	// This is still efficient for typical neural network batch sizes.
+
+	// First scale C by beta
+	for (int i = 0; i < M * N; i++)
+		C->values[i] *= beta;
+
+	// Then add alpha * A^T * B
+	for (int i = 0; i < M; i++)
+	{
+		for (int j = 0; j < N; j++)
+		{
+			real sum = 0;
+			for (int k = 0; k < K; k++)
+			{
+				// A^T[i,k] * B[k,j] = A[k,i] * B[k,j]
+				sum += A->values[k * M + i] * B->values[k * N + j];
+			}
+			C->values[i * N + j] += alpha * sum;
+		}
+	}
+
+	return C;
+}
+
+//-------------------------------
 // write tensor to CSV file
 //-------------------------------
 int tensor_save_to_file(const PTensor t, const char *filename)

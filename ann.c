@@ -574,6 +574,94 @@ static void eval_network(PNetwork pnet)
 		softmax(pnet);
 }
 
+//---------------------------------------------
+// Batched softmax: apply softmax per row of batch matrix
+// Input/output: t_batch_values[batch × nodes]
+//---------------------------------------------
+static void softmax_batched(PNetwork pnet, int batch_size)
+{
+	int output_layer = pnet->layer_count - 1;
+	int node_count = pnet->layers[output_layer].node_count;
+	PTensor batch = pnet->layers[output_layer].t_batch_values;
+
+	for (int b = 0; b < batch_size; b++)
+	{
+		real sum = (real)0.0;
+		int row_offset = b * node_count;
+
+		// Compute exp and sum for this sample
+		for (int n = 0; n < node_count; n++)
+		{
+			batch->values[row_offset + n] = (real)exp(batch->values[row_offset + n]);
+			sum += batch->values[row_offset + n];
+		}
+
+		// Normalize
+		real inv_sum = (real)1.0 / sum;
+		for (int n = 0; n < node_count; n++)
+		{
+			batch->values[row_offset + n] *= inv_sum;
+		}
+	}
+}
+
+//---------------------------------------------
+// Batched forward propagation
+// Input: layers[0].t_batch_values has input data [batch_size × input_nodes]
+// Output: all layers have t_batch_values populated
+// Also stores pre-activation values in t_batch_z for backprop derivatives
+//---------------------------------------------
+static void eval_network_batched(PNetwork pnet, int batch_size)
+{
+	if (!pnet)
+		return;
+
+	// Loop over non-output layers (weights connect layer i to layer i+1)
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		PTensor X = pnet->layers[layer].t_batch_values;      // [batch × in_nodes]
+		PTensor W = pnet->layers[layer].t_weights;           // [out_nodes × in_nodes]
+		PTensor Y = pnet->layers[layer + 1].t_batch_values;  // [batch × out_nodes]
+		PTensor Z = pnet->layers[layer + 1].t_batch_z;       // [batch × out_nodes]
+		PTensor bias = pnet->layers[layer].t_bias;           // [out_nodes × 1]
+		int out_nodes = pnet->layers[layer + 1].node_count;
+
+		// Y = X * W^T (gemm with B transposed)
+		// X is [batch × in], W is [out × in], Y is [batch × out]
+		tensor_gemm_transB((real)1.0, X, W, (real)0.0, Y);
+
+		// Add bias to each row and save pre-activation Z
+		for (int b = 0; b < batch_size; b++)
+		{
+			int row_offset = b * out_nodes;
+			for (int n = 0; n < out_nodes; n++)
+			{
+				Y->values[row_offset + n] += bias->values[n];
+				// Store pre-activation for derivative computation
+				Z->values[row_offset + n] = Y->values[row_offset + n];
+			}
+		}
+
+		// Apply activation row-wise (skip softmax here, handled separately)
+		Activation_func act_func = pnet->layers[layer + 1].activation_func;
+		if (pnet->layers[layer + 1].activation != ACTIVATION_SOFTMAX)
+		{
+			for (int b = 0; b < batch_size; b++)
+			{
+				int row_offset = b * out_nodes;
+				for (int n = 0; n < out_nodes; n++)
+				{
+					Y->values[row_offset + n] = act_func(Y->values[row_offset + n]);
+				}
+			}
+		}
+	}
+
+	// Apply softmax on output if requested
+	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
+		softmax_batched(pnet, batch_size);
+}
+
 //-------------------------------------------
 // back propagate output error to prev layer
 //-------------------------------------------
@@ -783,6 +871,353 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 	}
 }
 
+//-------------------------------------------
+// Batched output layer backpropagation
+// Computes: delta = predicted - target for full batch
+// Gradient: dW = delta^T * A_prev (using gemm)
+// Bias gradient: column sums of delta
+// Propagates: dl_dz_prev = delta * W
+//-------------------------------------------
+static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor targets)
+{
+	int output_layer = pnet->layer_count - 1;
+	PLayer layer = &pnet->layers[output_layer];
+	PLayer prev_layer = &pnet->layers[output_layer - 1];
+	
+	int out_nodes = layer->node_count;
+	int in_nodes = prev_layer->node_count;
+	
+	PTensor Y = layer->t_batch_values;           // [batch × out] predictions
+	PTensor A_prev = prev_layer->t_batch_values; // [batch × in] previous activations
+	PTensor delta = layer->t_batch_dl_dz;        // [batch × out] output delta
+	
+	// Compute delta = T - Y (same convention as original: gradient direction for descent)
+	real total_loss = (real)0.0;
+	
+	for (int b = 0; b < batch_size; b++)
+	{
+		int out_offset = b * out_nodes;
+		int target_offset = b * out_nodes;
+		
+		for (int n = 0; n < out_nodes; n++)
+		{
+			real y = Y->values[out_offset + n];
+			real t = targets->values[target_offset + n];
+			
+			// delta = t - y (matches original convention for gradient descent)
+			delta->values[out_offset + n] = t - y;
+			
+			// Accumulate loss (cross-entropy or MSE based on loss function)
+			if (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY)
+			{
+				// Cross-entropy: -sum(t * log(y))
+				if (y > (real)1e-7)
+					total_loss -= t * (real)log(y);
+			}
+			else
+			{
+				// MSE: sum((y - t)^2)
+				real diff = y - t;
+				total_loss += diff * diff;
+			}
+		}
+	}
+	
+	// Average loss over batch
+	if (pnet->loss_type == LOSS_MSE)
+		total_loss /= (real)(batch_size * out_nodes);
+	else
+		total_loss /= (real)batch_size;
+	
+	// Gradient: dW = delta^T * A_prev / batch_size
+	// delta is [batch × out], A_prev is [batch × in]
+	// delta^T is [out × batch], result is [out × in]
+	tensor_gemm_transA((real)1.0, delta, A_prev, (real)1.0, prev_layer->t_gradients);
+	
+	// Bias gradient: sum of delta columns
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * out_nodes;
+		for (int n = 0; n < out_nodes; n++)
+		{
+			prev_layer->t_bias_grad->values[n] += delta->values[offset + n];
+		}
+	}
+	
+	// Propagate to previous layer: dl_dz_prev = delta * W
+	// delta is [batch × out], W is [out × in]
+	// Result is [batch × in]
+	tensor_gemm((real)1.0, delta, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+	
+	return total_loss;
+}
+
+//-------------------------------------------
+// Batched hidden layer backpropagation for sigmoid
+// Applies sigmoid derivative: dL/dz = dL/da * a * (1 - a)
+// Then computes gradient and propagates
+//-------------------------------------------
+static void back_propagate_sigmoid_batched(PNetwork pnet, int batch_size, int layer_idx)
+{
+	PLayer layer = &pnet->layers[layer_idx];
+	PLayer prev_layer = &pnet->layers[layer_idx - 1];
+	
+	int nodes = layer->node_count;
+	int prev_nodes = prev_layer->node_count;
+	
+	PTensor dl_dz = layer->t_batch_dl_dz;        // [batch × nodes]
+	PTensor A = layer->t_batch_values;           // [batch × nodes] activations
+	PTensor A_prev = prev_layer->t_batch_values; // [batch × prev_nodes]
+	
+	// Apply sigmoid derivative: dL/dz *= a * (1 - a)
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			real a = A->values[offset + n];
+			real deriv = a * ((real)1.0 - a);
+			dl_dz->values[offset + n] *= deriv;
+		}
+	}
+	
+	// Gradient: dW += dl_dz^T * A_prev
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	
+	// Bias gradient: sum of dl_dz columns
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			prev_layer->t_bias_grad->values[n] += dl_dz->values[offset + n];
+		}
+	}
+	
+	// Propagate: dl_dz_prev = dl_dz * W
+	if (layer_idx > 1)  // Don't propagate to input layer
+	{
+		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+	}
+}
+
+//-------------------------------------------
+// Batched hidden layer backpropagation for ReLU
+//-------------------------------------------
+static void back_propagate_relu_batched(PNetwork pnet, int batch_size, int layer_idx)
+{
+	PLayer layer = &pnet->layers[layer_idx];
+	PLayer prev_layer = &pnet->layers[layer_idx - 1];
+	
+	int nodes = layer->node_count;
+	
+	PTensor dl_dz = layer->t_batch_dl_dz;
+	PTensor Z = layer->t_batch_z;  // Pre-activation values
+	PTensor A_prev = prev_layer->t_batch_values;
+	
+	// Apply ReLU derivative: dL/dz *= (z > 0 ? 1 : 0)
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			if (Z->values[offset + n] <= (real)0.0)
+				dl_dz->values[offset + n] = (real)0.0;
+		}
+	}
+	
+	// Gradient: dW += dl_dz^T * A_prev
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	
+	// Bias gradient
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			prev_layer->t_bias_grad->values[n] += dl_dz->values[offset + n];
+		}
+	}
+	
+	// Propagate
+	if (layer_idx > 1)
+	{
+		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+	}
+}
+
+//-------------------------------------------
+// Batched hidden layer backpropagation for Leaky ReLU
+//-------------------------------------------
+static void back_propagate_leaky_relu_batched(PNetwork pnet, int batch_size, int layer_idx)
+{
+	PLayer layer = &pnet->layers[layer_idx];
+	PLayer prev_layer = &pnet->layers[layer_idx - 1];
+	
+	int nodes = layer->node_count;
+	
+	PTensor dl_dz = layer->t_batch_dl_dz;
+	PTensor Z = layer->t_batch_z;
+	PTensor A_prev = prev_layer->t_batch_values;
+	
+	// Apply Leaky ReLU derivative: dL/dz *= (z > 0 ? 1 : 0.01)
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			real deriv = Z->values[offset + n] > (real)0.0 ? (real)1.0 : (real)0.01;
+			dl_dz->values[offset + n] *= deriv;
+		}
+	}
+	
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			prev_layer->t_bias_grad->values[n] += dl_dz->values[offset + n];
+		}
+	}
+	
+	if (layer_idx > 1)
+	{
+		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+	}
+}
+
+//-------------------------------------------
+// Batched hidden layer backpropagation for Tanh
+//-------------------------------------------
+static void back_propagate_tanh_batched(PNetwork pnet, int batch_size, int layer_idx)
+{
+	PLayer layer = &pnet->layers[layer_idx];
+	PLayer prev_layer = &pnet->layers[layer_idx - 1];
+	
+	int nodes = layer->node_count;
+	
+	PTensor dl_dz = layer->t_batch_dl_dz;
+	PTensor A = layer->t_batch_values;  // tanh output
+	PTensor A_prev = prev_layer->t_batch_values;
+	
+	// Apply tanh derivative: dL/dz *= (1 - a^2)
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			real a = A->values[offset + n];
+			real deriv = (real)1.0 - a * a;
+			dl_dz->values[offset + n] *= deriv;
+		}
+	}
+	
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			prev_layer->t_bias_grad->values[n] += dl_dz->values[offset + n];
+		}
+	}
+	
+	if (layer_idx > 1)
+	{
+		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+	}
+}
+
+//-------------------------------------------
+// Batched hidden layer backpropagation for Softsign
+//-------------------------------------------
+static void back_propagate_softsign_batched(PNetwork pnet, int batch_size, int layer_idx)
+{
+	PLayer layer = &pnet->layers[layer_idx];
+	PLayer prev_layer = &pnet->layers[layer_idx - 1];
+	
+	int nodes = layer->node_count;
+	
+	PTensor dl_dz = layer->t_batch_dl_dz;
+	PTensor A = layer->t_batch_values;  // softsign output
+	PTensor A_prev = prev_layer->t_batch_values;
+	
+	// Apply softsign derivative: dL/dz *= (1 - |a|)^2
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			real a = A->values[offset + n];
+			real one_minus_abs = (real)1.0 - (real)fabs(a);
+			real deriv = one_minus_abs * one_minus_abs;
+			dl_dz->values[offset + n] *= deriv;
+		}
+	}
+	
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			prev_layer->t_bias_grad->values[n] += dl_dz->values[offset + n];
+		}
+	}
+	
+	if (layer_idx > 1)
+	{
+		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+	}
+}
+
+//-------------------------------------------
+// Batched backpropagation through all layers
+// Returns total loss for the batch
+//-------------------------------------------
+static real back_propagate_batched(PNetwork pnet, int batch_size, PTensor targets)
+{
+	int output_layer = pnet->layer_count - 1;
+	
+	// Output layer backprop (returns loss)
+	real loss = back_propagate_output_batched(pnet, batch_size, targets);
+	
+	// Hidden layers backprop (from output-1 to layer 1)
+	for (int layer = output_layer - 1; layer > 0; layer--)
+	{
+		Activation_type act = pnet->layers[layer].activation;
+		
+		switch (act)
+		{
+		case ACTIVATION_SIGMOID:
+			back_propagate_sigmoid_batched(pnet, batch_size, layer);
+			break;
+		case ACTIVATION_RELU:
+			back_propagate_relu_batched(pnet, batch_size, layer);
+			break;
+		case ACTIVATION_LEAKY_RELU:
+			back_propagate_leaky_relu_batched(pnet, batch_size, layer);
+			break;
+		case ACTIVATION_TANH:
+			back_propagate_tanh_batched(pnet, batch_size, layer);
+			break;
+		case ACTIVATION_SOFTSIGN:
+			back_propagate_softsign_batched(pnet, batch_size, layer);
+			break;
+		default:
+			// Default to sigmoid behavior
+			back_propagate_sigmoid_batched(pnet, batch_size, layer);
+			break;
+		}
+	}
+	
+	return loss;
+}
+
 //-------------------------------------------------
 // train the network over a single input/output set
 //-------------------------------------------------
@@ -812,6 +1247,60 @@ static real train_pass_network(PNetwork pnet, PTensor inputs, PTensor outputs)
 	back_propagate(pnet, outputs);
 
 	return loss;
+}
+
+//-----------------------------------------------
+// Allocate or reallocate batch tensors for all layers
+// Called when batch size changes during training
+// Returns ERR_OK on success, error code on failure
+//-----------------------------------------------
+static int ensure_batch_tensors(PNetwork pnet, unsigned batch_size)
+{
+	if (!pnet)
+		return ERR_NULL_PTR;
+
+	// Already allocated with correct size
+	if (pnet->current_batch_size == batch_size)
+		return ERR_OK;
+
+	// Allocate or reallocate batch tensors for each layer
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		int nodes = pnet->layers[layer].node_count;
+
+		// Free existing tensors if present
+		tensor_free(pnet->layers[layer].t_batch_values);
+		tensor_free(pnet->layers[layer].t_batch_dl_dz);
+		tensor_free(pnet->layers[layer].t_batch_z);
+
+		// Allocate new tensors [batch_size × nodes]
+		pnet->layers[layer].t_batch_values = tensor_create(batch_size, nodes);
+		if (!pnet->layers[layer].t_batch_values)
+		{
+			invoke_error_callback(ERR_ALLOC, "ensure_batch_tensors");
+			return ERR_ALLOC;
+		}
+
+		// Only non-input layers need gradient and pre-activation tensors
+		if (layer > 0)
+		{
+			pnet->layers[layer].t_batch_dl_dz = tensor_create(batch_size, nodes);
+			pnet->layers[layer].t_batch_z = tensor_create(batch_size, nodes);
+			if (!pnet->layers[layer].t_batch_dl_dz || !pnet->layers[layer].t_batch_z)
+			{
+				invoke_error_callback(ERR_ALLOC, "ensure_batch_tensors");
+				return ERR_ALLOC;
+			}
+		}
+		else
+		{
+			pnet->layers[layer].t_batch_dl_dz = NULL;
+			pnet->layers[layer].t_batch_z = NULL;
+		}
+	}
+
+	pnet->current_batch_size = batch_size;
+	return ERR_OK;
 }
 
 //-----------------------------------------------
@@ -1429,6 +1918,9 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 		pnet->layers[i].t_bias_grad	= NULL;
 		pnet->layers[i].t_bias_m	= NULL;
 		pnet->layers[i].t_bias_v	= NULL;
+		pnet->layers[i].t_batch_values	= NULL;
+		pnet->layers[i].t_batch_dl_dz	= NULL;
+		pnet->layers[i].t_batch_z		= NULL;
 	}
 
 	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
@@ -1441,6 +1933,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->epochLimit		= 10000;
 	pnet->train_iteration 	= 0;
 	pnet->batchSize			= DEFAULT_BATCH_SIZE;
+	pnet->current_batch_size = 0;	// batch tensors not yet allocated
 	pnet->print_func		= ann_puts;
 	pnet->optimizer			= opt;
 	pnet->max_gradient		= (real)0.0;		// gradient clipping disabled by default
@@ -1519,8 +2012,6 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	int converged = 0;
 	real loss;
 	unsigned epoch = 0;
-	unsigned correct = 0;
-	int row;
 
 	// create indices for shuffling the inputs and outputs
 	int *input_indices = alloca(rows * sizeof(int));
@@ -1529,20 +2020,32 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		input_indices[i] = i;
 	}
 
-	int input_node_count = (pnet->layers[0].node_count);
-	int output_node_count = (pnet->layers[pnet->layer_count - 1].node_count);
+	int input_node_count = pnet->layers[0].node_count;
+	int output_node_count = pnet->layers[pnet->layer_count - 1].node_count;
 
-	// validation data
-	//PTensor x_valid = tensor_slice_rows(inputs, 50000);
-	//PTensor y_valid = tensor_slice_rows(outputs, 50000);
+	// If batch size is larger than dataset, use dataset size as batch
+	unsigned actual_batch_size = pnet->batchSize;
+	if (actual_batch_size > (unsigned)rows)
+		actual_batch_size = (unsigned)rows;
+	
+	int batch_count = rows / actual_batch_size;
+	if (batch_count == 0)
+		batch_count = 1;  // At least one batch
 
-	// tensors to hold input/output batches
-	//PTensor input_batch	= tensor_create(pnet->batchSize, input_node_count);
-	//PTensor output_batch	= tensor_create(pnet->batchSize, output_node_count);
-	PTensor input_batch		= tensor_create(1, input_node_count);
-	PTensor output_batch	= tensor_create(1, output_node_count);
+	// Ensure batch tensors are allocated for the batch size
+	if (ensure_batch_tensors(pnet, actual_batch_size) != ERR_OK)
+	{
+		invoke_error_callback(ERR_ALLOC, "ann_train_network");
+		return 0.0;
+	}
 
-	int batch_count = rows / pnet->batchSize;
+	// Allocate batch target tensor for loss computation
+	PTensor batch_targets = tensor_create(actual_batch_size, output_node_count);
+	if (!batch_targets)
+	{
+		invoke_error_callback(ERR_ALLOC, "ann_train_network");
+		return 0.0;
+	}
 
 	// train over epochs until done
 	while (!converged)
@@ -1564,24 +2067,33 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 				tensor_fill(pnet->layers[layer].t_bias_grad, (real)0.0);
 			}
 
-			loss = (real)0.0;
-
-			for (unsigned batch_index = 0; batch_index < pnet->batchSize; batch_index++)
+			// Assemble batch input matrix into layers[0].t_batch_values
+			PTensor batch_input = pnet->layers[0].t_batch_values;
+			for (unsigned b = 0; b < actual_batch_size; b++)
 			{
-				row = batch * pnet->batchSize + batch_index;
-
-				// Copy input/output data for this sample
+				int row = batch * actual_batch_size + b;
 				int input_offset = input_indices[row] * input_node_count;
 				int output_offset = input_indices[row] * output_node_count;
 
-				memcpy(input_batch->values, inputs->values + input_offset, input_node_count * sizeof(real));
-				memcpy(output_batch->values, outputs->values + output_offset, output_node_count * sizeof(real));
+				// Copy input row to batch matrix
+				memcpy(batch_input->values + b * input_node_count,
+				       inputs->values + input_offset,
+				       input_node_count * sizeof(real));
 
-				loss += train_pass_network(pnet, input_batch, output_batch);
+				// Copy target row to batch targets
+				memcpy(batch_targets->values + b * output_node_count,
+				       outputs->values + output_offset,
+				       output_node_count * sizeof(real));
 			}
 
-			// average loss over batch-size
-			loss /= (real)pnet->batchSize;
+			// Batched forward pass
+			eval_network_batched(pnet, actual_batch_size);
+
+			// Batched backward pass (also computes loss)
+			loss = back_propagate_batched(pnet, actual_batch_size, batch_targets);
+
+			// Increment training iteration for Adam bias correction
+			pnet->train_iteration++;
 
 			// update weights based on batched gradients
 			// using the chosen optimization function
@@ -1616,11 +2128,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	}
 
 	// free up batch tensors
-	tensor_free(input_batch);
-	tensor_free(output_batch);
-
-	//tensor_free(x_valid);
-	//tensor_free(y_valid);
+	tensor_free(batch_targets);
 
 	time_t time_end = time(NULL);
 	double diff_t = (double)(time_end - time_start);
@@ -1839,6 +2347,11 @@ void ann_free_network(PNetwork pnet)
 			tensor_free(pnet->layers[layer].t_bias_m);
 			tensor_free(pnet->layers[layer].t_bias_v);
 		}
+
+		// Free batch tensors
+		tensor_free(pnet->layers[layer].t_batch_values);
+		tensor_free(pnet->layers[layer].t_batch_dl_dz);
+		tensor_free(pnet->layers[layer].t_batch_z);
 	}
 
 	free(pnet->layers);

@@ -2,6 +2,11 @@
 //
 // Copyright 2023 Mark Seminatore. All rights reserved.
 //------------------------------------------------------
+
+#if defined(_linux_) || defined(__linux__) || defined(__linux) || defined(__gnu_linux__)
+#define _POSIX_C_SOURCE 199309L
+#endif
+
 #include <stdio.h>
 #include <string.h>
 #include <time.h>

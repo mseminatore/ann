@@ -63,13 +63,9 @@ else()
     set(BLAS_LIB "")
 endif()
 
-# add the core library
-add_library(libann STATIC ann.c tensor.c)
+# add the core library (includes hypertuning)
+add_library(libann STATIC ann.c tensor.c ann_hypertune.c)
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
-
-# add the hypertuning library
-add_library(ann_hypertune STATIC ann_hypertune.c)
-target_link_libraries(ann_hypertune libann)# avoid liblibann on Unix
 
 #
 # add the executables
@@ -81,7 +77,7 @@ add_executable(mnist mnist.c)
 target_link_libraries(mnist libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(mnist_hypertune mnist_hypertune.c)
-target_link_libraries(mnist_hypertune libann ann_hypertune ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(mnist_hypertune libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(digit5x7 digit5x7.c)
 target_link_libraries(digit5x7 libann ${BLAS_LIB} ${MATH_LIB})
@@ -114,7 +110,7 @@ add_executable(test_save_load test_save_load.c testy/test_main.c)
 target_link_libraries(test_save_load libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_hypertune test_hypertune.c testy/test_main.c)
-target_link_libraries(test_hypertune ann_hypertune libann ${BLAS_LIB} ${MATH_LIB})
+target_link_libraries(test_hypertune libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_optimizers test_optimizers.c testy/test_main.c)
 target_link_libraries(test_optimizers libann ${BLAS_LIB} ${MATH_LIB})

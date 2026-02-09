@@ -476,12 +476,18 @@ typedef void (*ErrorLogCallback)(int error_code, const char *error_message, cons
 # Terminal Colors
 
 Training output uses ANSI color codes for improved readability:
-- **Headers** - Cyan/bold (Training ANN, Network shape)
+- **Headers** - Cyan/bold (Training ANN)
+- **Labels** - Dim (Network shape:, Optimizer:, etc.)
+- **Network shape** - Cyan
+- **Optimizer name** - Magenta
+- **Loss function name** - Yellow
+- **Batch size** - Blue
 - **Progress bar** - Green
-- **Loss** - Yellow
+- **Loss value** - Yellow
 - **Learning rate** - Blue  
 - **Epoch counter** - White/bold
-- **Convergence message** - Green
+- **Convergence message** - Green/bold
+- **Error messages** - Red/bold (to stderr)
 
 Colors are enabled by default on modern terminals (Windows 10+, Linux, macOS).
 

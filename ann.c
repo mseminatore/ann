@@ -173,6 +173,7 @@ static int colors_enabled(void)
 // ANSI color codes
 #define ANSI_RESET      "\033[0m"
 #define ANSI_BOLD       "\033[1m"
+#define ANSI_DIM        "\033[2m"
 #define ANSI_RED        "\033[31m"
 #define ANSI_GREEN      "\033[32m"
 #define ANSI_YELLOW     "\033[33m"
@@ -183,6 +184,7 @@ static int colors_enabled(void)
 #define ANSI_BOLD_GREEN "\033[1;32m"
 #define ANSI_BOLD_CYAN  "\033[1;36m"
 #define ANSI_BOLD_WHITE "\033[1;37m"
+#define ANSI_BOLD_RED   "\033[1;31m"
 
 // Helper macros for conditional color output
 #define COLOR(code) (colors_enabled() ? (code) : "")
@@ -512,9 +514,16 @@ void ann_clear_error_log_callback(void)
  */
 static void invoke_error_callback(int error_code, const char *function_name)
 {
+	const char *error_message = ann_strerror(error_code);
+	
 	if (g_error_log_callback != NULL) {
-		const char *error_message = ann_strerror(error_code);
 		g_error_log_callback(error_code, error_message, function_name);
+	} else {
+		// Default: print to stderr with color
+		if (colors_enabled())
+			fprintf(stderr, "%s[%s] Error %d: %s%s\n", ANSI_BOLD_RED, function_name, error_code, error_message, ANSI_RESET);
+		else
+			fprintf(stderr, "[%s] Error %d: %s\n", function_name, error_code, error_message);
 	}
 }
 
@@ -2034,7 +2043,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	ann_printf(pnet,	"\n%sTraining ANN%s\n"
 						"------------\n", COLOR(ANSI_BOLD_CYAN), RESET());
 	ann_print_props(pnet);
-	ann_printf(pnet, "  Training size: %s%u%s rows\n\n", COLOR(ANSI_WHITE), rows, RESET());
+	ann_printf(pnet, "%s  Training size:%s %s%u%s rows\n\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_WHITE), rows, RESET());
 
 	time_t time_start = time(NULL);
 
@@ -2818,7 +2827,7 @@ PNetwork ann_load_network(const char *filename)
 //-----------------------------------------------
 void ann_print_props(const PNetwork pnet)
 {
-	ann_printf(pnet, "  Network shape: %s", COLOR(ANSI_CYAN));
+	ann_printf(pnet, "%s  Network shape:%s %s", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_CYAN));
 
 	for (int i = 0; i < pnet->layer_count; i++)
 	{
@@ -2828,9 +2837,9 @@ void ann_print_props(const PNetwork pnet)
 	}
 	ann_printf(pnet, "%s\n", RESET());
 
-	ann_printf(pnet, "      Optimizer: %s%s%s\n", COLOR(ANSI_WHITE), optimizers[pnet->optimizer], RESET());
-	ann_printf(pnet, "  Loss function: %s%s%s\n", COLOR(ANSI_WHITE), loss_types[pnet->loss_type], RESET());
-	ann_printf(pnet, "Mini-batch size: %s%u%s\n", COLOR(ANSI_WHITE), pnet->batchSize, RESET());
+	ann_printf(pnet, "%s      Optimizer:%s %s%s%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_MAGENTA), optimizers[pnet->optimizer], RESET());
+	ann_printf(pnet, "%s  Loss function:%s %s%s%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_YELLOW), loss_types[pnet->loss_type], RESET());
+	ann_printf(pnet, "%sMini-batch size:%s %s%u%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_BLUE), pnet->batchSize, RESET());
 }
 
 //-----------------------------------------------

@@ -469,6 +469,36 @@ int ann_class_prediction(const real *outputs, int classes);
  */
 real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTensor outputs);
 
+/**
+ * Compute binary confusion matrix and Matthews Correlation Coefficient.
+ * 
+ * For binary classification problems (2 output classes).
+ * Class 0 = negative, Class 1 = positive.
+ * 
+ * @param pnet Trained network
+ * @param inputs Input tensor [rows × input_features]
+ * @param outputs Expected outputs tensor [rows × 2] (one-hot encoded)
+ * @param tp Pointer to store true positives count (can be NULL)
+ * @param fp Pointer to store false positives count (can be NULL)
+ * @param tn Pointer to store true negatives count (can be NULL)
+ * @param fn Pointer to store false negatives count (can be NULL)
+ * @return Matthews Correlation Coefficient [-1, 1], or 0 on error
+ */
+real ann_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs,
+                          int *tp, int *fp, int *tn, int *fn);
+
+/**
+ * Print formatted binary confusion matrix with MCC.
+ * 
+ * Outputs a formatted confusion matrix and the Matthews Correlation
+ * Coefficient to the network's output callback (or stdout).
+ * 
+ * @param pnet Trained network
+ * @param inputs Input tensor [rows × input_features]
+ * @param outputs Expected outputs tensor [rows × 2] (one-hot encoded)
+ */
+void ann_print_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs);
+
 // ============================================================================
 // CONFIGURATION AND PROPERTIES
 // ============================================================================

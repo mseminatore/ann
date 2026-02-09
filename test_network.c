@@ -359,5 +359,46 @@ void test_main(int argc, char *argv[]) {
     ann_free_network(simple_net);
     TESTEX("Complex networks freed successfully", 1);
 
+    // ========================================================================
+    // CONFUSION MATRIX TESTS
+    // ========================================================================
+    SUITE("Confusion Matrix");
+    COMMENT("Testing binary confusion matrix and MCC calculation...");
+    
+    // Create a simple binary classifier
+    PNetwork net_binary = ann_make_network(OPT_ADAM, LOSS_MSE);
+    ann_add_layer(net_binary, 2, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(net_binary, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+    ann_add_layer(net_binary, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    ann_set_epoch_limit(net_binary, 100);
+    ann_set_batch_size(net_binary, 4);
+    ann_set_learning_rate(net_binary, 0.5f);
+    
+    // Simple AND gate as binary classification
+    real x_data[] = {0, 0, 0, 1, 1, 0, 1, 1};
+    real y_data[] = {1, 0, 1, 0, 1, 0, 0, 1};  // [neg, pos] one-hot
+    PTensor x = tensor_create_from_array(4, 2, x_data);
+    PTensor y = tensor_create_from_array(4, 2, y_data);
+    
+    ann_train_network(net_binary, x, y, 4);
+    
+    int tp, fp, tn, fn;
+    real mcc = ann_confusion_matrix(net_binary, x, y, &tp, &fp, &tn, &fn);
+    
+    TESTEX("Confusion matrix returns valid counts", (tp + fp + tn + fn == 4));
+    TESTEX("MCC is in valid range [-1, 1]", (mcc >= -1.0f && mcc <= 1.0f));
+    
+    // Test NULL parameter handling
+    real mcc2 = ann_confusion_matrix(net_binary, x, y, NULL, NULL, NULL, NULL);
+    TESTEX("Confusion matrix works with NULL output params", (mcc2 == mcc));
+    
+    // Test error cases
+    real mcc_null = ann_confusion_matrix(NULL, x, y, NULL, NULL, NULL, NULL);
+    TESTEX("Confusion matrix returns 0 for NULL network", (mcc_null == 0.0f));
+    
+    tensor_free(x);
+    tensor_free(y);
+    ann_free_network(net_binary);
+
     TESTEX("Network creation and configuration tests completed", 1);
 }

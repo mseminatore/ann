@@ -2357,6 +2357,76 @@ real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTen
 }
 
 //------------------------------------
+// Compute binary confusion matrix and MCC
+//------------------------------------
+real ann_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs,
+                          int *tp, int *fp, int *tn, int *fn)
+{
+	if (!pnet || !inputs || !outputs)
+		return (real)0.0;
+	
+	if (inputs->rows != outputs->rows || outputs->cols != 2)
+		return (real)0.0;
+	
+	int true_pos = 0, false_pos = 0, true_neg = 0, false_neg = 0;
+	real pred[2];
+	
+	for (int i = 0; i < inputs->rows; i++)
+	{
+		ann_predict(pnet, &inputs->values[i * inputs->cols], pred);
+		int pred_class = pred[1] > pred[0] ? 1 : 0;
+		int actual_class = outputs->values[i * 2 + 1] > outputs->values[i * 2] ? 1 : 0;
+		
+		if (actual_class == 1 && pred_class == 1)
+			true_pos++;
+		else if (actual_class == 0 && pred_class == 1)
+			false_pos++;
+		else if (actual_class == 0 && pred_class == 0)
+			true_neg++;
+		else
+			false_neg++;
+	}
+	
+	if (tp) *tp = true_pos;
+	if (fp) *fp = false_pos;
+	if (tn) *tn = true_neg;
+	if (fn) *fn = false_neg;
+	
+	// MCC = (TP*TN - FP*FN) / sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN))
+	double num = (double)true_pos * true_neg - (double)false_pos * false_neg;
+	double denom = sqrt(
+		((double)true_pos + false_pos) *
+		((double)true_pos + false_neg) *
+		((double)true_neg + false_pos) *
+		((double)true_neg + false_neg)
+	);
+	
+	if (denom == 0.0)
+		return (real)0.0;
+	
+	return (real)(num / denom);
+}
+
+//------------------------------------
+// Print formatted confusion matrix with MCC
+//------------------------------------
+void ann_print_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs)
+{
+	int tp, fp, tn, fn;
+	real mcc = ann_confusion_matrix(pnet, inputs, outputs, &tp, &fp, &tn, &fn);
+	
+	ann_printf(pnet, "\n%sConfusion Matrix%s\n", COLOR(ANSI_BOLD_CYAN), RESET());
+	ann_printf(pnet, "                %sPredicted%s\n", COLOR(ANSI_DIM), RESET());
+	ann_printf(pnet, "              %sPos     Neg%s\n", COLOR(ANSI_WHITE), RESET());
+	ann_printf(pnet, "%sActual Pos%s  %s%5d   %5d%s\n", 
+		COLOR(ANSI_DIM), RESET(), COLOR(ANSI_GREEN), tp, fn, RESET());
+	ann_printf(pnet, "%s       Neg%s  %s%5d   %5d%s\n", 
+		COLOR(ANSI_DIM), RESET(), COLOR(ANSI_GREEN), fp, tn, RESET());
+	ann_printf(pnet, "\n%sMCC:%s %s%.4f%s\n", 
+		COLOR(ANSI_BOLD_WHITE), RESET(), COLOR(ANSI_CYAN), mcc, RESET());
+}
+
+//------------------------------------
 // predict class from onehot vector
 //------------------------------------
 int ann_class_prediction(const real *outputs, int classes)

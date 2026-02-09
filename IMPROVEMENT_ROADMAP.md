@@ -62,6 +62,12 @@ A prioritized list of improvements and enhancements for the library.
   - Uses inverted dropout (scale during training, no adjustment at inference)
   - Configurable per-layer dropout rates via `ann_set_layer_dropout()`
 
+- [ ] **L1/L2 Weight Regularization** *(~2-3 hours)*
+  - L2 (Ridge): Penalize large weights, reduces overfitting
+  - L1 (LASSO): Encourage sparse weights for feature selection
+  - Add `ann_set_weight_decay()` for L2, `ann_set_l1_regularization()` for L1
+  - Apply in all optimizers during weight update
+
 - [ ] **ONNX JSON Import (Round-Trip)** *(~8-10 hours)*
   - Import models from the JSON format libann exports via `ann_export_onnx()`
   - Enables model exchange and editing outside C code
@@ -105,6 +111,11 @@ A prioritized list of improvements and enhancements for the library.
   - [ ] Update tensor_gemm header comment (no longer "not fully implemented")
   - [ ] Add example usage for new optimizers in README
 
+- [ ] **Multi-class Confusion Matrix** *(~2-3 hours)*
+  - Extend `ann_confusion_matrix` to support N-class problems
+  - NxN matrix output with per-class precision/recall
+  - Multi-class MCC calculation
+
 - [ ] **Code Cleanup** *(~1-2 hours)*
   - [ ] Remove duplicate includes in ann.c (lines 28-35 and 107-113)
   - [ ] Remove commented-out debug code
@@ -117,6 +128,7 @@ A prioritized list of improvements and enhancements for the library.
     - Moved progress indicator outside inner loop (per-batch instead of per-sample)
   - [ ] **Optimize non-BLAS tensor operations:** *(~8-16 hours)*
     - [ ] `tensor_gemm`: Use loop tiling and i-k-j loop order for cache locality *(~4-6 hours)*
+    - [ ] Fuse `tensor_matvec` + `tensor_add` in `eval_network` (y = Wx + b in one pass)
     - [x] `tensor_matvec` transpose: Cache-friendly row-major access pattern + 4x loop unrolling
     - [x] Element-wise ops: Loop unrolling (4x) for tensor_add/sub/mul/square/fill
     - [x] `tensor_copy`: Use memcpy instead of loop

@@ -188,6 +188,9 @@ struct Layer
 	Activation_func activation_func;	// node activation function
 	BackPropagate_func back_prop_func;	// back propagation function for this layer
 
+	real dropout_rate;					// dropout rate for this layer (0.0 = disabled)
+	PTensor t_dropout_mask;				// dropout mask tensor (for batched training)
+
 	PTensor t_values;					// tensor of node values for the layer
 	PTensor t_weights;					// tensor of weights for the layer
 	PTensor t_v;						// tensor of velocities for optimizer
@@ -233,6 +236,9 @@ struct Network
 
 	real max_gradient;					// gradient clipping threshold (0 = disabled)
 	Weight_init_type weight_init;		// weight initialization strategy
+
+	real default_dropout;				// default dropout rate for hidden layers (0 = disabled)
+	int is_training;					// 1 = training mode (apply dropout), 0 = inference mode
 
 	Loss_func loss_func;				// the error function
 	Output_func print_func;				// print output function
@@ -629,6 +635,53 @@ real lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data);
  * @return Scheduled learning rate
  */
 real lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data);
+
+// ============================================================================
+// DROPOUT REGULARIZATION
+// ============================================================================
+
+/**
+ * Set the default dropout rate for all hidden layers.
+ * 
+ * Dropout randomly zeros out neurons during training to prevent overfitting.
+ * Uses inverted dropout: activations are scaled by 1/(1-rate) during training
+ * so no scaling is needed at inference time.
+ * 
+ * @param pnet Network to configure
+ * @param rate Dropout rate (0.0 = disabled, 0.5 = 50% dropout). Must be in [0, 1).
+ * 
+ * @note Only applies to hidden layers; input and output layers are not affected.
+ * @note Use ann_set_layer_dropout() to override the rate for specific layers.
+ * @see ann_set_layer_dropout, ann_set_training_mode
+ */
+void ann_set_dropout(PNetwork pnet, real rate);
+
+/**
+ * Set the dropout rate for a specific layer.
+ * 
+ * Overrides the default dropout rate for this layer.
+ * 
+ * @param pnet Network to configure
+ * @param layer Layer index (0 = input layer)
+ * @param rate Dropout rate (0.0 = disabled, 0.5 = 50% dropout). Must be in [0, 1).
+ * 
+ * @note Setting dropout on input or output layers has no effect.
+ */
+void ann_set_layer_dropout(PNetwork pnet, int layer, real rate);
+
+/**
+ * Set training/inference mode for the network.
+ * 
+ * In training mode (is_training=1), dropout is applied.
+ * In inference mode (is_training=0), dropout is disabled.
+ * 
+ * Training mode is automatically enabled during ann_train_network()
+ * and disabled after training completes.
+ * 
+ * @param pnet Network to configure
+ * @param is_training 1 for training mode, 0 for inference mode
+ */
+void ann_set_training_mode(PNetwork pnet, int is_training);
 
 /**
  * Get the number of layers in the network.

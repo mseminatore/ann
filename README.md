@@ -166,6 +166,30 @@ real my_scheduler(unsigned epoch, real base_lr, void *data) {
 ann_set_lr_scheduler(net, my_scheduler, NULL);
 ```
 
+## Dropout Regularization
+
+Dropout randomly zeros neurons during training to reduce overfitting. Uses 
+**inverted dropout**: values are scaled by `1/(1-rate)` during training so no 
+adjustment is needed at inference time.
+
+```c
+// Set default dropout rate for all hidden layers (0.5 = 50% dropout)
+ann_set_dropout(net, 0.5f);
+
+// Override for a specific layer (layer index, rate)
+ann_set_layer_dropout(net, 2, 0.3f);  // Layer 2: 30% dropout
+
+// Manually control training mode (automatic during ann_train_network)
+ann_set_training_mode(net, 1);  // Enable dropout
+ann_set_training_mode(net, 0);  // Disable dropout (inference)
+```
+
+**Notes:**
+- Dropout is only applied to **hidden layers** (not input or output)
+- Dropout is **automatically enabled** during `ann_train_network()` and disabled when training completes
+- Recommended rates: 0.2-0.5 for hidden layers, lower for layers with fewer neurons
+- Use dropout with larger networks to prevent overfitting
+
 # Hyperparameter Tuning
 
 The `ann_hypertune` module provides automated hyperparameter search to find 

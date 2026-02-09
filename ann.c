@@ -649,6 +649,61 @@ static void softmax_batched(PNetwork pnet, int batch_size)
 }
 
 //---------------------------------------------
+// Apply dropout to a layer's activations (inverted dropout)
+// Randomly zeros out neurons and scales survivors by 1/(1-rate)
+// Only applied during training; mask is stored for backprop
+//---------------------------------------------
+static void apply_dropout_batched(PNetwork pnet, int layer_idx, int batch_size)
+{
+	PLayer layer = &pnet->layers[layer_idx];
+	real rate = layer->dropout_rate;
+	
+	// Skip if dropout disabled or not training
+	if (rate <= (real)0.0 || !pnet->is_training)
+		return;
+	
+	int nodes = layer->node_count;
+	PTensor Y = layer->t_batch_values;
+	
+	// Allocate or reallocate dropout mask if needed
+	if (!layer->t_dropout_mask || 
+	    layer->t_dropout_mask->rows != batch_size ||
+	    layer->t_dropout_mask->cols != nodes)
+	{
+		tensor_free(layer->t_dropout_mask);
+		layer->t_dropout_mask = tensor_create(batch_size, nodes);
+	}
+	
+	if (!layer->t_dropout_mask)
+		return;
+	
+	PTensor mask = layer->t_dropout_mask;
+	real scale = (real)1.0 / ((real)1.0 - rate);
+	
+	// Generate dropout mask and apply inverted dropout
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			real r = (real)rand() / (real)RAND_MAX;
+			if (r < rate)
+			{
+				// Drop this neuron
+				mask->values[offset + n] = (real)0.0;
+				Y->values[offset + n] = (real)0.0;
+			}
+			else
+			{
+				// Keep and scale
+				mask->values[offset + n] = scale;
+				Y->values[offset + n] *= scale;
+			}
+		}
+	}
+}
+
+//---------------------------------------------
 // Batched forward propagation
 // Input: layers[0].t_batch_values has input data [batch_size × input_nodes]
 // Output: all layers have t_batch_values populated
@@ -697,6 +752,12 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 					Y->values[row_offset + n] = act_func(Y->values[row_offset + n]);
 				}
 			}
+		}
+		
+		// Apply dropout to hidden layers (not output layer)
+		if (layer + 1 < pnet->layer_count - 1)
+		{
+			apply_dropout_batched(pnet, layer + 1, batch_size);
 		}
 	}
 
@@ -996,6 +1057,31 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 }
 
 //-------------------------------------------
+// Apply dropout mask to gradients during backprop
+// Uses the same mask that was applied during forward pass
+//-------------------------------------------
+static void apply_dropout_mask_to_gradient(PLayer layer, int batch_size)
+{
+	if (!layer->t_dropout_mask || layer->dropout_rate <= (real)0.0)
+		return;
+	
+	PTensor dl_dz = layer->t_batch_dl_dz;
+	PTensor mask = layer->t_dropout_mask;
+	int nodes = layer->node_count;
+	
+	// Element-wise multiply gradient by dropout mask
+	// (mask contains 0 for dropped neurons, scale for kept neurons)
+	for (int b = 0; b < batch_size; b++)
+	{
+		int offset = b * nodes;
+		for (int n = 0; n < nodes; n++)
+		{
+			dl_dz->values[offset + n] *= mask->values[offset + n];
+		}
+	}
+}
+
+//-------------------------------------------
 // Batched hidden layer backpropagation for sigmoid
 // Applies sigmoid derivative: dL/dz = dL/da * a * (1 - a)
 // Then computes gradient and propagates
@@ -1006,11 +1092,13 @@ static void back_propagate_sigmoid_batched(PNetwork pnet, int batch_size, int la
 	PLayer prev_layer = &pnet->layers[layer_idx - 1];
 	
 	int nodes = layer->node_count;
-	int prev_nodes = prev_layer->node_count;
 	
 	PTensor dl_dz = layer->t_batch_dl_dz;        // [batch × nodes]
 	PTensor A = layer->t_batch_values;           // [batch × nodes] activations
 	PTensor A_prev = prev_layer->t_batch_values; // [batch × prev_nodes]
+	
+	// Apply dropout mask to gradient (if dropout was used in forward pass)
+	apply_dropout_mask_to_gradient(layer, batch_size);
 	
 	// Apply sigmoid derivative: dL/dz *= a * (1 - a)
 	for (int b = 0; b < batch_size; b++)
@@ -1058,6 +1146,9 @@ static void back_propagate_relu_batched(PNetwork pnet, int batch_size, int layer
 	PTensor Z = layer->t_batch_z;  // Pre-activation values
 	PTensor A_prev = prev_layer->t_batch_values;
 	
+	// Apply dropout mask to gradient (if dropout was used in forward pass)
+	apply_dropout_mask_to_gradient(layer, batch_size);
+	
 	// Apply ReLU derivative: dL/dz *= (z > 0 ? 1 : 0)
 	for (int b = 0; b < batch_size; b++)
 	{
@@ -1103,6 +1194,9 @@ static void back_propagate_leaky_relu_batched(PNetwork pnet, int batch_size, int
 	PTensor Z = layer->t_batch_z;
 	PTensor A_prev = prev_layer->t_batch_values;
 	
+	// Apply dropout mask to gradient (if dropout was used in forward pass)
+	apply_dropout_mask_to_gradient(layer, batch_size);
+	
 	// Apply Leaky ReLU derivative: dL/dz *= (z > 0 ? 1 : 0.01)
 	for (int b = 0; b < batch_size; b++)
 	{
@@ -1144,6 +1238,9 @@ static void back_propagate_tanh_batched(PNetwork pnet, int batch_size, int layer
 	PTensor dl_dz = layer->t_batch_dl_dz;
 	PTensor A = layer->t_batch_values;  // tanh output
 	PTensor A_prev = prev_layer->t_batch_values;
+	
+	// Apply dropout mask to gradient (if dropout was used in forward pass)
+	apply_dropout_mask_to_gradient(layer, batch_size);
 	
 	// Apply tanh derivative: dL/dz *= (1 - a^2)
 	for (int b = 0; b < batch_size; b++)
@@ -1187,6 +1284,9 @@ static void back_propagate_softsign_batched(PNetwork pnet, int batch_size, int l
 	PTensor dl_dz = layer->t_batch_dl_dz;
 	PTensor A = layer->t_batch_values;  // softsign output
 	PTensor A_prev = prev_layer->t_batch_values;
+	
+	// Apply dropout mask to gradient (if dropout was used in forward pass)
+	apply_dropout_mask_to_gradient(layer, batch_size);
 	
 	// Apply softsign derivative: dL/dz *= (1 - |a|)^2
 	for (int b = 0; b < batch_size; b++)
@@ -1964,6 +2064,8 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 		pnet->layers[i].t_batch_values	= NULL;
 		pnet->layers[i].t_batch_dl_dz	= NULL;
 		pnet->layers[i].t_batch_z		= NULL;
+		pnet->layers[i].dropout_rate	= (real)0.0;
+		pnet->layers[i].t_dropout_mask	= NULL;
 	}
 
 	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
@@ -1984,6 +2086,8 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->lr_scheduler		= NULL;				// no scheduler by default
 	pnet->lr_scheduler_data	= NULL;
 	pnet->base_learning_rate = (real)0.0;		// set when training starts
+	pnet->default_dropout	= (real)0.0;		// dropout disabled by default
+	pnet->is_training		= 0;				// inference mode by default
 
 	switch(opt)
 	{
@@ -2051,6 +2155,9 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	time_t time_start = time(NULL);
 
 	pnet->train_iteration = 0;
+	
+	// Enable training mode (for dropout)
+	pnet->is_training = 1;
 	
 	// Save base learning rate for schedulers
 	if (pnet->base_learning_rate == (real)0.0)
@@ -2194,6 +2301,9 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 
 	// free up batch tensors
 	tensor_free(batch_targets);
+	
+	// Disable training mode (for dropout)
+	pnet->is_training = 0;
 
 	time_t time_end = time(NULL);
 	double diff_t = (double)(time_end - time_start);
@@ -2395,6 +2505,63 @@ real lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data)
 }
 
 //------------------------------
+// set default dropout rate for hidden layers
+//------------------------------
+void ann_set_dropout(PNetwork pnet, real rate)
+{
+	if (!pnet)
+		return;
+	
+	// Clamp rate to valid range [0, 1)
+	if (rate < (real)0.0)
+		rate = (real)0.0;
+	if (rate >= (real)1.0)
+		rate = (real)0.99;
+	
+	pnet->default_dropout = rate;
+	
+	// Apply to all existing hidden layers that don't have a custom rate
+	for (int i = 1; i < pnet->layer_count - 1; i++)
+	{
+		if (pnet->layers[i].dropout_rate == (real)0.0)
+			pnet->layers[i].dropout_rate = rate;
+	}
+}
+
+//------------------------------
+// set dropout rate for a specific layer
+//------------------------------
+void ann_set_layer_dropout(PNetwork pnet, int layer, real rate)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return;
+	
+	// Don't allow dropout on input or output layers
+	if (pnet->layers[layer].layer_type == LAYER_INPUT ||
+	    pnet->layers[layer].layer_type == LAYER_OUTPUT)
+		return;
+	
+	// Clamp rate to valid range [0, 1)
+	if (rate < (real)0.0)
+		rate = (real)0.0;
+	if (rate >= (real)1.0)
+		rate = (real)0.99;
+	
+	pnet->layers[layer].dropout_rate = rate;
+}
+
+//------------------------------
+// set training/inference mode
+//------------------------------
+void ann_set_training_mode(PNetwork pnet, int is_training)
+{
+	if (!pnet)
+		return;
+	
+	pnet->is_training = is_training ? 1 : 0;
+}
+
+//------------------------------
 // get the number of layers
 //------------------------------
 int ann_get_layer_count(const PNetwork pnet)
@@ -2482,6 +2649,9 @@ void ann_free_network(PNetwork pnet)
 		tensor_free(pnet->layers[layer].t_batch_values);
 		tensor_free(pnet->layers[layer].t_batch_dl_dz);
 		tensor_free(pnet->layers[layer].t_batch_z);
+		
+		// Free dropout mask
+		tensor_free(pnet->layers[layer].t_dropout_mask);
 	}
 
 	free(pnet->layers);

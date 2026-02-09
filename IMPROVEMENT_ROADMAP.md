@@ -57,12 +57,17 @@ A prioritized list of improvements and enhancements for the library.
   - Would significantly improve training stability for deeper networks
   - Requires forward pass normalization, learnable gamma/beta, and backward pass gradients
 
-- [ ] **Dropout Regularization** *(~4-8 hours)*
+- [x] **Dropout Regularization** *(~4-8 hours)* ✓
   - Randomly zero out neurons during training to prevent overfitting
-  - Scale activations at inference time (or use inverted dropout)
-  - Add configurable dropout rate per layer
+  - Uses inverted dropout (scale during training, no adjustment at inference)
+  - Configurable per-layer dropout rates via `ann_set_layer_dropout()`
 
 - [ ] **ONNX JSON Import (Round-Trip)** *(~8-10 hours)*
+  - Import models from the JSON format libann exports via `ann_export_onnx()`
+  - Enables model exchange and editing outside C code
+  - Implementation:
+    - [ ] Add lightweight JSON parser (cJSON or minimal custom) *(~3-4 hours)*
+    - [ ] Parse graph topology and validate sequential dense structure *(~2-3 hours)*
   - Import models from the JSON format libann exports via `ann_export_onnx()`
   - Enables model exchange and editing outside C code
   - Implementation:

@@ -1231,10 +1231,14 @@ PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real be
 	if (M == 0 || N == 0 || K == 0)
 		return C;
 
-	// Note: Many CBLAS implementations don't support CblasTrans properly,
-	// so we use a scalar implementation for transposed operations.
-	// This is still efficient for typical neural network batch sizes.
-
+#ifdef USE_BLAS
+	// Row-major C(M×N) = A(M×K) * B^T(K×N) where B is stored as N×K
+	cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+		M, N, K,
+		alpha, A->values, K,     // lda = K (row stride of A)
+		B->values, K,            // ldb = K (row stride of B, which has K cols)
+		beta, C->values, N);     // ldc = N (row stride of C)
+#else
 	// First scale C by beta
 	for (int i = 0; i < M * N; i++)
 		C->values[i] *= beta;
@@ -1253,6 +1257,7 @@ PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real be
 			C->values[i * N + j] += alpha * sum;
 		}
 	}
+#endif
 
 	return C;
 }
@@ -1278,10 +1283,14 @@ PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real be
 	if (M == 0 || N == 0 || K == 0)
 		return C;
 
-	// Note: Many CBLAS implementations don't support CblasTrans properly,
-	// so we use a scalar implementation for transposed operations.
-	// This is still efficient for typical neural network batch sizes.
-
+#ifdef USE_BLAS
+	// Row-major C(M×N) = A^T(M×K) * B(K×N) where A is stored as K×M
+	cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+		M, N, K,
+		alpha, A->values, M,     // lda = M (row stride of A, which has M cols)
+		B->values, N,            // ldb = N (row stride of B)
+		beta, C->values, N);     // ldc = N (row stride of C)
+#else
 	// First scale C by beta
 	for (int i = 0; i < M * N; i++)
 		C->values[i] *= beta;
@@ -1300,6 +1309,7 @@ PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real be
 			C->values[i * N + j] += alpha * sum;
 		}
 	}
+#endif
 
 	return C;
 }

@@ -23,19 +23,18 @@ A prioritized list of improvements and enhancements for the library.
   - ~~Follow pattern from other optimizers that update both~~
   - All optimizers now properly update biases using their respective algorithms
 
-- [ ] **True Batched Training with GEMM** *(~35-50 hours)*
+- [x] **True Batched Training with GEMM** *(~35-50 hours)*
   - **Highest performance opportunity** - potential 10-100x speedup for typical batch sizes
-  - Currently: samples processed one-by-one with gemv, gradients accumulated
-  - Goal: process entire batch in parallel using gemm
-  - Required changes:
-    - [ ] Restructure layer storage - `t_values` from vector to matrix `(batch_size × nodes)` *(~8-12 hours)*
-    - [ ] Rewrite forward pass - use gemm: `Output = Input × Weights^T + Bias` *(~4-6 hours)*
-    - [ ] Rewrite backward pass - batch gradient computation with gemm *(~8-12 hours)*
-    - [ ] Update activation functions - operate on matrices row-wise *(~2-4 hours)*
-    - [ ] Update softmax - batch-aware per-row softmax *(~2-3 hours)*
-    - [ ] Update optimizers - verify compatibility with batched gradients *(~1-2 hours)*
-    - [ ] Testing & debugging *(~8-12 hours)*
-  - Note: rank-3 tensors not required if batch activations stored as 2D matrices
+  - Implementation complete:
+    - [x] Restructure layer storage - added `t_batch_values`, `t_batch_dl_dz`, `t_batch_z` matrices
+    - [x] Rewrite forward pass - use gemm: `Y = X × W^T + Bias` with `tensor_gemm_transB()`
+    - [x] Rewrite backward pass - batch gradient computation with `tensor_gemm_transA()`
+    - [x] Update activation functions - operate on matrices row-wise
+    - [x] Update softmax - batch-aware per-row softmax (`softmax_batched()`)
+    - [x] Update optimizers - verified compatibility with batched gradients
+    - [x] Testing & debugging - all 13 tests passing
+  - Added `tensor_gemm_transA()` and `tensor_gemm_transB()` with BLAS and scalar fallback
+  - Dynamic batch tensor allocation via `ensure_batch_tensors()` when batch size changes
 
 ## Medium Priority
 
@@ -58,12 +57,17 @@ A prioritized list of improvements and enhancements for the library.
   - Would significantly improve training stability for deeper networks
   - Requires forward pass normalization, learnable gamma/beta, and backward pass gradients
 
-- [ ] **Dropout Regularization** *(~4-8 hours)*
+- [x] **Dropout Regularization** *(~4-8 hours)* ✓
   - Randomly zero out neurons during training to prevent overfitting
-  - Scale activations at inference time (or use inverted dropout)
-  - Add configurable dropout rate per layer
+  - Uses inverted dropout (scale during training, no adjustment at inference)
+  - Configurable per-layer dropout rates via `ann_set_layer_dropout()`
 
 - [ ] **ONNX JSON Import (Round-Trip)** *(~8-10 hours)*
+  - Import models from the JSON format libann exports via `ann_export_onnx()`
+  - Enables model exchange and editing outside C code
+  - Implementation:
+    - [ ] Add lightweight JSON parser (cJSON or minimal custom) *(~3-4 hours)*
+    - [ ] Parse graph topology and validate sequential dense structure *(~2-3 hours)*
   - Import models from the JSON format libann exports via `ann_export_onnx()`
   - Enables model exchange and editing outside C code
   - Implementation:
@@ -90,12 +94,12 @@ A prioritized list of improvements and enhancements for the library.
   - BLAS helps with axpy but not element-wise sqrt/divide
   - Consider only after batched GEMM training is implemented
 
-- [ ] **Add Learning Rate Schedulers** *(~4-6 hours total)*
-  - Less critical when using Adam optimizer (has built-in adaptive rates)
-  - Consider adding:
-    - [ ] Step decay *(~1-2 hours)*
-    - [ ] Exponential decay *(~1-2 hours)*
-    - [ ] Cosine annealing *(~2 hours)*
+- [x] **Add Learning Rate Schedulers** *(~4-6 hours total)*
+  - Callback-based API via `ann_set_lr_scheduler()`
+  - Built-in schedulers:
+    - [x] Step decay: `lr_scheduler_step()` - halve LR every N epochs
+    - [x] Exponential decay: `lr_scheduler_exponential()` - LR *= gamma each epoch
+    - [x] Cosine annealing: `lr_scheduler_cosine()` - smooth decay to min_lr
 
 - [ ] **Documentation Updates** *(~1-2 hours)*
   - [ ] Update tensor_gemm header comment (no longer "not fully implemented")
@@ -148,3 +152,9 @@ _Move items here as they are finished:_
 - [x] Tensor optimizations: memcpy for `tensor_copy`, memset for zero-fill, 4x loop unrolling for element-wise ops and `tensor_outer`, direct array access in `tensor_argmax`
 - [x] `tensor_matvec` transpose: cache-friendly row-major access + 4x unrolling (eliminates column-stride access)
 - [x] Training loop hot path: memcpy for input copy, removed redundant variables, per-batch progress output
+- [x] **True Batched Training with GEMM** - process entire mini-batch in parallel using gemm for 10-100x speedup
+  - Added `tensor_gemm_transA()` and `tensor_gemm_transB()` for batched matrix operations
+  - Batch activation matrices: `t_batch_values`, `t_batch_dl_dz`, `t_batch_z` per layer
+  - Dynamic reallocation when batch size changes via `ensure_batch_tensors()`
+  - Batched forward pass: `Y = X × W^T + B` (single gemm per layer)
+  - Batched backward pass: gradient computation via `dW = delta^T × A` (single gemm per layer)

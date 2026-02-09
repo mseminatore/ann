@@ -1211,6 +1211,110 @@ PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTe
 }
 
 //-------------------------------
+// gemm with B transposed: C = alpha * A * B^T + beta * C
+// For batched forward pass: Y = X * W^T
+// A is M×K, B is N×K (transposed to K×N), C is M×N
+//-------------------------------
+PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real beta, PTensor C)
+{
+	if (!A || !B || !C)
+		return NULL;
+
+	// Check dimensions: A(M×K) * B^T(K×N) = C(M×N), where B is stored as N×K
+	if (A->cols != B->cols || A->rows != C->rows || B->rows != C->cols)
+		return NULL;
+
+	int M = A->rows;
+	int K = A->cols;
+	int N = B->rows;
+
+	if (M == 0 || N == 0 || K == 0)
+		return C;
+
+#ifdef USE_BLAS
+	// Row-major C(M×N) = A(M×K) * B^T(K×N) where B is stored as N×K
+	cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+		M, N, K,
+		alpha, A->values, K,     // lda = K (row stride of A)
+		B->values, K,            // ldb = K (row stride of B, which has K cols)
+		beta, C->values, N);     // ldc = N (row stride of C)
+#else
+	// First scale C by beta
+	for (int i = 0; i < M * N; i++)
+		C->values[i] *= beta;
+
+	// Then add alpha * A * B^T
+	for (int i = 0; i < M; i++)
+	{
+		for (int j = 0; j < N; j++)
+		{
+			real sum = 0;
+			for (int k = 0; k < K; k++)
+			{
+				// A[i,k] * B^T[k,j] = A[i,k] * B[j,k]
+				sum += A->values[i * K + k] * B->values[j * K + k];
+			}
+			C->values[i * N + j] += alpha * sum;
+		}
+	}
+#endif
+
+	return C;
+}
+
+//-------------------------------
+// gemm with A transposed: C = alpha * A^T * B + beta * C
+// For batched gradient computation: dW = delta^T * A
+// A is K×M (transposed to M×K), B is K×N, C is M×N
+//-------------------------------
+PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real beta, PTensor C)
+{
+	if (!A || !B || !C)
+		return NULL;
+
+	// Check dimensions: A^T(M×K) * B(K×N) = C(M×N), where A is stored as K×M
+	if (A->rows != B->rows || A->cols != C->rows || B->cols != C->cols)
+		return NULL;
+
+	int M = A->cols;
+	int K = A->rows;
+	int N = B->cols;
+
+	if (M == 0 || N == 0 || K == 0)
+		return C;
+
+#ifdef USE_BLAS
+	// Row-major C(M×N) = A^T(M×K) * B(K×N) where A is stored as K×M
+	cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+		M, N, K,
+		alpha, A->values, M,     // lda = M (row stride of A, which has M cols)
+		B->values, N,            // ldb = N (row stride of B)
+		beta, C->values, N);     // ldc = N (row stride of C)
+#else
+	// First scale C by beta
+	for (int i = 0; i < M * N; i++)
+		C->values[i] *= beta;
+
+	// Then add alpha * A^T * B
+	for (int i = 0; i < M; i++)
+	{
+		for (int j = 0; j < N; j++)
+		{
+			real sum = 0;
+			for (int k = 0; k < K; k++)
+			{
+				// A^T[i,k] * B[k,j] = A[k,i] * B[k,j]
+				sum += A->values[k * M + i] * B->values[k * N + j];
+			}
+			C->values[i * N + j] += alpha * sum;
+		}
+	}
+#endif
+
+	return C;
+}
+
+//-------------------------------
 // write tensor to CSV file
 //-------------------------------
 int tensor_save_to_file(const PTensor t, const char *filename)

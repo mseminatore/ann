@@ -122,6 +122,8 @@ ann_set_learning_rate | override the default learning rate
 ann_set_loss_function | set the loss function
 ann_set_batch_size | set the mini-batch size
 ann_set_epoch_limit | set the maximum number of epochs
+ann_set_lr_scheduler | set learning rate scheduler callback
+ann_set_gradient_clip | set gradient clipping threshold
 ann_get_layer_count | get the number of layers in the network
 ann_get_layer_nodes | get the number of nodes in a layer
 ann_get_layer_activation | get the activation type of a layer
@@ -133,6 +135,60 @@ ann_strerror | convert error code to human-readable message
 ann_set_error_log_callback | install error logging callback
 ann_get_error_log_callback | get current error callback
 ann_clear_error_log_callback | disable error logging callback
+
+## Learning Rate Schedulers
+
+Built-in schedulers adjust the learning rate during training:
+
+| Scheduler | Function | Description |
+|-----------|----------|-------------|
+| Step decay | `lr_scheduler_step` | Multiply LR by gamma every N epochs |
+| Exponential | `lr_scheduler_exponential` | Multiply LR by gamma each epoch |
+| Cosine | `lr_scheduler_cosine` | Smooth decay from base LR to min LR |
+
+```c
+// Step decay: halve LR every 10 epochs
+LRStepParams step_params = { .step_size = 10, .gamma = 0.5f };
+ann_set_lr_scheduler(net, lr_scheduler_step, &step_params);
+
+// Exponential decay: 5% reduction per epoch
+LRExponentialParams exp_params = { .gamma = 0.95f };
+ann_set_lr_scheduler(net, lr_scheduler_exponential, &exp_params);
+
+// Cosine annealing: decay to 0.0001 over 100 epochs
+LRCosineParams cos_params = { .T_max = 100, .min_lr = 0.0001f };
+ann_set_lr_scheduler(net, lr_scheduler_cosine, &cos_params);
+
+// Custom scheduler
+real my_scheduler(unsigned epoch, real base_lr, void *data) {
+    return base_lr / (1.0f + 0.01f * epoch);  // 1/t decay
+}
+ann_set_lr_scheduler(net, my_scheduler, NULL);
+```
+
+## Dropout Regularization
+
+Dropout randomly zeros neurons during training to reduce overfitting. Uses 
+**inverted dropout**: values are scaled by `1/(1-rate)` during training so no 
+adjustment is needed at inference time.
+
+```c
+// Set default dropout rate for all hidden layers (0.5 = 50% dropout)
+ann_set_dropout(net, 0.5f);
+
+// Override for a specific layer (layer index, rate)
+ann_set_layer_dropout(net, 2, 0.3f);  // Layer 2: 30% dropout
+
+// Manually control training mode (automatic during ann_train_network)
+ann_set_training_mode(net, 1);  // Enable dropout
+ann_set_training_mode(net, 0);  // Disable dropout (inference)
+```
+
+**Notes:**
+- Dropout is only applied to **hidden layers** (not input or output)
+- Dropout is **automatically enabled** during `ann_train_network()` and disabled when training completes
+- Recommended rates: 0.2-0.5 for hidden layers, lower for layers with fewer neurons
+- Use dropout with larger networks to prevent overfitting
 
 # Hyperparameter Tuning
 
@@ -425,6 +481,84 @@ should also work with appropriate build setup.
 
 The `USE_BLAS` define controls whether the provided scalar tensor code
 path is used or the BLAS code path.
+
+# Error Handling
+
+All public API functions return error codes to indicate success or failure. The library provides a callback mechanism for custom error logging and monitoring.
+
+## Error Codes
+
+| Code | Constant | Description |
+|------|----------|-------------|
+| 0 | `ERR_OK` | Success, no error |
+| 1 | `ERR_NULL_PTR` | NULL pointer passed to function |
+| 2 | `ERR_ALLOC` | Memory allocation failed |
+| 3 | `ERR_INVALID` | Invalid parameter or state |
+| 4 | `ERR_IO` | File I/O error |
+| 5 | `ERR_FAIL` | General failure |
+
+Use `ann_strerror(code)` to convert an error code to a human-readable message.
+
+## Error Callback
+
+Install a custom callback to receive error notifications:
+
+```c
+// Define your error handler
+void my_error_handler(int code, const char *msg, const char *func) {
+    fprintf(stderr, "[%s] Error %d: %s\n", func, code, msg);
+    // Optionally log to monitoring system, trigger alerts, etc.
+}
+
+// Install the callback
+ann_set_error_log_callback(my_error_handler);
+
+// Use the library - errors will invoke your callback
+PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+ann_add_layer(net, 0, LAYER_INPUT, ACTIVATION_NULL);  // Error: 0 nodes
+
+// Get current callback (for chaining)
+ErrorLogCallback prev = ann_get_error_log_callback();
+
+// Disable callback
+ann_clear_error_log_callback();
+```
+
+The callback signature is:
+```c
+typedef void (*ErrorLogCallback)(int error_code, const char *error_message, const char *function_name);
+```
+
+# Terminal Colors
+
+Training output uses ANSI color codes for improved readability:
+- **Headers** - Cyan/bold (Training ANN)
+- **Labels** - Dim (Network shape:, Optimizer:, etc.)
+- **Network shape** - Cyan
+- **Optimizer name** - Magenta
+- **Loss function name** - Yellow
+- **Batch size** - Blue
+- **Progress bar** - Green
+- **Loss value** - Yellow
+- **Learning rate** - Blue  
+- **Epoch counter** - White/bold
+- **Convergence message** - Green/bold
+- **Error messages** - Red/bold (to stderr)
+
+Colors are enabled by default on modern terminals (Windows 10+, Linux, macOS).
+
+To disable colors, set the `ANN_NO_COLOR` environment variable:
+
+```bash
+# Linux/macOS
+export ANN_NO_COLOR=1
+
+# Windows PowerShell
+$env:ANN_NO_COLOR = "1"
+
+# Windows Command Prompt
+set ANN_NO_COLOR=1
+```
 
 # Known Issues
 

@@ -35,7 +35,7 @@
 #define EPSILON 1e-5
 
 static int threads = -1;
-static int batch_size = 8;
+static int batch_size = 32;
 static int epoch_count = 5;
 static int export_onnx = 0;
 

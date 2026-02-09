@@ -3,10 +3,18 @@
 #include "tensor.h"
 #include "testy/test.h"
 
+#if defined(USE_CBLAS)
+#	include <cblas.h>
+#endif
+
 void test_main(int argc, char* argv[])
 {
     (void)argc;
     (void)argv;
+
+#if defined(USE_CBLAS)
+	cblas_init(CBLAS_DEFAULT_THREADS);
+#endif
 
     MODULE("Training Convergence");
 
@@ -19,6 +27,7 @@ void test_main(int argc, char* argv[])
         PTensor targets = tensor_create_from_array(4, 1, and_targets);
         
         PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
         ann_set_learning_rate(net, 0.5f);
@@ -48,6 +57,7 @@ void test_main(int argc, char* argv[])
         PTensor targets = tensor_create_from_array(4, 1, or_targets);
         
         PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
         ann_set_learning_rate(net, 0.5f);
@@ -76,6 +86,7 @@ void test_main(int argc, char* argv[])
         PTensor targets = tensor_create_from_array(4, 1, xor_targets);
         
         PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net, 8, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
@@ -100,6 +111,7 @@ void test_main(int argc, char* argv[])
         
         // Low LR
         PNetwork net_low = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net_low, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net_low, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net_low, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
         ann_set_learning_rate(net_low, 0.1f);
@@ -108,6 +120,7 @@ void test_main(int argc, char* argv[])
         
         // High LR
         PNetwork net_high = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net_high, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net_high, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net_high, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
         ann_set_learning_rate(net_high, 1.0f);
@@ -133,6 +146,7 @@ void test_main(int argc, char* argv[])
         
         // SGD
         PNetwork net_sgd = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net_sgd, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net_sgd, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net_sgd, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
         ann_set_learning_rate(net_sgd, 0.5f);
@@ -141,6 +155,7 @@ void test_main(int argc, char* argv[])
         
         // Momentum
         PNetwork net_mom = ann_make_network(OPT_MOMENTUM, LOSS_MSE);
+        ann_add_layer(net_mom, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net_mom, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net_mom, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
         ann_set_learning_rate(net_mom, 0.5f);
@@ -164,15 +179,17 @@ void test_main(int argc, char* argv[])
         PTensor inputs = tensor_create_from_array(4, 2, data);
         PTensor targets_t = tensor_create_from_array(4, 1, targets);
         
-        // Shallow (1 layer)
+        // Shallow (input + output only)
         PNetwork shallow = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(shallow, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(shallow, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
         ann_set_learning_rate(shallow, 0.5f);
         
         real shallow_loss = ann_train_network(shallow, inputs, targets_t, 4);
         
-        // Deep (3 layers)
+        // Deep (3 hidden layers)
         PNetwork deep = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(deep, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(deep, 8, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(deep, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(deep, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);

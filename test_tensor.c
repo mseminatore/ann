@@ -292,6 +292,116 @@ void test_main(int argc, char *argv[]) {
     TESTEX("tensor_fill sets all values correctly", all_twos);
 
     // ========================================================================
+    // GEMM TRANSPOSED OPERATIONS TESTS
+    // ========================================================================
+    SUITE("GEMM Transposed Operations");
+    COMMENT("Testing gemm with transposed operands for batched training...");
+
+    // Test tensor_gemm_transB: C = A * B^T
+    // A is 2x3, B is 4x3 (B^T is 3x4), C should be 2x4
+    {
+        PTensor A = tensor_create(2, 3);
+        A->values[0] = 1; A->values[1] = 2; A->values[2] = 3;  // row 0
+        A->values[3] = 4; A->values[4] = 5; A->values[5] = 6;  // row 1
+
+        PTensor B = tensor_create(4, 3);
+        B->values[0] = 1; B->values[1] = 0; B->values[2] = 0;   // row 0
+        B->values[3] = 0; B->values[4] = 1; B->values[5] = 0;   // row 1
+        B->values[6] = 0; B->values[7] = 0; B->values[8] = 1;   // row 2
+        B->values[9] = 1; B->values[10] = 1; B->values[11] = 1; // row 3
+
+        PTensor C = tensor_zeros(2, 4);
+        
+        tensor_gemm_transB(1.0f, A, B, 0.0f, C);
+        
+        // Expected: A * B^T
+        // Row 0: [1*1+2*0+3*0, 1*0+2*1+3*0, 1*0+2*0+3*1, 1*1+2*1+3*1] = [1, 2, 3, 6]
+        // Row 1: [4*1+5*0+6*0, 4*0+5*1+6*0, 4*0+5*0+6*1, 4*1+5*1+6*1] = [4, 5, 6, 15]
+        real expected_transB[] = {1, 2, 3, 6, 4, 5, 6, 15};
+        int transB_correct = 1;
+        for (int i = 0; i < 8; i++) {
+            if (fabs(C->values[i] - expected_transB[i]) > 1e-5f) {
+                printf("transB mismatch at %d: got %f expected %f\n", i, C->values[i], expected_transB[i]);
+                transB_correct = 0;
+            }
+        }
+        TESTEX("tensor_gemm_transB calculates correctly", transB_correct);
+
+        tensor_free(A);
+        tensor_free(B);
+        tensor_free(C);
+    }
+
+    // Test tensor_gemm_transA: C = A^T * B
+    // A is 3x2 (A^T is 2x3), B is 3x4, C should be 2x4
+    {
+        PTensor A = tensor_create(3, 2);
+        A->values[0] = 1; A->values[1] = 4;  // row 0: will become col 0 and col 1 of A^T
+        A->values[2] = 2; A->values[3] = 5;  // row 1
+        A->values[4] = 3; A->values[5] = 6;  // row 2
+        // A^T = [[1,2,3], [4,5,6]]
+
+        PTensor B = tensor_create(3, 4);
+        B->values[0] = 1; B->values[1] = 0; B->values[2] = 0; B->values[3] = 1;   // row 0
+        B->values[4] = 0; B->values[5] = 1; B->values[6] = 0; B->values[7] = 1;   // row 1
+        B->values[8] = 0; B->values[9] = 0; B->values[10] = 1; B->values[11] = 1; // row 2
+
+        PTensor C = tensor_zeros(2, 4);
+        
+        tensor_gemm_transA(1.0f, A, B, 0.0f, C);
+        
+        // Expected: A^T * B
+        // A^T row 0 [1,2,3] * B cols = [1*1+2*0+3*0, 1*0+2*1+3*0, 1*0+2*0+3*1, 1*1+2*1+3*1] = [1, 2, 3, 6]
+        // A^T row 1 [4,5,6] * B cols = [4*1+5*0+6*0, 4*0+5*1+6*0, 4*0+5*0+6*1, 4*1+5*1+6*1] = [4, 5, 6, 15]
+        real expected_transA[] = {1, 2, 3, 6, 4, 5, 6, 15};
+        int transA_correct = 1;
+        for (int i = 0; i < 8; i++) {
+            if (fabs(C->values[i] - expected_transA[i]) > 1e-5f) {
+                printf("transA mismatch at %d: got %f expected %f\n", i, C->values[i], expected_transA[i]);
+                transA_correct = 0;
+            }
+        }
+        TESTEX("tensor_gemm_transA calculates correctly", transA_correct);
+
+        tensor_free(A);
+        tensor_free(B);
+        tensor_free(C);
+    }
+
+    // Test tensor_gemm (standard, no transpose)
+    {
+        PTensor A = tensor_create(2, 3);
+        A->values[0] = 1; A->values[1] = 2; A->values[2] = 3;
+        A->values[3] = 4; A->values[4] = 5; A->values[5] = 6;
+
+        PTensor B = tensor_create(3, 2);
+        B->values[0] = 1; B->values[1] = 0;
+        B->values[2] = 0; B->values[3] = 1;
+        B->values[4] = 1; B->values[5] = 1;
+
+        PTensor C = tensor_zeros(2, 2);
+        
+        tensor_gemm(1.0f, A, B, 0.0f, C);
+        
+        // Expected: A * B
+        // [1,2,3] * [[1,0],[0,1],[1,1]] = [1*1+2*0+3*1, 1*0+2*1+3*1] = [4, 5]
+        // [4,5,6] * [[1,0],[0,1],[1,1]] = [4*1+5*0+6*1, 4*0+5*1+6*1] = [10, 11]
+        real expected_gemm[] = {4, 5, 10, 11};
+        int gemm_correct = 1;
+        for (int i = 0; i < 4; i++) {
+            if (fabs(C->values[i] - expected_gemm[i]) > 1e-5f) {
+                gemm_correct = 0;
+                break;
+            }
+        }
+        TESTEX("tensor_gemm calculates correctly", gemm_correct);
+
+        tensor_free(A);
+        tensor_free(B);
+        tensor_free(C);
+    }
+
+    // ========================================================================
     // ERROR HANDLING TESTS
     // ========================================================================
     SUITE("Error Handling");

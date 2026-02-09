@@ -165,6 +165,17 @@ typedef void(*Optimization_func) (PNetwork pnet);
 typedef real(*Activation_func) (real);
 typedef void(*BackPropagate_func)(PNetwork pnet, PLayer layer, PLayer prev_layer);
 
+/**
+ * Learning rate scheduler callback.
+ * Called at the start of each epoch to compute the learning rate.
+ *
+ * @param epoch Current epoch number (1-based)
+ * @param base_lr Initial/base learning rate
+ * @param user_data User-provided context (scheduler parameters)
+ * @return New learning rate for this epoch
+ */
+typedef real(*LRSchedulerFunc)(unsigned epoch, real base_lr, void *user_data);
+
 //------------------------------
 // Defines a layer in a network
 //------------------------------
@@ -177,6 +188,9 @@ struct Layer
 	Activation_func activation_func;	// node activation function
 	BackPropagate_func back_prop_func;	// back propagation function for this layer
 
+	real dropout_rate;					// dropout rate for this layer (0.0 = disabled)
+	PTensor t_dropout_mask;				// dropout mask tensor (for batched training)
+
 	PTensor t_values;					// tensor of node values for the layer
 	PTensor t_weights;					// tensor of weights for the layer
 	PTensor t_v;						// tensor of velocities for optimizer
@@ -187,6 +201,11 @@ struct Layer
 	PTensor t_bias_grad;				// tensor of gradients for bias
 	PTensor t_bias_m;					// tensor of momentums for bias (Adam)
 	PTensor t_bias_v;					// tensor of velocities for bias (AdaGrad/RMSProp/Adam)
+
+	// Batched training tensors (batch_size × node_count)
+	PTensor t_batch_values;				// batch activations for forward pass
+	PTensor t_batch_dl_dz;				// batch gradients for backward pass
+	PTensor t_batch_z;					// batch pre-activation values (for activation derivatives)
 };
 
 //------------------------------
@@ -199,6 +218,7 @@ struct Network
 
 	FILE *dbg;
 	real learning_rate;					// learning rate of network
+	real base_learning_rate;			// initial LR (for schedulers)
 	int layer_size;						// number of layers allocated
 	int weights_set;					// have the weights been initialized?
 	unsigned batchSize;					// size of mini-batches
@@ -217,9 +237,17 @@ struct Network
 	real max_gradient;					// gradient clipping threshold (0 = disabled)
 	Weight_init_type weight_init;		// weight initialization strategy
 
+	real default_dropout;				// default dropout rate for hidden layers (0 = disabled)
+	int is_training;					// 1 = training mode (apply dropout), 0 = inference mode
+
 	Loss_func loss_func;				// the error function
 	Output_func print_func;				// print output function
 	Optimization_func optimize_func;	// learning rate/weight optimizer
+
+	LRSchedulerFunc lr_scheduler;		// learning rate scheduler callback
+	void *lr_scheduler_data;			// user data for scheduler
+
+	unsigned current_batch_size;		// current allocated batch size for batch tensors
 };
 
 //------------------------------
@@ -530,6 +558,130 @@ void ann_set_batch_size(PNetwork pnet, unsigned batch_size);
  * @param limit Maximum number of epochs
  */
 void ann_set_epoch_limit(PNetwork pnet, unsigned limit);
+
+// ============================================================================
+// LEARNING RATE SCHEDULERS
+// ============================================================================
+
+/**
+ * Set a learning rate scheduler callback.
+ * 
+ * The scheduler is called at the start of each epoch to compute the learning rate.
+ * Pass NULL to disable scheduling (use constant learning rate).
+ * 
+ * @param pnet Network to configure
+ * @param scheduler Scheduler callback function, or NULL to disable
+ * @param user_data User-provided data passed to scheduler (e.g., parameters)
+ * 
+ * @see lr_scheduler_step, lr_scheduler_exponential, lr_scheduler_cosine
+ */
+void ann_set_lr_scheduler(PNetwork pnet, LRSchedulerFunc scheduler, void *user_data);
+
+/**
+ * Parameters for step decay scheduler.
+ * Reduces learning rate by factor every step_size epochs.
+ */
+typedef struct {
+	unsigned step_size;    // Epochs between LR reductions
+	real gamma;            // Multiplicative factor (e.g., 0.5 to halve LR)
+} LRStepParams;
+
+/**
+ * Parameters for exponential decay scheduler.
+ * LR = base_lr * (gamma ^ epoch)
+ */
+typedef struct {
+	real gamma;            // Decay rate per epoch (e.g., 0.95)
+} LRExponentialParams;
+
+/**
+ * Parameters for cosine annealing scheduler.
+ * Smoothly decays LR from base_lr to min_lr over T_max epochs.
+ */
+typedef struct {
+	unsigned T_max;        // Maximum number of epochs (full cycle)
+	real min_lr;           // Minimum learning rate at end of cycle
+} LRCosineParams;
+
+/**
+ * Step decay scheduler: halves LR every step_size epochs.
+ * new_lr = base_lr * (gamma ^ (epoch / step_size))
+ * 
+ * @param epoch Current epoch (1-based)
+ * @param base_lr Initial learning rate
+ * @param user_data Pointer to LRStepParams
+ * @return Scheduled learning rate
+ */
+real lr_scheduler_step(unsigned epoch, real base_lr, void *user_data);
+
+/**
+ * Exponential decay scheduler: multiplies LR by gamma each epoch.
+ * new_lr = base_lr * (gamma ^ epoch)
+ * 
+ * @param epoch Current epoch (1-based)
+ * @param base_lr Initial learning rate
+ * @param user_data Pointer to LRExponentialParams
+ * @return Scheduled learning rate
+ */
+real lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data);
+
+/**
+ * Cosine annealing scheduler: smooth decay to min_lr.
+ * new_lr = min_lr + (base_lr - min_lr) * (1 + cos(pi * epoch / T_max)) / 2
+ * 
+ * @param epoch Current epoch (1-based)
+ * @param base_lr Initial learning rate
+ * @param user_data Pointer to LRCosineParams
+ * @return Scheduled learning rate
+ */
+real lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data);
+
+// ============================================================================
+// DROPOUT REGULARIZATION
+// ============================================================================
+
+/**
+ * Set the default dropout rate for all hidden layers.
+ * 
+ * Dropout randomly zeros out neurons during training to prevent overfitting.
+ * Uses inverted dropout: activations are scaled by 1/(1-rate) during training
+ * so no scaling is needed at inference time.
+ * 
+ * @param pnet Network to configure
+ * @param rate Dropout rate (0.0 = disabled, 0.5 = 50% dropout). Must be in [0, 1).
+ * 
+ * @note Only applies to hidden layers; input and output layers are not affected.
+ * @note Use ann_set_layer_dropout() to override the rate for specific layers.
+ * @see ann_set_layer_dropout, ann_set_training_mode
+ */
+void ann_set_dropout(PNetwork pnet, real rate);
+
+/**
+ * Set the dropout rate for a specific layer.
+ * 
+ * Overrides the default dropout rate for this layer.
+ * 
+ * @param pnet Network to configure
+ * @param layer Layer index (0 = input layer)
+ * @param rate Dropout rate (0.0 = disabled, 0.5 = 50% dropout). Must be in [0, 1).
+ * 
+ * @note Setting dropout on input or output layers has no effect.
+ */
+void ann_set_layer_dropout(PNetwork pnet, int layer, real rate);
+
+/**
+ * Set training/inference mode for the network.
+ * 
+ * In training mode (is_training=1), dropout is applied.
+ * In inference mode (is_training=0), dropout is disabled.
+ * 
+ * Training mode is automatically enabled during ann_train_network()
+ * and disabled after training completes.
+ * 
+ * @param pnet Network to configure
+ * @param is_training 1 for training mode, 0 for inference mode
+ */
+void ann_set_training_mode(PNetwork pnet, int is_training);
 
 /**
  * Get the number of layers in the network.

@@ -262,16 +262,42 @@ real tensor_sum(const PTensor t);
 PTensor tensor_axpy(real alpha, const PTensor x, PTensor y);
 
 /**
- * General matrix multiplication (not fully implemented).
- * Intended: C = alpha * A*B + beta * C
+ * General matrix multiplication: C = alpha * A*B + beta * C
+ * Supports both BLAS (cblas_sgemm) and scalar fallback implementations.
  * @param alpha Scalar multiplier for product
- * @param A First matrix operand
- * @param B Second matrix operand
+ * @param A First matrix operand (M×K)
+ * @param B Second matrix operand (K×N)
  * @param beta Scalar multiplier for C
- * @param C Result matrix (modified in-place)
- * @return Pointer to modified C
+ * @param C Result matrix (M×N, modified in-place)
+ * @return Pointer to modified C, or NULL on dimension mismatch
  */
 PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTensor C);
+
+/**
+ * General matrix multiplication with B transposed.
+ * Computes: C = alpha * A * B^T + beta * C
+ * For batched forward pass: Y = X * W^T where X[batch×in], W[out×in], Y[batch×out]
+ * @param alpha Scalar multiplier for product
+ * @param A First matrix operand (M×K)
+ * @param B Second matrix operand (N×K, will be transposed to K×N)
+ * @param beta Scalar multiplier for C
+ * @param C Result matrix (M×N, modified in-place)
+ * @return Pointer to modified C, or NULL on error
+ */
+PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real beta, PTensor C);
+
+/**
+ * General matrix multiplication with A transposed.
+ * Computes: C = alpha * A^T * B + beta * C
+ * For batched gradient computation: dW = delta^T * A
+ * @param alpha Scalar multiplier for product
+ * @param A First matrix operand (K×M, will be transposed to M×K)
+ * @param B Second matrix operand (K×N)
+ * @param beta Scalar multiplier for C
+ * @param C Result matrix (M×N, modified in-place)
+ * @return Pointer to modified C, or NULL on error
+ */
+PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real beta, PTensor C);
 
 /**
  * AXPBY operation: y = alpha * x + beta * y (in-place).

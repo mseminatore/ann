@@ -121,7 +121,7 @@ void test_ger()
 //------------------------------------------------------
 int main(int argc, char *argv[])
 {
-#ifdef CBLAS
+#ifdef USE_CBLAS
 	cblas_init(CBLAS_DEFAULT_THREADS);
     cblas_print_configuration();
 #else

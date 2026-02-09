@@ -180,6 +180,50 @@ void test_main(int argc, char *argv[]) {
     remove_file(test_file);
     ann_free_network(net);
 
+    // ========================================================================
+    // PIKCHR EXPORT TESTS
+    // ========================================================================
+    SUITE("PIKCHR Export");
+    COMMENT("Testing PIKCHR diagram export...");
+
+    const char *pikchr_file = "test_network.pikchr";
+
+    // Test simple mode (large network)
+    net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(net, 784, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(net, 128, LAYER_HIDDEN, ACTIVATION_RELU);
+    ann_add_layer(net, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    result = ann_export_pikchr(net, pikchr_file);
+    TESTEX("PIKCHR export (simple mode) succeeds", (result == ERR_OK));
+    TESTEX("PIKCHR file contains 'box'", file_contains(pikchr_file, "box"));
+    TESTEX("PIKCHR file contains 'Input'", file_contains(pikchr_file, "Input"));
+    TESTEX("PIKCHR file contains 'Hidden'", file_contains(pikchr_file, "Hidden"));
+    TESTEX("PIKCHR file contains 'Softmax'", file_contains(pikchr_file, "Softmax"));
+    remove_file(pikchr_file);
+    ann_free_network(net);
+
+    // Test detailed mode (small network)
+    net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+    ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    result = ann_export_pikchr(net, pikchr_file);
+    TESTEX("PIKCHR export (detailed mode) succeeds", (result == ERR_OK));
+    TESTEX("PIKCHR detailed file contains 'circle'", file_contains(pikchr_file, "circle"));
+    TESTEX("PIKCHR detailed file contains 'line'", file_contains(pikchr_file, "line"));
+    remove_file(pikchr_file);
+    ann_free_network(net);
+
+    // Test error cases
+    result = ann_export_pikchr(NULL, pikchr_file);
+    TESTEX("PIKCHR export with NULL network returns ERR_NULL_PTR", (result == ERR_NULL_PTR));
+
+    net = ann_make_network(OPT_SGD, LOSS_MSE);
+    result = ann_export_pikchr(net, pikchr_file);
+    TESTEX("PIKCHR export with no layers returns ERR_INVALID", (result == ERR_INVALID));
+    ann_free_network(net);
+
     // Cleanup any remaining test files
     remove_file(test_file);
+    remove_file(pikchr_file);
 }

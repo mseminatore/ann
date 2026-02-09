@@ -381,6 +381,25 @@ int ann_save_network_binary(const PNetwork pnet, const char *filename);
 int ann_export_onnx(const PNetwork pnet, const char *filename);
 
 /**
+ * Export network architecture as PIKCHR diagram.
+ * 
+ * Generates a PIKCHR text file that can be rendered to SVG using
+ * the pikchr tool: `pikchr network.pikchr > network.svg`
+ * 
+ * For small networks (≤10 nodes per layer), outputs detailed diagram
+ * with individual node circles and connection lines.
+ * For larger networks, outputs simplified box diagram with layer info.
+ * 
+ * @param pnet Network to export (must not be NULL)
+ * @param filename Output file path (typically .pikchr extension)
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if network or filename is NULL
+ * @return ERR_INVALID if network has no layers
+ * @return ERR_IO if file cannot be created/written
+ */
+int ann_export_pikchr(const PNetwork pnet, const char *filename);
+
+/**
  * Load trained network from text file.
  * 
  * @param filename Path to network file (saved with ann_save_network())

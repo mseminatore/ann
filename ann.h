@@ -165,6 +165,17 @@ typedef void(*Optimization_func) (PNetwork pnet);
 typedef real(*Activation_func) (real);
 typedef void(*BackPropagate_func)(PNetwork pnet, PLayer layer, PLayer prev_layer);
 
+/**
+ * Learning rate scheduler callback.
+ * Called at the start of each epoch to compute the learning rate.
+ *
+ * @param epoch Current epoch number (1-based)
+ * @param base_lr Initial/base learning rate
+ * @param user_data User-provided context (scheduler parameters)
+ * @return New learning rate for this epoch
+ */
+typedef real(*LRSchedulerFunc)(unsigned epoch, real base_lr, void *user_data);
+
 //------------------------------
 // Defines a layer in a network
 //------------------------------
@@ -204,6 +215,7 @@ struct Network
 
 	FILE *dbg;
 	real learning_rate;					// learning rate of network
+	real base_learning_rate;			// initial LR (for schedulers)
 	int layer_size;						// number of layers allocated
 	int weights_set;					// have the weights been initialized?
 	unsigned batchSize;					// size of mini-batches
@@ -225,6 +237,9 @@ struct Network
 	Loss_func loss_func;				// the error function
 	Output_func print_func;				// print output function
 	Optimization_func optimize_func;	// learning rate/weight optimizer
+
+	LRSchedulerFunc lr_scheduler;		// learning rate scheduler callback
+	void *lr_scheduler_data;			// user data for scheduler
 
 	unsigned current_batch_size;		// current allocated batch size for batch tensors
 };
@@ -537,6 +552,83 @@ void ann_set_batch_size(PNetwork pnet, unsigned batch_size);
  * @param limit Maximum number of epochs
  */
 void ann_set_epoch_limit(PNetwork pnet, unsigned limit);
+
+// ============================================================================
+// LEARNING RATE SCHEDULERS
+// ============================================================================
+
+/**
+ * Set a learning rate scheduler callback.
+ * 
+ * The scheduler is called at the start of each epoch to compute the learning rate.
+ * Pass NULL to disable scheduling (use constant learning rate).
+ * 
+ * @param pnet Network to configure
+ * @param scheduler Scheduler callback function, or NULL to disable
+ * @param user_data User-provided data passed to scheduler (e.g., parameters)
+ * 
+ * @see lr_scheduler_step, lr_scheduler_exponential, lr_scheduler_cosine
+ */
+void ann_set_lr_scheduler(PNetwork pnet, LRSchedulerFunc scheduler, void *user_data);
+
+/**
+ * Parameters for step decay scheduler.
+ * Reduces learning rate by factor every step_size epochs.
+ */
+typedef struct {
+	unsigned step_size;    // Epochs between LR reductions
+	real gamma;            // Multiplicative factor (e.g., 0.5 to halve LR)
+} LRStepParams;
+
+/**
+ * Parameters for exponential decay scheduler.
+ * LR = base_lr * (gamma ^ epoch)
+ */
+typedef struct {
+	real gamma;            // Decay rate per epoch (e.g., 0.95)
+} LRExponentialParams;
+
+/**
+ * Parameters for cosine annealing scheduler.
+ * Smoothly decays LR from base_lr to min_lr over T_max epochs.
+ */
+typedef struct {
+	unsigned T_max;        // Maximum number of epochs (full cycle)
+	real min_lr;           // Minimum learning rate at end of cycle
+} LRCosineParams;
+
+/**
+ * Step decay scheduler: halves LR every step_size epochs.
+ * new_lr = base_lr * (gamma ^ (epoch / step_size))
+ * 
+ * @param epoch Current epoch (1-based)
+ * @param base_lr Initial learning rate
+ * @param user_data Pointer to LRStepParams
+ * @return Scheduled learning rate
+ */
+real lr_scheduler_step(unsigned epoch, real base_lr, void *user_data);
+
+/**
+ * Exponential decay scheduler: multiplies LR by gamma each epoch.
+ * new_lr = base_lr * (gamma ^ epoch)
+ * 
+ * @param epoch Current epoch (1-based)
+ * @param base_lr Initial learning rate
+ * @param user_data Pointer to LRExponentialParams
+ * @return Scheduled learning rate
+ */
+real lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data);
+
+/**
+ * Cosine annealing scheduler: smooth decay to min_lr.
+ * new_lr = min_lr + (base_lr - min_lr) * (1 + cos(pi * epoch / T_max)) / 2
+ * 
+ * @param epoch Current epoch (1-based)
+ * @param base_lr Initial learning rate
+ * @param user_data Pointer to LRCosineParams
+ * @return Scheduled learning rate
+ */
+real lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data);
 
 /**
  * Get the number of layers in the network.

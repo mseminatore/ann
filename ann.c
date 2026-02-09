@@ -1981,6 +1981,9 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->optimizer			= opt;
 	pnet->max_gradient		= (real)0.0;		// gradient clipping disabled by default
 	pnet->weight_init		= WEIGHT_INIT_AUTO;	// auto-select based on activation
+	pnet->lr_scheduler		= NULL;				// no scheduler by default
+	pnet->lr_scheduler_data	= NULL;
+	pnet->base_learning_rate = (real)0.0;		// set when training starts
 
 	switch(opt)
 	{
@@ -2048,6 +2051,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	time_t time_start = time(NULL);
 
 	pnet->train_iteration = 0;
+	
+	// Save base learning rate for schedulers
+	if (pnet->base_learning_rate == (real)0.0)
+		pnet->base_learning_rate = pnet->learning_rate;
 
 	// initialize weights to random values if not already initialized
 	init_weights(pnet);
@@ -2096,8 +2103,15 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		// re-shuffle the indices for this epoch
 		shuffle_indices(input_indices, rows);
 		
+		// Apply learning rate scheduler if set
+		++epoch;
+		if (pnet->lr_scheduler)
+		{
+			pnet->learning_rate = pnet->lr_scheduler(epoch, pnet->base_learning_rate, pnet->lr_scheduler_data);
+		}
+		
 		// iterate over all sets of inputs in this epoch/minibatch
-		ann_printf(pnet, "%sEpoch %u/%u%s\n[", COLOR(ANSI_BOLD_WHITE), ++epoch, pnet->epochLimit, RESET());
+		ann_printf(pnet, "%sEpoch %u/%u%s\n[", COLOR(ANSI_BOLD_WHITE), epoch, pnet->epochLimit, RESET());
 		loss = (real)0.0;
 
 		// iterate over all batches
@@ -2316,6 +2330,68 @@ void ann_set_epoch_limit(PNetwork pnet, unsigned limit)
 		return;
 
 	pnet->epochLimit = limit;
+}
+
+//------------------------------
+// set learning rate scheduler
+//------------------------------
+void ann_set_lr_scheduler(PNetwork pnet, LRSchedulerFunc scheduler, void *user_data)
+{
+	if (!pnet)
+		return;
+
+	pnet->lr_scheduler = scheduler;
+	pnet->lr_scheduler_data = user_data;
+}
+
+//------------------------------
+// Step decay LR scheduler
+// LR = base_lr * (gamma ^ (epoch / step_size))
+//------------------------------
+real lr_scheduler_step(unsigned epoch, real base_lr, void *user_data)
+{
+	if (!user_data)
+		return base_lr;
+
+	LRStepParams *params = (LRStepParams *)user_data;
+	unsigned steps = (epoch - 1) / params->step_size;
+	real multiplier = (real)1.0;
+
+	for (unsigned i = 0; i < steps; i++)
+		multiplier *= params->gamma;
+
+	return base_lr * multiplier;
+}
+
+//------------------------------
+// Exponential decay LR scheduler
+// LR = base_lr * (gamma ^ epoch)
+//------------------------------
+real lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data)
+{
+	if (!user_data)
+		return base_lr;
+
+	LRExponentialParams *params = (LRExponentialParams *)user_data;
+	return base_lr * (real)pow(params->gamma, (double)(epoch - 1));
+}
+
+//------------------------------
+// Cosine annealing LR scheduler
+// LR = min_lr + (base_lr - min_lr) * (1 + cos(pi * epoch / T_max)) / 2
+//------------------------------
+real lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data)
+{
+	if (!user_data)
+		return base_lr;
+
+	LRCosineParams *params = (LRCosineParams *)user_data;
+	
+	// Clamp epoch to T_max
+	unsigned t = (epoch > params->T_max) ? params->T_max : epoch;
+	
+	real cos_val = (real)cos(3.14159265358979323846 * (double)t / (double)params->T_max);
+	return params->min_lr + (base_lr - params->min_lr) * ((real)1.0 + cos_val) / (real)2.0;
 }
 
 //------------------------------

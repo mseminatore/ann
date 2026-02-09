@@ -89,12 +89,12 @@ A prioritized list of improvements and enhancements for the library.
   - BLAS helps with axpy but not element-wise sqrt/divide
   - Consider only after batched GEMM training is implemented
 
-- [ ] **Add Learning Rate Schedulers** *(~4-6 hours total)*
-  - Less critical when using Adam optimizer (has built-in adaptive rates)
-  - Consider adding:
-    - [ ] Step decay *(~1-2 hours)*
-    - [ ] Exponential decay *(~1-2 hours)*
-    - [ ] Cosine annealing *(~2 hours)*
+- [x] **Add Learning Rate Schedulers** *(~4-6 hours total)*
+  - Callback-based API via `ann_set_lr_scheduler()`
+  - Built-in schedulers:
+    - [x] Step decay: `lr_scheduler_step()` - halve LR every N epochs
+    - [x] Exponential decay: `lr_scheduler_exponential()` - LR *= gamma each epoch
+    - [x] Cosine annealing: `lr_scheduler_cosine()` - smooth decay to min_lr
 
 - [ ] **Documentation Updates** *(~1-2 hours)*
   - [ ] Update tensor_gemm header comment (no longer "not fully implemented")

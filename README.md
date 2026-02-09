@@ -122,6 +122,8 @@ ann_set_learning_rate | override the default learning rate
 ann_set_loss_function | set the loss function
 ann_set_batch_size | set the mini-batch size
 ann_set_epoch_limit | set the maximum number of epochs
+ann_set_lr_scheduler | set learning rate scheduler callback
+ann_set_gradient_clip | set gradient clipping threshold
 ann_get_layer_count | get the number of layers in the network
 ann_get_layer_nodes | get the number of nodes in a layer
 ann_get_layer_activation | get the activation type of a layer
@@ -133,6 +135,36 @@ ann_strerror | convert error code to human-readable message
 ann_set_error_log_callback | install error logging callback
 ann_get_error_log_callback | get current error callback
 ann_clear_error_log_callback | disable error logging callback
+
+## Learning Rate Schedulers
+
+Built-in schedulers adjust the learning rate during training:
+
+| Scheduler | Function | Description |
+|-----------|----------|-------------|
+| Step decay | `lr_scheduler_step` | Multiply LR by gamma every N epochs |
+| Exponential | `lr_scheduler_exponential` | Multiply LR by gamma each epoch |
+| Cosine | `lr_scheduler_cosine` | Smooth decay from base LR to min LR |
+
+```c
+// Step decay: halve LR every 10 epochs
+LRStepParams step_params = { .step_size = 10, .gamma = 0.5f };
+ann_set_lr_scheduler(net, lr_scheduler_step, &step_params);
+
+// Exponential decay: 5% reduction per epoch
+LRExponentialParams exp_params = { .gamma = 0.95f };
+ann_set_lr_scheduler(net, lr_scheduler_exponential, &exp_params);
+
+// Cosine annealing: decay to 0.0001 over 100 epochs
+LRCosineParams cos_params = { .T_max = 100, .min_lr = 0.0001f };
+ann_set_lr_scheduler(net, lr_scheduler_cosine, &cos_params);
+
+// Custom scheduler
+real my_scheduler(unsigned epoch, real base_lr, void *data) {
+    return base_lr / (1.0f + 0.01f * epoch);  // 1/t decay
+}
+ann_set_lr_scheduler(net, my_scheduler, NULL);
+```
 
 # Hyperparameter Tuning
 

@@ -74,6 +74,9 @@ target_link_libraries(ann_hypertune libann)# avoid liblibann on Unix
 #
 # add the executables
 #
+#add_executable(blas_perf blas_perf.c)
+#target_link_libraries(blas_perf libann ${BLAS_LIB} ${MATH_LIB})
+
 add_executable(mnist mnist.c)
 target_link_libraries(mnist libann ${BLAS_LIB} ${MATH_LIB})
 

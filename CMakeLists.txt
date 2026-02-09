@@ -80,6 +80,9 @@ target_link_libraries(blas_perf libann ${BLAS_LIB} ${MATH_LIB})
 add_executable(mnist mnist.c)
 target_link_libraries(mnist libann ${BLAS_LIB} ${MATH_LIB})
 
+add_executable(mnist_hypertune mnist_hypertune.c)
+target_link_libraries(mnist_hypertune libann ann_hypertune ${BLAS_LIB} ${MATH_LIB})
+
 add_executable(digit5x7 digit5x7.c)
 target_link_libraries(digit5x7 libann ${BLAS_LIB} ${MATH_LIB})
 

@@ -473,6 +473,31 @@ The callback signature is:
 typedef void (*ErrorLogCallback)(int error_code, const char *error_message, const char *function_name);
 ```
 
+# Terminal Colors
+
+Training output uses ANSI color codes for improved readability:
+- **Headers** - Cyan/bold (Training ANN, Network shape)
+- **Progress bar** - Green
+- **Loss** - Yellow
+- **Learning rate** - Blue  
+- **Epoch counter** - White/bold
+- **Convergence message** - Green
+
+Colors are enabled by default on modern terminals (Windows 10+, Linux, macOS).
+
+To disable colors, set the `ANN_NO_COLOR` environment variable:
+
+```bash
+# Linux/macOS
+export ANN_NO_COLOR=1
+
+# Windows PowerShell
+$env:ANN_NO_COLOR = "1"
+
+# Windows Command Prompt
+set ANN_NO_COLOR=1
+```
+
 # Known Issues
 
 No known issues at this time.

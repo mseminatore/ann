@@ -73,3 +73,4 @@ A prioritized list of remaining improvements and enhancements for the library.
 - PIKCHR network diagram export
 - Learning curve CSV export
 - Tensor optimizations (memcpy, memset, loop unrolling, cache-friendly access)
+- TPE hyperparameter optimization (`hypertune_tpe_search()`)

@@ -39,7 +39,8 @@ optimal network configurations. It supports **grid search** (exhaustive),
 | hypertune_free_split | free split tensors |
 | hypertune_grid_search | perform exhaustive grid search |
 | hypertune_random_search | perform random search |
-| hypertune_bayesian_search | perform Bayesian optimization search |
+| hypertune_bayesian_search | perform GP-BO Bayesian optimization |
+| hypertune_tpe_search | perform TPE Bayesian optimization |
 | hypertune_create_network | create network from result config |
 | hypertune_count_grid_trials | calculate total grid combinations |
 | hypertune_print_result | print a single result |
@@ -51,7 +52,8 @@ optimal network configurations. It supports **grid search** (exhaustive),
 | gp_add_observation | add observation to GP |
 | gp_predict | predict mean and variance at a point |
 | gp_expected_improvement | compute expected improvement |
-| bayesian_options_init | initialize Bayesian optimization options |
+| bayesian_options_init | initialize GP-BO options |
+| tpe_options_init | initialize TPE options |
 
 ## Basic Example
 
@@ -201,10 +203,74 @@ int trials = hypertune_bayesian_search(
    with highest Expected Improvement (EI)
 3. **Optimizes**: Learning rate (log-scale) and batch size
 
-**When to use Bayesian optimization:**
+**When to use GP-BO:**
 - Expensive evaluations (long training times)
 - Smooth objective function
-- 2-5 hyperparameters to tune
+- 2-3 continuous hyperparameters
+
+## TPE (Tree-structured Parzen Estimator)
+
+TPE is an alternative Bayesian optimization method that handles mixed 
+categorical and continuous parameters better than GP-BO:
+
+```c
+#include "ann_hypertune.h"
+
+// Configure search space with categorical parameters
+HyperparamSpace space;
+hypertune_space_init(&space);
+
+space.learning_rate_min = 0.0001f;
+space.learning_rate_max = 0.1f;
+space.learning_rate_log_scale = 1;
+
+space.batch_sizes[0] = 16;
+space.batch_sizes[1] = 32;
+space.batch_sizes[2] = 64;
+space.batch_size_count = 3;
+
+space.optimizers[0] = OPT_ADAM;
+space.optimizers[1] = OPT_SGD;
+space.optimizers[2] = OPT_RMSPROP;
+space.optimizer_count = 3;
+
+space.hidden_layer_counts[0] = 1;
+space.hidden_layer_counts[1] = 2;
+space.hidden_layer_counts[2] = 3;
+space.hidden_layer_count_options = 3;
+
+space.hidden_activations[0] = ACTIVATION_RELU;
+space.hidden_activations[1] = ACTIVATION_SIGMOID;
+space.hidden_activation_count = 2;
+
+// Configure TPE options
+TPEOptions tpe_opts;
+tpe_options_init(&tpe_opts);
+tpe_opts.n_startup = 10;      // Random trials before TPE
+tpe_opts.n_iterations = 40;   // TPE-guided trials
+tpe_opts.gamma = 0.25f;       // Top 25% are "good"
+
+// Run TPE search
+HypertuneResult results[100], best;
+int trials = hypertune_tpe_search(
+    &space, input_size, output_size,
+    ACTIVATION_SOFTMAX, LOSS_CATEGORICAL_CROSS_ENTROPY,
+    &split, &tune_opts, &tpe_opts,
+    results, 100, &best
+);
+```
+
+**How TPE works:**
+1. **Startup phase**: Random sampling to build initial observations
+2. **TPE phase**: Builds two density models:
+   - l(x): density of "good" trials (top γ percentile)
+   - g(x): density of "bad" trials (remaining)
+3. **Acquisition**: Samples from l(x), selects points with highest l(x)/g(x) ratio
+
+**When to use TPE:**
+- Mixed categorical + continuous parameters
+- Many hyperparameters (5+)
+- Optimizer type, activation functions, layer counts
 
 ## Custom Scoring Function
 
@@ -272,9 +338,11 @@ different activations to each layer independently.
 |----------|----------|------|------|
 | **Grid** | Small search spaces | Exhaustive, reproducible | Exponential cost |
 | **Random** | Large spaces, many params | Efficient, parallelizable | May miss optimum |
-| **Bayesian** | Expensive evaluations | Sample-efficient | Overhead, sequential |
+| **GP-BO** | Few continuous params | Sample-efficient | O(n³), struggles with categoricals |
+| **TPE** | Mixed param types | Handles categoricals, scales well | Slightly less sample-efficient |
 
 **Rules of thumb:**
 - Grid search: ≤100 total combinations
 - Random search: 10-100 trials typically sufficient
-- Bayesian: When each trial takes minutes/hours
+- GP-BO: 2-3 continuous hyperparameters, expensive trials
+- TPE: Mixed categorical + continuous, many parameters

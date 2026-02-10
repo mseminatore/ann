@@ -56,7 +56,7 @@
 // Optimizer names for printing
 //------------------------------
 static const char *optimizer_names[] = {
-    "SGD", "SGD_DECAY", "ADAPT", "MOMENTUM", "RMSPROP", "ADAGRAD", "ADAM"
+    "SGD", "MOMENTUM", "RMSPROP", "ADAGRAD", "ADAM"
 };
 
 static const char *activation_names[] = {
@@ -1204,6 +1204,372 @@ int hypertune_bayesian_search(
                                        tune_options->user_data);
         } else if (tune_options->verbosity >= 1) {
             printf("[%d/%d] (BO, EI=%.4f) ", trial + 1, total_trials, best_ei);
+            hypertune_print_result(&current);
+        }
+        
+        trial++;
+    }
+    
+    if (best_result)
+        *best_result = best;
+    
+    if (tune_options->verbosity >= 1) {
+        printf("\nBest result: ");
+        hypertune_print_result(&best);
+    }
+    
+    return trial;
+}
+
+// ============================================================================
+// TPE (Tree-structured Parzen Estimator) Implementation
+// ============================================================================
+
+void tpe_options_init(TPEOptions *opts)
+{
+    if (!opts) return;
+    
+    opts->n_startup = 10;           // Random trials before TPE
+    opts->gamma = 0.25f;            // Top 25% are "good"
+    opts->n_candidates = 24;        // Samples from l(x) per iteration
+    opts->n_iterations = 40;        // TPE iterations after startup
+    opts->bandwidth_factor = 1.0f;  // KDE bandwidth multiplier
+}
+
+// Gaussian kernel for KDE
+static real kde_gaussian_kernel(real x, real xi, real bandwidth)
+{
+    real z = (x - xi) / bandwidth;
+    return (real)exp(-0.5f * z * z) / (bandwidth * 2.5066282746f);  // sqrt(2*pi)
+}
+
+// Evaluate 1D Gaussian KDE at point x
+static real kde_evaluate_1d(real x, const real *samples, int n_samples, real bandwidth)
+{
+    if (n_samples == 0) return 1e-10f;
+    
+    real sum = 0.0f;
+    for (int i = 0; i < n_samples; i++) {
+        sum += kde_gaussian_kernel(x, samples[i], bandwidth);
+    }
+    return sum / (real)n_samples + 1e-10f;  // Add small value to avoid division by zero
+}
+
+// Sample from 1D Gaussian KDE (sample from a random component then add noise)
+static real kde_sample_1d(const real *samples, int n_samples, real bandwidth)
+{
+    if (n_samples == 0) return (real)rand() / (real)RAND_MAX;
+    
+    // Pick a random sample as the center
+    int idx = rand() % n_samples;
+    real center = samples[idx];
+    
+    // Add Gaussian noise with the bandwidth as std dev
+    // Box-Muller transform
+    real u1 = ((real)rand() + 1.0f) / ((real)RAND_MAX + 2.0f);
+    real u2 = (real)rand() / (real)RAND_MAX;
+    real z = (real)sqrt(-2.0f * log(u1)) * (real)cos(2.0f * 3.14159265358979f * u2);
+    
+    return center + z * bandwidth;
+}
+
+// Evaluate categorical probability (count-based with Laplace smoothing)
+static real categorical_prob(int value, const int *samples, int n_samples, int n_categories)
+{
+    if (n_samples == 0) return 1.0f / (real)n_categories;
+    
+    int count = 0;
+    for (int i = 0; i < n_samples; i++) {
+        if (samples[i] == value) count++;
+    }
+    
+    // Laplace smoothing
+    return ((real)count + 1.0f) / ((real)n_samples + (real)n_categories);
+}
+
+// Sample from categorical distribution based on observed samples
+static int categorical_sample(const int *samples, int n_samples, int n_categories)
+{
+    if (n_samples == 0) return rand() % n_categories;
+    
+    // Compute probabilities with Laplace smoothing
+    real probs[16];  // Max categories
+    real sum = 0.0f;
+    
+    for (int c = 0; c < n_categories && c < 16; c++) {
+        probs[c] = categorical_prob(c, samples, n_samples, n_categories);
+        sum += probs[c];
+    }
+    
+    // Sample
+    real r = ((real)rand() / (real)RAND_MAX) * sum;
+    real cumsum = 0.0f;
+    for (int c = 0; c < n_categories && c < 16; c++) {
+        cumsum += probs[c];
+        if (r <= cumsum) return c;
+    }
+    return n_categories - 1;
+}
+
+// Scott's rule for KDE bandwidth selection
+static real scott_bandwidth(const real *samples, int n_samples)
+{
+    if (n_samples < 2) return 0.1f;
+    
+    // Compute std dev
+    real mean = 0.0f;
+    for (int i = 0; i < n_samples; i++) mean += samples[i];
+    mean /= (real)n_samples;
+    
+    real var = 0.0f;
+    for (int i = 0; i < n_samples; i++) {
+        real diff = samples[i] - mean;
+        var += diff * diff;
+    }
+    var /= (real)(n_samples - 1);
+    real std = (real)sqrt(var);
+    if (std < 0.01f) std = 0.01f;
+    
+    // Scott's rule: h = n^(-1/5) * std * 1.06
+    return 1.06f * std * (real)pow((double)n_samples, -0.2);
+}
+
+int hypertune_tpe_search(
+    const HyperparamSpace *space,
+    int input_size,
+    int output_size,
+    Activation_type output_activation,
+    Loss_type loss_type,
+    const DataSplit *split,
+    const HypertuneOptions *tune_options,
+    const TPEOptions *tpe_options,
+    HypertuneResult *results,
+    int max_results,
+    HypertuneResult *best_result)
+{
+    if (!space || !split || !tune_options || !tpe_options) return -1;
+    
+    int total_trials = tpe_options->n_startup + tpe_options->n_iterations;
+    if (total_trials > TPE_MAX_OBSERVATIONS) total_trials = TPE_MAX_OBSERVATIONS;
+    
+    // Storage for observations
+    real obs_lr[TPE_MAX_OBSERVATIONS];           // Learning rates (log-transformed)
+    int obs_batch_idx[TPE_MAX_OBSERVATIONS];     // Batch size index
+    int obs_optimizer_idx[TPE_MAX_OBSERVATIONS]; // Optimizer index
+    int obs_layers[TPE_MAX_OBSERVATIONS];        // Hidden layer count index
+    int obs_activation_idx[TPE_MAX_OBSERVATIONS];// Activation index
+    real obs_scores[TPE_MAX_OBSERVATIONS];       // Scores
+    int n_obs = 0;
+    
+    HypertuneResult best;
+    hypertune_result_init(&best);
+    best.score = -1.0f;
+    
+    int trial = 0;
+    
+    if (tune_options->verbosity >= 1) {
+        printf("\n=== TPE Search ===\n");
+        printf("Startup trials: %d, TPE iterations: %d\n", 
+               tpe_options->n_startup, tpe_options->n_iterations);
+        printf("Gamma: %.2f (top %.0f%% are 'good')\n\n", 
+               tpe_options->gamma, tpe_options->gamma * 100.0f);
+    }
+    
+    while (trial < total_trials) {
+        HypertuneResult current;
+        hypertune_result_init(&current);
+        
+        // Determine split point for good/bad
+        int n_good = (int)(tpe_options->gamma * (real)n_obs);
+        if (n_good < 1) n_good = 1;
+        if (n_good > n_obs) n_good = n_obs;
+        int n_bad = n_obs - n_good;
+        
+        // Sort observations by score to find good/bad split
+        int sorted_indices[TPE_MAX_OBSERVATIONS];
+        for (int i = 0; i < n_obs; i++) sorted_indices[i] = i;
+        
+        // Simple selection sort for indices (n_obs is small)
+        for (int i = 0; i < n_obs - 1; i++) {
+            int max_idx = i;
+            for (int j = i + 1; j < n_obs; j++) {
+                if (obs_scores[sorted_indices[j]] > obs_scores[sorted_indices[max_idx]])
+                    max_idx = j;
+            }
+            int tmp = sorted_indices[i];
+            sorted_indices[i] = sorted_indices[max_idx];
+            sorted_indices[max_idx] = tmp;
+        }
+        
+        // Extract good and bad samples
+        real good_lr[TPE_MAX_OBSERVATIONS], bad_lr[TPE_MAX_OBSERVATIONS];
+        int good_batch[TPE_MAX_OBSERVATIONS], bad_batch[TPE_MAX_OBSERVATIONS];
+        int good_opt[TPE_MAX_OBSERVATIONS], bad_opt[TPE_MAX_OBSERVATIONS];
+        int good_layers[TPE_MAX_OBSERVATIONS], bad_layers[TPE_MAX_OBSERVATIONS];
+        int good_act[TPE_MAX_OBSERVATIONS], bad_act[TPE_MAX_OBSERVATIONS];
+        
+        for (int i = 0; i < n_good && i < n_obs; i++) {
+            int idx = sorted_indices[i];
+            good_lr[i] = obs_lr[idx];
+            good_batch[i] = obs_batch_idx[idx];
+            good_opt[i] = obs_optimizer_idx[idx];
+            good_layers[i] = obs_layers[idx];
+            good_act[i] = obs_activation_idx[idx];
+        }
+        for (int i = 0; i < n_bad; i++) {
+            int idx = sorted_indices[n_good + i];
+            bad_lr[i] = obs_lr[idx];
+            bad_batch[i] = obs_batch_idx[idx];
+            bad_opt[i] = obs_optimizer_idx[idx];
+            bad_layers[i] = obs_layers[idx];
+            bad_act[i] = obs_activation_idx[idx];
+        }
+        
+        // Sample candidate and compute EI ratio
+        real best_ratio = -1e30f;
+        real cand_lr = 0.0f;
+        int cand_batch_idx = 0;
+        int cand_opt_idx = 0;
+        int cand_layers_idx = 0;
+        int cand_act_idx = 0;
+        
+        if (trial < tpe_options->n_startup || n_obs < 2) {
+            // Random sampling during startup
+            if (space->learning_rate_log_scale) {
+                real log_min = (real)log(space->learning_rate_min);
+                real log_max = (real)log(space->learning_rate_max);
+                cand_lr = log_min + ((real)rand() / (real)RAND_MAX) * (log_max - log_min);
+            } else {
+                cand_lr = space->learning_rate_min + 
+                         ((real)rand() / (real)RAND_MAX) * 
+                         (space->learning_rate_max - space->learning_rate_min);
+            }
+            cand_batch_idx = rand() % space->batch_size_count;
+            cand_opt_idx = rand() % space->optimizer_count;
+            cand_layers_idx = rand() % space->hidden_layer_count_options;
+            cand_act_idx = rand() % space->hidden_activation_count;
+        } else {
+            // TPE: sample from l(x), evaluate l(x)/g(x)
+            real bw_lr = scott_bandwidth(good_lr, n_good) * tpe_options->bandwidth_factor;
+            real bw_bad_lr = scott_bandwidth(bad_lr, n_bad) * tpe_options->bandwidth_factor;
+            
+            for (int c = 0; c < tpe_options->n_candidates; c++) {
+                // Sample from l(x) for each parameter
+                real lr = kde_sample_1d(good_lr, n_good, bw_lr);
+                int batch_idx = categorical_sample(good_batch, n_good, space->batch_size_count);
+                int opt_idx = categorical_sample(good_opt, n_good, space->optimizer_count);
+                int layers_idx = categorical_sample(good_layers, n_good, space->hidden_layer_count_options);
+                int act_idx = categorical_sample(good_act, n_good, space->hidden_activation_count);
+                
+                // Clamp lr to valid range
+                real log_min = (real)log(space->learning_rate_min);
+                real log_max = (real)log(space->learning_rate_max);
+                if (lr < log_min) lr = log_min;
+                if (lr > log_max) lr = log_max;
+                
+                // Compute l(x) / g(x) ratio
+                real l_lr = kde_evaluate_1d(lr, good_lr, n_good, bw_lr);
+                real g_lr = kde_evaluate_1d(lr, bad_lr, n_bad, bw_bad_lr);
+                
+                real l_batch = categorical_prob(batch_idx, good_batch, n_good, space->batch_size_count);
+                real g_batch = categorical_prob(batch_idx, bad_batch, n_bad, space->batch_size_count);
+                
+                real l_opt = categorical_prob(opt_idx, good_opt, n_good, space->optimizer_count);
+                real g_opt = categorical_prob(opt_idx, bad_opt, n_bad, space->optimizer_count);
+                
+                real l_layers = categorical_prob(layers_idx, good_layers, n_good, space->hidden_layer_count_options);
+                real g_layers = categorical_prob(layers_idx, bad_layers, n_bad, space->hidden_layer_count_options);
+                
+                real l_act = categorical_prob(act_idx, good_act, n_good, space->hidden_activation_count);
+                real g_act = categorical_prob(act_idx, bad_act, n_bad, space->hidden_activation_count);
+                
+                // EI ratio (log space for numerical stability)
+                real ratio = (real)log(l_lr / g_lr) + (real)log(l_batch / g_batch) +
+                            (real)log(l_opt / g_opt) + (real)log(l_layers / g_layers) +
+                            (real)log(l_act / g_act);
+                
+                if (ratio > best_ratio) {
+                    best_ratio = ratio;
+                    cand_lr = lr;
+                    cand_batch_idx = batch_idx;
+                    cand_opt_idx = opt_idx;
+                    cand_layers_idx = layers_idx;
+                    cand_act_idx = act_idx;
+                }
+            }
+        }
+        
+        // Convert sampled values to actual hyperparameters
+        if (space->learning_rate_log_scale) {
+            current.learning_rate = (real)exp(cand_lr);
+        } else {
+            current.learning_rate = cand_lr;
+        }
+        current.batch_size = space->batch_sizes[cand_batch_idx];
+        current.optimizer = space->optimizers[cand_opt_idx];
+        current.hidden_layer_count = space->hidden_layer_counts[cand_layers_idx];
+        
+        // Set activation for all hidden layers (same activation)
+        Activation_type act = space->hidden_activations[cand_act_idx];
+        for (int i = 0; i < current.hidden_layer_count; i++) {
+            current.hidden_activations[i] = act;
+        }
+        
+        // Generate layer topology (use base size from space)
+        int base_size = (space->hidden_layer_size_count > 0) ? 
+                        space->hidden_layer_sizes[0] : 64;
+        TopologyPattern pattern = (space->topology_pattern_count > 0) ?
+                                  space->topology_patterns[0] : TOPOLOGY_CONSTANT;
+        hypertune_generate_topology(pattern, base_size, current.hidden_layer_count, 
+                                   current.hidden_layer_sizes);
+        current.topology_pattern = pattern;
+        
+        // Train and evaluate
+        PNetwork net = hypertune_create_network(&current, input_size, output_size,
+                                                output_activation, loss_type);
+        if (!net) {
+            current.score = -1.0f;
+        } else {
+            ann_set_epoch_limit(net, space->epoch_limit);
+            ann_set_convergence(net, space->convergence_epsilon);
+            
+            double start_time = get_time_ms();
+            ann_train_network(net, split->train_inputs, split->train_outputs, split->train_rows);
+            double end_time = get_time_ms();
+            
+            current.training_time_ms = (real)(end_time - start_time);
+            current.score = tune_options->score_func(net, split->val_inputs, 
+                                                     split->val_outputs, tune_options->user_data);
+            ann_free_network(net);
+        }
+        
+        // Store observation
+        if (n_obs < TPE_MAX_OBSERVATIONS) {
+            obs_lr[n_obs] = space->learning_rate_log_scale ? 
+                           (real)log(current.learning_rate) : current.learning_rate;
+            obs_batch_idx[n_obs] = cand_batch_idx;
+            obs_optimizer_idx[n_obs] = cand_opt_idx;
+            obs_layers[n_obs] = cand_layers_idx;
+            obs_activation_idx[n_obs] = cand_act_idx;
+            obs_scores[n_obs] = current.score;
+            n_obs++;
+        }
+        
+        // Store result
+        if (results && trial < max_results)
+            results[trial] = current;
+        
+        // Update best
+        if (current.score > best.score)
+            best = current;
+        
+        // Progress
+        if (tune_options->progress_func) {
+            tune_options->progress_func(trial + 1, total_trials, &best, &current, 
+                                       tune_options->user_data);
+        } else if (tune_options->verbosity >= 1) {
+            const char *phase = (trial < tpe_options->n_startup) ? "random" : "TPE";
+            printf("[%d/%d] (%s) ", trial + 1, total_trials, phase);
             hypertune_print_result(&current);
         }
         

@@ -405,4 +405,72 @@ void test_main(int argc, char *argv[]) {
     hypertune_free_split(&xor_split);
     tensor_free(xor_in);
     tensor_free(xor_out);
+
+    // ========================================================================
+    SUITE("TPE Initialization");
+    COMMENT("Testing TPE options initialization...");
+
+    TPEOptions tpe_opts;
+    tpe_options_init(&tpe_opts);
+    TESTEX("TPE init: n_startup = 10", (tpe_opts.n_startup == 10));
+    TESTEX("TPE init: gamma = 0.25", (fabs(tpe_opts.gamma - 0.25f) < 0.01f));
+    TESTEX("TPE init: n_candidates = 24", (tpe_opts.n_candidates == 24));
+    TESTEX("TPE init: n_iterations = 40", (tpe_opts.n_iterations == 40));
+    TESTEX("TPE init: bandwidth_factor = 1.0", (fabs(tpe_opts.bandwidth_factor - 1.0f) < 0.01f));
+
+    // ========================================================================
+    SUITE("TPE Search");
+    COMMENT("Testing TPE search with minimal configuration...");
+
+    // Create XOR data for TPE test
+    xor_in = tensor_create_from_array(8, 2, xor_inputs);
+    xor_out = tensor_create_from_array(8, 1, xor_outputs);
+    hypertune_split_data(xor_in, xor_out, 0.75f, 0, 0, &xor_split);
+    
+    // Search space with multiple categorical options
+    HyperparamSpace tpe_space;
+    hypertune_space_init(&tpe_space);
+    tpe_space.learning_rate_min = 0.01f;
+    tpe_space.learning_rate_max = 0.5f;
+    tpe_space.learning_rate_log_scale = 1;
+    tpe_space.batch_sizes[0] = 4;
+    tpe_space.batch_sizes[1] = 8;
+    tpe_space.batch_size_count = 2;
+    tpe_space.optimizers[0] = OPT_SGD;
+    tpe_space.optimizers[1] = OPT_ADAM;
+    tpe_space.optimizer_count = 2;
+    tpe_space.hidden_layer_counts[0] = 1;
+    tpe_space.hidden_layer_counts[1] = 2;
+    tpe_space.hidden_layer_count_options = 2;
+    tpe_space.hidden_layer_sizes[0] = 4;
+    tpe_space.hidden_layer_size_count = 1;
+    tpe_space.hidden_activations[0] = ACTIVATION_SIGMOID;
+    tpe_space.hidden_activations[1] = ACTIVATION_RELU;
+    tpe_space.hidden_activation_count = 2;
+    tpe_space.epoch_limit = 50;
+    
+    // TPE options - small for testing
+    tpe_options_init(&tpe_opts);
+    tpe_opts.n_startup = 3;
+    tpe_opts.n_iterations = 2;
+    tpe_opts.n_candidates = 10;
+    
+    opts.verbosity = 0;
+    
+    trials = hypertune_tpe_search(
+        &tpe_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &opts, &tpe_opts, results, 10, &best);
+    
+    TESTEX("TPE search returns 5 trials (3 startup + 2 TPE)", (trials == 5));
+    TESTEX("TPE search best has valid score", (best.score >= 0.0f));
+    TESTEX("TPE results have learning rates in range", 
+           (results[0].learning_rate >= 0.01f && results[0].learning_rate <= 0.5f));
+    TESTEX("TPE results have valid batch sizes", 
+           (results[0].batch_size == 4 || results[0].batch_size == 8));
+    TESTEX("TPE results have valid optimizers", 
+           (results[0].optimizer == OPT_SGD || results[0].optimizer == OPT_ADAM));
+    
+    hypertune_free_split(&xor_split);
+    tensor_free(xor_in);
+    tensor_free(xor_out);
 }

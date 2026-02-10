@@ -512,6 +512,62 @@ int hypertune_bayesian_search(
     HypertuneResult *best_result
 );
 
+// ============================================================================
+// TPE (Tree-structured Parzen Estimator) OPTIMIZATION
+// ============================================================================
+
+#define TPE_MAX_OBSERVATIONS 200    // Maximum observations for TPE
+
+/**
+ * TPE optimization options.
+ */
+typedef struct {
+    int n_startup;           // Random trials before TPE kicks in (default: 10)
+    real gamma;              // Quantile for good/bad split (default: 0.25 = top 25%)
+    int n_candidates;        // Samples from l(x) per iteration (default: 24)
+    int n_iterations;        // TPE iterations after startup (default: 40)
+    real bandwidth_factor;   // KDE bandwidth multiplier (default: 1.0)
+} TPEOptions;
+
+/**
+ * Initialize TPE options with sensible defaults.
+ *
+ * @param opts Options to initialize
+ */
+void tpe_options_init(TPEOptions *opts);
+
+/**
+ * Perform TPE-based hyperparameter search.
+ * Better than GP-BO for mixed categorical + continuous parameters.
+ * Optimizes learning rate, batch size, optimizer, hidden layer count, and activations.
+ *
+ * @param space Hyperparameter search space
+ * @param input_size Number of input features
+ * @param output_size Number of output classes/values
+ * @param output_activation Activation for output layer
+ * @param loss_type Loss function to use
+ * @param split Training/validation data split
+ * @param tune_options Hypertuning options (score function, callbacks)
+ * @param tpe_options TPE optimization options
+ * @param results Array to store results (caller allocates)
+ * @param max_results Maximum results to store
+ * @param best_result Output: best result found
+ * @return Number of trials completed, or negative error code
+ */
+int hypertune_tpe_search(
+    const HyperparamSpace *space,
+    int input_size,
+    int output_size,
+    Activation_type output_activation,
+    Loss_type loss_type,
+    const DataSplit *split,
+    const HypertuneOptions *tune_options,
+    const TPEOptions *tpe_options,
+    HypertuneResult *results,
+    int max_results,
+    HypertuneResult *best_result
+);
+
 #ifdef __cplusplus
 }
 #endif

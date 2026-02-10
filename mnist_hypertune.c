@@ -23,11 +23,12 @@
 
 /**
  * @file mnist_hypertune.c
- * @brief Hyperparameter tuning example using Bayesian optimization on Fashion-MNIST
+ * @brief Hyperparameter tuning example using TPE on Fashion-MNIST
  *
  * This example demonstrates how to use the ann_hypertune module to find optimal
- * hyperparameters for a neural network. It uses Bayesian optimization to search
- * over learning rate, hidden layer count, and nodes per layer.
+ * hyperparameters for a neural network. It uses TPE (Tree-structured Parzen 
+ * Estimator) to search over learning rate, batch size, optimizer, hidden layer 
+ * count, topology pattern, and activation functions.
  */
 
 #include <stdio.h>
@@ -60,10 +61,17 @@ static void progress_callback(
     (void)user_data;
     
     printf("\n=== Trial %d/%d ===\n", current_trial, total_trials);
-    printf("  LR: %.6f, Batch: %u, Hidden layers: %d\n",
+    printf("  LR: %.6f, Batch: %u, Optimizer: %s\n",
            current_result->learning_rate,
            current_result->batch_size,
-           current_result->hidden_layer_count);
+           current_result->optimizer == OPT_ADAM ? "Adam" :
+           current_result->optimizer == OPT_SGD ? "SGD" :
+           current_result->optimizer == OPT_MOMENTUM ? "Momentum" :
+           current_result->optimizer == OPT_RMSPROP ? "RMSProp" : "Other");
+    
+    printf("  Hidden layers: %d, Topology: %s\n",
+           current_result->hidden_layer_count,
+           hypertune_topology_name(current_result->topology_pattern));
     
     printf("  Layer sizes: ");
     for (int i = 0; i < current_result->hidden_layer_count; i++)
@@ -98,7 +106,7 @@ int main(int argc, char *argv[])
     
     printf("=================================================\n");
     printf("  Fashion-MNIST Hyperparameter Tuning\n");
-    printf("  Using Bayesian Optimization\n");
+    printf("  Using TPE (Tree-structured Parzen Estimator)\n");
     printf("=================================================\n\n");
 
 #if defined(USE_CBLAS)
@@ -163,7 +171,15 @@ int main(int argc, char *argv[])
     space.batch_sizes[0] = 16;
     space.batch_sizes[1] = 32;
     space.batch_sizes[2] = 64;
-    space.batch_size_count = 3;
+    space.batch_sizes[3] = 128;
+    space.batch_size_count = 4;
+    
+    // Optimizers to try
+    space.optimizers[0] = OPT_ADAM;
+    space.optimizers[1] = OPT_SGD;
+    space.optimizers[2] = OPT_MOMENTUM;
+    space.optimizers[3] = OPT_RMSPROP;
+    space.optimizer_count = 4;
     
     // Hidden layer counts: 1, 2, or 3 hidden layers
     space.hidden_layer_counts[0] = 1;
@@ -171,51 +187,67 @@ int main(int argc, char *argv[])
     space.hidden_layer_counts[2] = 3;
     space.hidden_layer_count_options = 3;
     
-    // Hidden layer sizes to try
-    space.hidden_layer_sizes[0] = 32;
-    space.hidden_layer_sizes[1] = 64;
-    space.hidden_layer_sizes[2] = 128;
-    space.hidden_layer_sizes[3] = 256;
-    space.hidden_layer_size_count = 4;
+    // Hidden layer sizes (base size for topology generation)
+    space.hidden_layer_sizes[0] = 64;
+    space.hidden_layer_sizes[1] = 128;
+    space.hidden_layer_sizes[2] = 256;
+    space.hidden_layer_size_count = 3;
     
     // Topology patterns
     space.topology_patterns[0] = TOPOLOGY_CONSTANT;
     space.topology_patterns[1] = TOPOLOGY_PYRAMID;
-    space.topology_pattern_count = 2;
+    space.topology_patterns[2] = TOPOLOGY_FUNNEL;
+    space.topology_pattern_count = 3;
+    
+    // Activation functions for hidden layers
+    space.hidden_activations[0] = ACTIVATION_RELU;
+    space.hidden_activations[1] = ACTIVATION_SIGMOID;
+    space.hidden_activations[2] = ACTIVATION_TANH;
+    space.hidden_activations[3] = ACTIVATION_LEAKY_RELU;
+    space.hidden_activation_count = 4;
     
     // Training settings per trial
     space.epoch_limit = 5;  // Quick trials
     space.convergence_epsilon = 0.001f;
     
-    // Configure Bayesian optimization
-    BayesianOptions bayes_opts;
-    bayesian_options_init(&bayes_opts);
-    bayes_opts.n_initial = 5;      // Initial random samples
-    bayes_opts.n_iterations = 10;  // Bayesian iterations after initial
+    // Configure TPE optimization
+    TPEOptions tpe_opts;
+    tpe_options_init(&tpe_opts);
+    tpe_opts.n_startup = 10;       // Initial random samples
+    tpe_opts.n_iterations = 30;    // TPE-guided iterations
+    tpe_opts.n_candidates = 24;    // Candidates per iteration
+    tpe_opts.gamma = 0.25f;        // Top 25% are "good"
     
     // Configure hypertuning options
     HypertuneOptions tune_opts;
     hypertune_options_init(&tune_opts);
     tune_opts.score_func = hypertune_score_accuracy;  // Use accuracy as score
     tune_opts.progress_func = progress_callback;
-    tune_opts.verbosity = 1;
+    tune_opts.verbosity = 0;  // Suppress internal output (we have progress callback)
     tune_opts.seed = 42;  // For reproducibility
     
     // Allocate results array
-    int max_results = bayes_opts.n_initial + bayes_opts.n_iterations;
+    int max_results = tpe_opts.n_startup + tpe_opts.n_iterations;
     HypertuneResult *results = malloc(max_results * sizeof(HypertuneResult));
     HypertuneResult best_result;
     hypertune_result_init(&best_result);
     
-    printf("Starting Bayesian optimization...\n");
-    printf("  Initial random trials: %d\n", bayes_opts.n_initial);
-    printf("  Bayesian iterations: %d\n", bayes_opts.n_iterations);
-    printf("  Total trials: %d\n\n", max_results);
+    printf("Starting TPE hyperparameter search...\n");
+    printf("  Random startup trials: %d\n", tpe_opts.n_startup);
+    printf("  TPE-guided iterations: %d\n", tpe_opts.n_iterations);
+    printf("  Total trials: %d\n", max_results);
+    printf("  Hyperparameters explored:\n");
+    printf("    - Learning rate: %.4f - %.4f (log scale)\n", space.learning_rate_min, space.learning_rate_max);
+    printf("    - Batch sizes: 16, 32, 64, 128\n");
+    printf("    - Optimizers: Adam, SGD, Momentum, RMSProp\n");
+    printf("    - Hidden layers: 1, 2, 3\n");
+    printf("    - Topologies: Constant, Pyramid, Funnel\n");
+    printf("    - Activations: ReLU, Sigmoid, Tanh, LeakyReLU\n\n");
     
     clock_t start = clock();
     
-    // Run Bayesian search
-    int trials_completed = hypertune_bayesian_search(
+    // Run TPE search
+    int trials_completed = hypertune_tpe_search(
         &space,
         INPUT_SIZE,
         NUM_CLASSES,
@@ -223,7 +255,7 @@ int main(int argc, char *argv[])
         LOSS_CATEGORICAL_CROSS_ENTROPY,
         &split,
         &tune_opts,
-        &bayes_opts,
+        &tpe_opts,
         results,
         max_results,
         &best_result
@@ -269,10 +301,10 @@ int main(int argc, char *argv[])
     
     if (best_net)
     {
-        best_net->epochLimit = 10;  // Train longer for verification
-        best_net->batchSize = best_result.batch_size;
+        ann_set_epoch_limit(best_net, 10);  // Train longer for verification
+        ann_set_batch_size(best_net, best_result.batch_size);
         
-        printf("Training with best configuration for %d epochs...\n", best_net->epochLimit);
+        printf("Training with best configuration for 10 epochs...\n");
         ann_train_network(best_net, split.train_inputs, split.train_outputs, split.train_rows);
         
         // Evaluate on validation set

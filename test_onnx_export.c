@@ -223,6 +223,71 @@ void test_main(int argc, char *argv[]) {
     TESTEX("PIKCHR export with no layers returns ERR_INVALID", (result == ERR_INVALID));
     ann_free_network(net);
 
+    // ========================================================================
+    // ONNX IMPORT TESTS
+    // ========================================================================
+    SUITE("ONNX Import");
+    COMMENT("Testing ONNX JSON import (round-trip)...");
+
+    const char *import_file = "test_import.onnx.json";
+
+    // Create a network, export it, then import it back
+    net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(net, 4, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(net, 8, LAYER_HIDDEN, ACTIVATION_RELU);
+    ann_add_layer(net, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    
+    // Set some known weights for verification
+    net->layers[0].t_weights->values[0] = 0.123f;
+    net->layers[0].t_weights->values[1] = 0.456f;
+    net->layers[0].t_bias->values[0] = 0.789f;
+    net->layers[1].t_weights->values[0] = 0.321f;
+    net->layers[1].t_bias->values[0] = 0.654f;
+    
+    result = ann_export_onnx(net, import_file);
+    TESTEX("Export for import test succeeds", (result == ERR_OK));
+    
+    // Import the network
+    PNetwork imported = ann_import_onnx(import_file);
+    TESTEX("Import ONNX succeeds", (imported != NULL));
+    
+    if (imported)
+    {
+        TESTEX("Imported network has correct layer count", 
+               (imported->layer_count == net->layer_count));
+        TESTEX("Imported input layer size matches", 
+               (imported->layers[0].node_count == 4));
+        TESTEX("Imported hidden layer size matches", 
+               (imported->layers[1].node_count == 8));
+        TESTEX("Imported output layer size matches", 
+               (imported->layers[2].node_count == 3));
+        TESTEX("Imported hidden activation is RELU", 
+               (imported->layers[1].activation == ACTIVATION_RELU));
+        TESTEX("Imported output activation is SOFTMAX", 
+               (imported->layers[2].activation == ACTIVATION_SOFTMAX));
+        
+        // Verify weights match
+        real w0 = imported->layers[0].t_weights->values[0];
+        real w1 = imported->layers[0].t_weights->values[1];
+        real b0 = imported->layers[0].t_bias->values[0];
+        TESTEX("Imported weight[0][0] matches", (w0 > 0.12f && w0 < 0.13f));
+        TESTEX("Imported weight[0][1] matches", (w1 > 0.45f && w1 < 0.46f));
+        TESTEX("Imported bias[0][0] matches", (b0 > 0.78f && b0 < 0.80f));
+        
+        ann_free_network(imported);
+    }
+    
+    ann_free_network(net);
+    
+    // Test import error cases
+    imported = ann_import_onnx(NULL);
+    TESTEX("Import with NULL filename returns NULL", (imported == NULL));
+    
+    imported = ann_import_onnx("nonexistent_file.json");
+    TESTEX("Import of nonexistent file returns NULL", (imported == NULL));
+    
+    remove_file(import_file);
+
     // Cleanup any remaining test files
     remove_file(test_file);
     remove_file(pikchr_file);

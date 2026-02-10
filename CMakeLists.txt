@@ -64,7 +64,7 @@ else()
 endif()
 
 # add the core library (includes hypertuning)
-add_library(libann STATIC ann.c tensor.c ann_hypertune.c)
+add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c)
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
 #
@@ -118,6 +118,10 @@ target_link_libraries(test_optimizers libann ${BLAS_LIB} ${MATH_LIB})
 add_executable(test_training_convergence test_training_convergence.c testy/test_main.c)
 target_link_libraries(test_training_convergence libann ${BLAS_LIB} ${MATH_LIB})
 add_test(NAME test_training_convergence COMMAND test_training_convergence)
+
+add_executable(test_json test_json.c testy/test_main.c)
+target_link_libraries(test_json libann ${BLAS_LIB} ${MATH_LIB})
+add_test(NAME test_json COMMAND test_json)
 
 #add_executable(test_forward_pass test_forward_pass.c testy/test_main.c)
 #target_link_libraries(test_forward_pass ann ${BLAS_LIB} ${MATH_LIB})

@@ -389,6 +389,26 @@ int ann_save_network_binary(const PNetwork pnet, const char *filename);
 int ann_export_onnx(const PNetwork pnet, const char *filename);
 
 /**
+ * Import a network from ONNX JSON file.
+ * 
+ * Loads a neural network from the JSON format produced by ann_export_onnx().
+ * Only supports sequential dense networks with supported activations.
+ * 
+ * @param filename Path to ONNX JSON file
+ * @return Pointer to loaded network, or NULL on error
+ * 
+ * Supported ONNX operations:
+ * - MatMul (dense layer weights)
+ * - Add (bias)
+ * - Sigmoid, Relu, LeakyRelu, Tanh, Softsign, Softmax
+ * 
+ * Unsupported operations (Conv, Pool, etc.) will cause import to fail.
+ * 
+ * @see ann_export_onnx()
+ */
+PNetwork ann_import_onnx(const char *filename);
+
+/**
  * Export network architecture as PIKCHR diagram.
  * 
  * Generates a PIKCHR text file that can be rendered to SVG using

@@ -68,20 +68,11 @@ A prioritized list of improvements and enhancements for the library.
   - Add `ann_set_weight_decay()` for L2, `ann_set_l1_regularization()` for L1
   - Apply in all optimizers during weight update
 
-- [ ] **ONNX JSON Import (Round-Trip)** *(~8-10 hours)*
+- [x] **ONNX JSON Import (Round-Trip)** *(~8-10 hours)* ✓
   - Import models from the JSON format libann exports via `ann_export_onnx()`
-  - Enables model exchange and editing outside C code
-  - Implementation:
-    - [ ] Add lightweight JSON parser (cJSON or minimal custom) *(~3-4 hours)*
-    - [ ] Parse graph topology and validate sequential dense structure *(~2-3 hours)*
-  - Import models from the JSON format libann exports via `ann_export_onnx()`
-  - Enables model exchange and editing outside C code
-  - Implementation:
-    - [ ] Add lightweight JSON parser (cJSON or minimal custom) *(~3-4 hours)*
-    - [ ] Parse graph topology and validate sequential dense structure *(~2-3 hours)*
-    - [ ] Extract weights/biases from initializers *(~2 hours)*
-    - [ ] Map ONNX ops to libann activations *(~1 hour)*
-  - Rejects unsupported ops (Conv, Pool, etc.) with clear error message
+  - `ann_import_onnx(filename)` returns loaded network
+  - Supports all libann activations (Sigmoid, ReLU, Tanh, LeakyReLU, Softsign, Softmax)
+  - Rejects unsupported ops with error callback
 
 ## Low Priority
 

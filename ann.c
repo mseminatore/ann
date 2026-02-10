@@ -33,6 +33,7 @@
 #include <assert.h>
 #include <time.h>
 #include "ann.h"
+#include "json.h"
 
 //================================================================================================
 // NEURAL NETWORK IMPLEMENTATION - Architecture and Design Overview
@@ -3405,6 +3406,264 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 
 	fclose(fptr);
 	return ERR_OK;
+}
+
+//------------------------------
+// Map ONNX activation op to libann type
+//------------------------------
+static Activation_type onnx_op_to_activation(const char *op_type)
+{
+	if (!op_type) return ACTIVATION_NULL;
+	if (strcmp(op_type, "Sigmoid") == 0) return ACTIVATION_SIGMOID;
+	if (strcmp(op_type, "Relu") == 0) return ACTIVATION_RELU;
+	if (strcmp(op_type, "LeakyRelu") == 0) return ACTIVATION_LEAKY_RELU;
+	if (strcmp(op_type, "Tanh") == 0) return ACTIVATION_TANH;
+	if (strcmp(op_type, "Softsign") == 0) return ACTIVATION_SOFTSIGN;
+	if (strcmp(op_type, "Softmax") == 0) return ACTIVATION_SOFTMAX;
+	return ACTIVATION_NULL;
+}
+
+//------------------------------
+// Import network from ONNX JSON file
+//------------------------------
+PNetwork ann_import_onnx(const char *filename)
+{
+	if (!filename)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_import_onnx");
+		return NULL;
+	}
+
+	// Parse JSON file
+	JsonValue root;
+	if (json_parse_file(filename, &root) != 0)
+	{
+		invoke_error_callback(ERR_IO, "ann_import_onnx");
+		return NULL;
+	}
+
+	PNetwork pnet = NULL;
+
+	// Get graph
+	JsonValue *graph = json_get(&root, "graph");
+	if (!graph || graph->type != JSON_OBJECT)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_import_onnx: missing graph");
+		goto cleanup;
+	}
+
+	// Get initializers (weights and biases)
+	JsonValue *initializer = json_get(graph, "initializer");
+	if (!initializer || initializer->type != JSON_ARRAY)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_import_onnx: missing initializer");
+		goto cleanup;
+	}
+
+	// Count layers by counting weight tensors (weight_0, weight_1, ...)
+	size_t num_weights = 0;
+	for (size_t i = 0; i < json_array_length(initializer); i++)
+	{
+		JsonValue *init = json_at(initializer, i);
+		const char *name = json_string(json_get(init, "name"));
+		if (name && strncmp(name, "weight_", 7) == 0)
+			num_weights++;
+	}
+
+	if (num_weights == 0)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_import_onnx: no weights found");
+		goto cleanup;
+	}
+
+	// Get layer sizes from weight dimensions
+	// weight_i has dims [layer_i_nodes, layer_i+1_nodes]
+	int *layer_sizes = (int *)malloc((num_weights + 1) * sizeof(int));
+	if (!layer_sizes)
+	{
+		invoke_error_callback(ERR_ALLOC, "ann_import_onnx");
+		goto cleanup;
+	}
+
+	// Extract layer sizes from weight tensors
+	for (size_t layer = 0; layer < num_weights; layer++)
+	{
+		char weight_name[32];
+		snprintf(weight_name, sizeof(weight_name), "weight_%zu", layer);
+
+		// Find this weight tensor
+		JsonValue *weight_init = NULL;
+		for (size_t i = 0; i < json_array_length(initializer); i++)
+		{
+			JsonValue *init = json_at(initializer, i);
+			const char *name = json_string(json_get(init, "name"));
+			if (name && strcmp(name, weight_name) == 0)
+			{
+				weight_init = init;
+				break;
+			}
+		}
+
+		if (!weight_init)
+		{
+			invoke_error_callback(ERR_INVALID, "ann_import_onnx: missing weight tensor");
+			free(layer_sizes);
+			goto cleanup;
+		}
+
+		JsonValue *dims = json_get(weight_init, "dims");
+		if (!dims || json_array_length(dims) != 2)
+		{
+			invoke_error_callback(ERR_INVALID, "ann_import_onnx: invalid weight dims");
+			free(layer_sizes);
+			goto cleanup;
+		}
+
+		int curr_nodes, next_nodes;
+		json_int(json_at(dims, 0), &curr_nodes);
+		json_int(json_at(dims, 1), &next_nodes);
+
+		layer_sizes[layer] = curr_nodes;
+		if (layer == num_weights - 1)
+			layer_sizes[layer + 1] = next_nodes;
+	}
+
+	// Get nodes to determine activations
+	JsonValue *nodes = json_get(graph, "node");
+	if (!nodes || nodes->type != JSON_ARRAY)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_import_onnx: missing nodes");
+		free(layer_sizes);
+		goto cleanup;
+	}
+
+	// Build activation list for each layer (except input)
+	Activation_type *activations = (Activation_type *)malloc((num_weights + 1) * sizeof(Activation_type));
+	if (!activations)
+	{
+		invoke_error_callback(ERR_ALLOC, "ann_import_onnx");
+		free(layer_sizes);
+		goto cleanup;
+	}
+
+	// Initialize activations to NULL (input layer always NULL)
+	activations[0] = ACTIVATION_NULL;
+	for (size_t i = 1; i <= num_weights; i++)
+		activations[i] = ACTIVATION_NULL;
+
+	// Parse nodes to find activations
+	// Nodes are: MatMul, Add, [Activation] for each layer
+	for (size_t i = 0; i < json_array_length(nodes); i++)
+	{
+		JsonValue *node = json_at(nodes, i);
+		const char *op_type = json_string(json_get(node, "op_type"));
+		const char *name = json_string(json_get(node, "name"));
+
+		if (!op_type) continue;
+
+		// Skip MatMul and Add operations
+		if (strcmp(op_type, "MatMul") == 0 || strcmp(op_type, "Add") == 0)
+			continue;
+
+		// Check for unsupported operations
+		Activation_type act = onnx_op_to_activation(op_type);
+		if (act == ACTIVATION_NULL && 
+		    strcmp(op_type, "MatMul") != 0 && 
+		    strcmp(op_type, "Add") != 0)
+		{
+			// Unsupported operation
+			invoke_error_callback(ERR_INVALID, "ann_import_onnx: unsupported op");
+			free(layer_sizes);
+			free(activations);
+			goto cleanup;
+		}
+
+		// Extract layer index from activation name (e.g., "activation_0")
+		if (name && strncmp(name, "activation_", 11) == 0)
+		{
+			int layer_idx = atoi(name + 11);
+			if (layer_idx >= 0 && layer_idx < (int)num_weights)
+			{
+				activations[layer_idx + 1] = act;
+			}
+		}
+	}
+
+	// Create network
+	pnet = ann_make_network(OPT_ADAM, LOSS_MSE);
+	if (!pnet)
+	{
+		free(layer_sizes);
+		free(activations);
+		goto cleanup;
+	}
+
+	// Add layers
+	ann_add_layer(pnet, layer_sizes[0], LAYER_INPUT, ACTIVATION_NULL);
+	for (size_t i = 1; i < num_weights; i++)
+	{
+		ann_add_layer(pnet, layer_sizes[i], LAYER_HIDDEN, activations[i]);
+	}
+	ann_add_layer(pnet, layer_sizes[num_weights], LAYER_OUTPUT, activations[num_weights]);
+
+	// Initialize weights structure
+	init_weights(pnet);
+
+	// Load weights and biases from initializers
+	for (size_t layer = 0; layer < num_weights; layer++)
+	{
+		char weight_name[32], bias_name[32];
+		snprintf(weight_name, sizeof(weight_name), "weight_%zu", layer);
+		snprintf(bias_name, sizeof(bias_name), "bias_%zu", layer);
+
+		// Find and load weights
+		for (size_t i = 0; i < json_array_length(initializer); i++)
+		{
+			JsonValue *init = json_at(initializer, i);
+			const char *name = json_string(json_get(init, "name"));
+
+			if (name && strcmp(name, weight_name) == 0)
+			{
+				JsonValue *float_data = json_get(init, "float_data");
+				if (float_data && float_data->type == JSON_ARRAY)
+				{
+					PTensor weights = pnet->layers[layer].t_weights;
+					size_t count = json_array_length(float_data);
+					for (size_t j = 0; j < count && j < (size_t)(weights->rows * weights->cols); j++)
+					{
+						double val;
+						json_number(json_at(float_data, j), &val);
+						weights->values[j] = (real)val;
+					}
+				}
+			}
+			else if (name && strcmp(name, bias_name) == 0)
+			{
+				JsonValue *float_data = json_get(init, "float_data");
+				if (float_data && float_data->type == JSON_ARRAY)
+				{
+					PTensor bias = pnet->layers[layer].t_bias;
+					size_t count = json_array_length(float_data);
+					for (size_t j = 0; j < count && j < (size_t)bias->rows; j++)
+					{
+						double val;
+						json_number(json_at(float_data, j), &val);
+						bias->values[j] = (real)val;
+					}
+				}
+			}
+		}
+	}
+
+	free(layer_sizes);
+	free(activations);
+	json_free(&root);
+	return pnet;
+
+cleanup:
+	json_free(&root);
+	if (pnet) ann_free_network(pnet);
+	return NULL;
 }
 
 //------------------------------

@@ -130,6 +130,7 @@ ann_get_layer_count | get the number of layers in the network
 ann_get_layer_nodes | get the number of nodes in a layer
 ann_get_layer_activation | get the activation type of a layer
 ann_export_onnx | export trained network to ONNX JSON format
+ann_import_onnx | import network from ONNX JSON file
 ann_export_pikchr | export network architecture as PIKCHR diagram
 ann_export_learning_curve | export training history as CSV
 ann_clear_history | clear training history

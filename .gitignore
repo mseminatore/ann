@@ -13,10 +13,15 @@ test_loss_functions
 test_save_load
 test_training_convergence
 test_optimizers
+test_json
+test_hypertune
+test_onnx_export
 build_cblas/
 fashion_mnist.html
 fashion_mnist.pikchr
 fashion_mnist.svg
+fashion_mnist.onnx
+fashion_mnist_learning_curve.csv
 
 # Object files
 *.o

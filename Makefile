@@ -9,7 +9,7 @@ endif
 TARGET = mnist
 LIB_OBJS = ann.o tensor.o json.o ann_hypertune.o
 LIBANN = libann.a
-DEPS = ann.h tensor.h ann_config.h json.h ann_hypertune.o
+DEPS = ann.h tensor.h ann_config.h json.h ann_hypertune.h
 
 # use no blas
 #CFLAGS += -g -O2

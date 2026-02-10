@@ -3813,10 +3813,10 @@ int ann_export_pikchr(const PNetwork pnet, const char *filename)
 			const char *act_name = get_activation_name(pnet->layers[layer].activation);
 			
 			if (act_name)
-				fprintf(fptr, "box \"%s\" \"n=%d\" \"(%s)\"\n", 
+				fprintf(fptr, "box \"%s\" \"%d nodes\" \"(%s)\"\n", 
 					layer_type, nodes, act_name);
 			else
-				fprintf(fptr, "box \"%s\" \"n=%d\"\n", layer_type, nodes);
+				fprintf(fptr, "box \"%s\" \"%d nodes\"\n", layer_type, nodes);
 			
 			if (layer < pnet->layer_count - 1)
 				fprintf(fptr, "arrow right 0.3\n");

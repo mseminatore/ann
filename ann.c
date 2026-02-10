@@ -435,7 +435,7 @@ static void init_weights(PNetwork pnet)
 //--------------------------------
 // print nodes in the output layer
 //--------------------------------
-void print_outputs(const PNetwork pnet)
+void ann_print_outputs(const PNetwork pnet)
 {
 	if (!pnet)
 		return;
@@ -2481,7 +2481,7 @@ void ann_set_lr_scheduler(PNetwork pnet, LRSchedulerFunc scheduler, void *user_d
 // Step decay LR scheduler
 // LR = base_lr * (gamma ^ (epoch / step_size))
 //------------------------------
-real lr_scheduler_step(unsigned epoch, real base_lr, void *user_data)
+real ann_lr_scheduler_step(unsigned epoch, real base_lr, void *user_data)
 {
 	if (!user_data)
 		return base_lr;
@@ -2500,7 +2500,7 @@ real lr_scheduler_step(unsigned epoch, real base_lr, void *user_data)
 // Exponential decay LR scheduler
 // LR = base_lr * (gamma ^ epoch)
 //------------------------------
-real lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data)
+real ann_lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data)
 {
 	if (!user_data)
 		return base_lr;
@@ -2513,7 +2513,7 @@ real lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data)
 // Cosine annealing LR scheduler
 // LR = min_lr + (base_lr - min_lr) * (1 + cos(pi * epoch / T_max)) / 2
 //------------------------------
-real lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data)
+real ann_lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data)
 {
 	if (!user_data)
 		return base_lr;

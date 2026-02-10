@@ -74,7 +74,7 @@ int main(int argc, char *argv[])
 	real outputs[1];
 	CHECK_OK(ann_predict(pnet, &data[0], outputs));
 
-	print_outputs(pnet);
+	ann_print_outputs(pnet);
 
 	ann_free_network(pnet);
 

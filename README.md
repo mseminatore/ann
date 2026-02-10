@@ -138,7 +138,7 @@ ann_confusion_matrix | compute binary confusion matrix and MCC
 ann_print_confusion_matrix | print formatted confusion matrix
 ann_class_prediction | determine predicted class from output activations
 ann_print_props | print network properties and configuration
-print_outputs | print output layer activations (debug)
+ann_print_outputs | print output layer activations (debug)
 ann_strerror | convert error code to human-readable message
 ann_set_error_log_callback | install error logging callback
 ann_get_error_log_callback | get current error callback
@@ -150,22 +150,22 @@ Built-in schedulers adjust the learning rate during training:
 
 | Scheduler | Function | Description |
 |-----------|----------|-------------|
-| Step decay | `lr_scheduler_step` | Multiply LR by gamma every N epochs |
-| Exponential | `lr_scheduler_exponential` | Multiply LR by gamma each epoch |
-| Cosine | `lr_scheduler_cosine` | Smooth decay from base LR to min LR |
+| Step decay | `ann_lr_scheduler_step` | Multiply LR by gamma every N epochs |
+| Exponential | `ann_lr_scheduler_exponential` | Multiply LR by gamma each epoch |
+| Cosine | `ann_lr_scheduler_cosine` | Smooth decay from base LR to min LR |
 
 ```c
 // Step decay: halve LR every 10 epochs
 LRStepParams step_params = { .step_size = 10, .gamma = 0.5f };
-ann_set_lr_scheduler(net, lr_scheduler_step, &step_params);
+ann_set_lr_scheduler(net, ann_lr_scheduler_step, &step_params);
 
 // Exponential decay: 5% reduction per epoch
 LRExponentialParams exp_params = { .gamma = 0.95f };
-ann_set_lr_scheduler(net, lr_scheduler_exponential, &exp_params);
+ann_set_lr_scheduler(net, ann_lr_scheduler_exponential, &exp_params);
 
 // Cosine annealing: decay to 0.0001 over 100 epochs
 LRCosineParams cos_params = { .T_max = 100, .min_lr = 0.0001f };
-ann_set_lr_scheduler(net, lr_scheduler_cosine, &cos_params);
+ann_set_lr_scheduler(net, ann_lr_scheduler_cosine, &cos_params);
 
 // Custom scheduler
 real my_scheduler(unsigned epoch, real base_lr, void *data) {
@@ -681,7 +681,7 @@ int main(int argc, char *argv[])
     real outputs[1];
     ann_predict(pnet, &data[0], outputs);
 
-    print_outputs(pnet);
+    ann_print_outputs(pnet);
 
     // free resources
     ann_free_network(pnet);

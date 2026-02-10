@@ -670,7 +670,7 @@ void ann_set_epoch_limit(PNetwork pnet, unsigned limit);
  * @param scheduler Scheduler callback function, or NULL to disable
  * @param user_data User-provided data passed to scheduler (e.g., parameters)
  * 
- * @see lr_scheduler_step, lr_scheduler_exponential, lr_scheduler_cosine
+ * @see ann_lr_scheduler_step, ann_lr_scheduler_exponential, ann_lr_scheduler_cosine
  */
 void ann_set_lr_scheduler(PNetwork pnet, LRSchedulerFunc scheduler, void *user_data);
 
@@ -709,7 +709,7 @@ typedef struct {
  * @param user_data Pointer to LRStepParams
  * @return Scheduled learning rate
  */
-real lr_scheduler_step(unsigned epoch, real base_lr, void *user_data);
+real ann_lr_scheduler_step(unsigned epoch, real base_lr, void *user_data);
 
 /**
  * Exponential decay scheduler: multiplies LR by gamma each epoch.
@@ -720,7 +720,7 @@ real lr_scheduler_step(unsigned epoch, real base_lr, void *user_data);
  * @param user_data Pointer to LRExponentialParams
  * @return Scheduled learning rate
  */
-real lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data);
+real ann_lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data);
 
 /**
  * Cosine annealing scheduler: smooth decay to min_lr.
@@ -731,7 +731,7 @@ real lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data);
  * @param user_data Pointer to LRCosineParams
  * @return Scheduled learning rate
  */
-real lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data);
+real ann_lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data);
 
 // ============================================================================
 // DROPOUT REGULARIZATION
@@ -826,7 +826,7 @@ void ann_print_props(const PNetwork pnet);
  * 
  * @param pnet Network whose outputs to print (must not be NULL)
  */
-void print_outputs(const PNetwork pnet);
+void ann_print_outputs(const PNetwork pnet);
 
 // ============================================================================
 // ERROR HANDLING

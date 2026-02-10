@@ -107,11 +107,17 @@ A prioritized list of improvements and enhancements for the library.
     - [x] Exponential decay: `lr_scheduler_exponential()` - LR *= gamma each epoch
     - [x] Cosine annealing: `lr_scheduler_cosine()` - smooth decay to min_lr
 
-- [ ] **PIKCHR Network Diagram Export** *(~2-3 hours)* ✓
+- [x] **PIKCHR Network Diagram Export** *(~2-3 hours)* ✓
   - Export network structure as PIKCHR diagram (renders to SVG)
   - `ann_export_pikchr(pnet, filename)` function
   - Simple mode: boxes with layer info for large networks (>10 nodes/layer)
   - Detailed mode: show individual nodes for small networks
+
+- [x] **Learning Curve Export** *(~2-3 hours)* ✓
+  - Store loss/accuracy history during training
+  - `ann_export_learning_curve(pnet, filename)` exports CSV
+  - Format: epoch,loss,learning_rate
+  - Enables plotting with gnuplot, matplotlib, Excel
 
 - [ ] **Documentation Updates** *(~1-2 hours)*
   - [ ] Update tensor_gemm header comment (no longer "not fully implemented")

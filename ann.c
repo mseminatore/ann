@@ -275,6 +275,11 @@ static real softsign(real x)
 }
 
 //------------------------------
+// Forward declarations
+//------------------------------
+static void record_history(PNetwork pnet, real loss, real learning_rate);
+
+//------------------------------
 // compute the softmax
 // Converts output layer into probability distribution (sums to 1)
 // softmax(x_i) = e^x_i / sum(e^x_j for all j)
@@ -2088,6 +2093,12 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->base_learning_rate = (real)0.0;		// set when training starts
 	pnet->default_dropout	= (real)0.0;		// dropout disabled by default
 	pnet->is_training		= 0;				// inference mode by default
+	
+	// Training history
+	pnet->loss_history		= NULL;
+	pnet->lr_history		= NULL;
+	pnet->history_count		= 0;
+	pnet->history_capacity	= 0;
 
 	switch(opt)
 	{
@@ -2276,6 +2287,9 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		ann_printf(pnet, "] - loss: %s%3.2g%s - LR: %s%3.2g%s\n", 
 			COLOR(ANSI_YELLOW), loss, RESET(),
 			COLOR(ANSI_BLUE), pnet->learning_rate, RESET());
+		
+		// Record training history for learning curve
+		record_history(pnet, loss, pnet->learning_rate);
 
 		// optimize learning once per epoch
 		if (pnet->optimizer == OPT_SGD_WITH_DECAY || pnet->optimizer == OPT_MOMENTUM)
@@ -2725,6 +2739,10 @@ void ann_free_network(PNetwork pnet)
 	}
 
 	free(pnet->layers);
+	
+	// Free training history
+	free(pnet->loss_history);
+	free(pnet->lr_history);
 
 	// free network
 	free(pnet);
@@ -3535,6 +3553,94 @@ int ann_export_pikchr(const PNetwork pnet, const char *filename)
 			if (layer < pnet->layer_count - 1)
 				fprintf(fptr, "arrow right 0.3\n");
 		}
+	}
+
+	fclose(fptr);
+	return ERR_OK;
+}
+
+//------------------------------
+// Record epoch in training history
+//------------------------------
+static void record_history(PNetwork pnet, real loss, real learning_rate)
+{
+	// Check if we need to allocate or expand history
+	if (pnet->history_count >= pnet->history_capacity)
+	{
+		unsigned new_capacity = pnet->history_capacity == 0 ? 256 : pnet->history_capacity * 2;
+		if (new_capacity > MAX_HISTORY_SIZE)
+			new_capacity = MAX_HISTORY_SIZE;
+		
+		if (pnet->history_count >= MAX_HISTORY_SIZE)
+			return;  // History full, stop recording
+		
+		real *new_loss = (real *)realloc(pnet->loss_history, new_capacity * sizeof(real));
+		real *new_lr = (real *)realloc(pnet->lr_history, new_capacity * sizeof(real));
+		
+		if (!new_loss || !new_lr)
+		{
+			free(new_loss);
+			free(new_lr);
+			return;  // Allocation failed, skip recording
+		}
+		
+		pnet->loss_history = new_loss;
+		pnet->lr_history = new_lr;
+		pnet->history_capacity = new_capacity;
+	}
+	
+	pnet->loss_history[pnet->history_count] = loss;
+	pnet->lr_history[pnet->history_count] = learning_rate;
+	pnet->history_count++;
+}
+
+//------------------------------
+// Clear training history
+//------------------------------
+void ann_clear_history(PNetwork pnet)
+{
+	if (!pnet)
+		return;
+	
+	free(pnet->loss_history);
+	free(pnet->lr_history);
+	pnet->loss_history = NULL;
+	pnet->lr_history = NULL;
+	pnet->history_count = 0;
+	pnet->history_capacity = 0;
+}
+
+//------------------------------
+// Export learning curve as CSV
+//------------------------------
+int ann_export_learning_curve(const PNetwork pnet, const char *filename)
+{
+	if (!pnet || !filename)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_export_learning_curve");
+		return ERR_NULL_PTR;
+	}
+
+	if (pnet->history_count == 0)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_export_learning_curve");
+		return ERR_INVALID;
+	}
+
+	FILE *fptr = fopen(filename, "w");
+	if (!fptr)
+	{
+		invoke_error_callback(ERR_IO, "ann_export_learning_curve");
+		return ERR_IO;
+	}
+
+	// Write header
+	fprintf(fptr, "epoch,loss,learning_rate\n");
+
+	// Write data
+	for (unsigned i = 0; i < pnet->history_count; i++)
+	{
+		fprintf(fptr, "%u,%g,%g\n", i + 1, pnet->loss_history[i], pnet->lr_history[i]);
 	}
 
 	fclose(fptr);

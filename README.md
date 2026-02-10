@@ -124,10 +124,17 @@ ann_set_batch_size | set the mini-batch size
 ann_set_epoch_limit | set the maximum number of epochs
 ann_set_lr_scheduler | set learning rate scheduler callback
 ann_set_gradient_clip | set gradient clipping threshold
+ann_set_dropout | set default dropout rate for hidden layers
+ann_set_layer_dropout | set dropout rate for a specific layer
 ann_get_layer_count | get the number of layers in the network
 ann_get_layer_nodes | get the number of nodes in a layer
 ann_get_layer_activation | get the activation type of a layer
 ann_export_onnx | export trained network to ONNX JSON format
+ann_export_pikchr | export network architecture as PIKCHR diagram
+ann_export_learning_curve | export training history as CSV
+ann_clear_history | clear training history
+ann_confusion_matrix | compute binary confusion matrix and MCC
+ann_print_confusion_matrix | print formatted confusion matrix
 ann_class_prediction | determine predicted class from output activations
 ann_print_props | print network properties and configuration
 print_outputs | print output layer activations (debug)
@@ -190,9 +197,75 @@ ann_set_training_mode(net, 0);  // Disable dropout (inference)
 - Recommended rates: 0.2-0.5 for hidden layers, lower for layers with fewer neurons
 - Use dropout with larger networks to prevent overfitting
 
+## Confusion Matrix & MCC
+
+For binary classification problems, compute a confusion matrix and Matthews 
+Correlation Coefficient (MCC):
+
+```c
+int tp, fp, tn, fn;
+real mcc = ann_confusion_matrix(net, inputs, outputs, &tp, &fp, &tn, &fn);
+
+// Or print formatted output
+ann_print_confusion_matrix(net, inputs, outputs);
+```
+
+**Output:**
+```
+Confusion Matrix
+                Predicted
+              Pos     Neg
+Actual Pos     42       3
+       Neg      5      50
+
+MCC: 0.8732
+```
+
+**Notes:**
+- Binary classification only (2 output classes)
+- Class 0 = negative, Class 1 = positive
+- MCC range: -1 (worst) to +1 (perfect)
+- MCC handles imbalanced datasets better than accuracy
+
+## Network Visualization (PIKCHR)
+
+Export network architecture as a PIKCHR diagram that renders to SVG:
+
+```c
+ann_export_pikchr(net, "network.pikchr");
+```
+
+Then render with: `pikchr network.pikchr > network.svg`
+
+**Two modes:**
+- **Simple mode** (networks with >10 nodes per layer): Box diagram with layer info
+- **Detailed mode** (≤10 nodes per layer): Individual node circles with connections
+
+## Learning Curve Export
+
+Export training history as CSV for visualization:
+
+```c
+ann_train_network(net, inputs, outputs, rows);
+ann_export_learning_curve(net, "learning_curve.csv");
+
+// Clear history before retraining (optional)
+ann_clear_history(net);
+```
+
+**CSV format:**
+```
+epoch,loss,learning_rate
+1,0.2534,0.001
+2,0.1823,0.001
+...
+```
+
+Plot with gnuplot, Python matplotlib, or Excel to diagnose training issues.
+
 # Hyperparameter Tuning
 
-The `ann_hypertune` module provides automated hyperparameter search to find 
+The `ann_hypertune` module provides automated hyperparameter search to find
 optimal network configurations. It supports both **grid search** (exhaustive) 
 and **random search** (sampling-based) strategies.
 

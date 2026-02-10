@@ -400,5 +400,65 @@ void test_main(int argc, char *argv[]) {
     tensor_free(y);
     ann_free_network(net_binary);
 
+    // ========================================================================
+    // LEARNING CURVE EXPORT TESTS
+    // ========================================================================
+    SUITE("Learning Curve Export");
+    COMMENT("Testing learning curve CSV export...");
+    
+    // Train a simple network to generate history
+    PNetwork net_curve = ann_make_network(OPT_ADAM, LOSS_MSE);
+    ann_add_layer(net_curve, 2, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(net_curve, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+    ann_add_layer(net_curve, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+    ann_set_epoch_limit(net_curve, 50);
+    ann_set_batch_size(net_curve, 4);
+    ann_set_learning_rate(net_curve, 0.5f);
+    
+    // XOR training data
+    real xor_x[] = {0, 0, 0, 1, 1, 0, 1, 1};
+    real xor_y[] = {0, 1, 1, 0};
+    PTensor xor_in = tensor_create_from_array(4, 2, xor_x);
+    PTensor xor_out = tensor_create_from_array(4, 1, xor_y);
+    
+    ann_train_network(net_curve, xor_in, xor_out, 4);
+    
+    TESTEX("History recorded during training", (net_curve->history_count > 0));
+    TESTEX("History count matches epochs or less", (net_curve->history_count <= 50));
+    
+    // Export learning curve
+    const char *curve_file = "test_learning_curve.csv";
+    int curve_result = ann_export_learning_curve(net_curve, curve_file);
+    TESTEX("Learning curve export succeeds", (curve_result == ERR_OK));
+    
+    // Verify file contents
+    FILE *f = fopen(curve_file, "r");
+    TESTEX("Learning curve CSV file created", (f != NULL));
+    if (f)
+    {
+        char line[256];
+        fgets(line, sizeof(line), f);  // Read header
+        TESTEX("CSV has header", (strstr(line, "epoch") != NULL && strstr(line, "loss") != NULL));
+        fgets(line, sizeof(line), f);  // Read first data line
+        TESTEX("CSV has data", (strlen(line) > 0));
+        fclose(f);
+        remove(curve_file);
+    }
+    
+    // Test clear history
+    ann_clear_history(net_curve);
+    TESTEX("Clear history sets count to 0", (net_curve->history_count == 0));
+    
+    // Test error cases
+    int err_result = ann_export_learning_curve(NULL, curve_file);
+    TESTEX("Export with NULL network returns ERR_NULL_PTR", (err_result == ERR_NULL_PTR));
+    
+    err_result = ann_export_learning_curve(net_curve, curve_file);
+    TESTEX("Export with no history returns ERR_INVALID", (err_result == ERR_INVALID));
+    
+    tensor_free(xor_in);
+    tensor_free(xor_out);
+    ann_free_network(net_curve);
+
     TESTEX("Network creation and configuration tests completed", 1);
 }

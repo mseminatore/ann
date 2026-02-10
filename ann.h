@@ -54,6 +54,8 @@
 #define CSV_HAS_HEADER 	1
 #define CSV_NO_HEADER 	0
 
+#define MAX_HISTORY_SIZE 10000		// maximum epochs to store in learning curve history
+
 //------------------------------
 // Error values
 //------------------------------
@@ -248,6 +250,12 @@ struct Network
 	void *lr_scheduler_data;			// user data for scheduler
 
 	unsigned current_batch_size;		// current allocated batch size for batch tensors
+
+	// Training history for learning curve export
+	real *loss_history;					// loss at each epoch (dynamically allocated)
+	real *lr_history;					// learning rate at each epoch
+	unsigned history_count;				// number of epochs recorded
+	unsigned history_capacity;			// allocated capacity
 };
 
 //------------------------------
@@ -398,6 +406,28 @@ int ann_export_onnx(const PNetwork pnet, const char *filename);
  * @return ERR_IO if file cannot be created/written
  */
 int ann_export_pikchr(const PNetwork pnet, const char *filename);
+
+/**
+ * Export training history as CSV for learning curve visualization.
+ * 
+ * Writes epoch, loss, and learning rate data collected during training.
+ * Use external tools (gnuplot, matplotlib, Excel) to plot the curve.
+ * 
+ * @param pnet Network with training history (must have been trained)
+ * @param filename Output CSV file path
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if network or filename is NULL
+ * @return ERR_INVALID if no training history available
+ * @return ERR_IO if file cannot be created/written
+ */
+int ann_export_learning_curve(const PNetwork pnet, const char *filename);
+
+/**
+ * Clear training history to free memory or before retraining.
+ * 
+ * @param pnet Network to clear history from
+ */
+void ann_clear_history(PNetwork pnet);
 
 /**
  * Load trained network from text file.

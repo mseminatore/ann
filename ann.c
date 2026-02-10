@@ -364,6 +364,10 @@ static void init_weights(PNetwork pnet)
 {
 	if (!pnet)
 		return;
+	
+	// Don't reinitialize if weights already set
+	if (pnet->weights_set)
+		return;
 
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
@@ -1423,7 +1427,7 @@ static int ensure_batch_tensors(PNetwork pnet, unsigned batch_size)
 		tensor_free(pnet->layers[layer].t_batch_z);
 
 		// Allocate new tensors [batch_size × nodes]
-		pnet->layers[layer].t_batch_values = tensor_create(batch_size, nodes);
+		pnet->layers[layer].t_batch_values = tensor_zeros(batch_size, nodes);
 		if (!pnet->layers[layer].t_batch_values)
 		{
 			invoke_error_callback(ERR_ALLOC, "ensure_batch_tensors");
@@ -1433,8 +1437,8 @@ static int ensure_batch_tensors(PNetwork pnet, unsigned batch_size)
 		// Only non-input layers need gradient and pre-activation tensors
 		if (layer > 0)
 		{
-			pnet->layers[layer].t_batch_dl_dz = tensor_create(batch_size, nodes);
-			pnet->layers[layer].t_batch_z = tensor_create(batch_size, nodes);
+			pnet->layers[layer].t_batch_dl_dz = tensor_zeros(batch_size, nodes);
+			pnet->layers[layer].t_batch_z = tensor_zeros(batch_size, nodes);
 			if (!pnet->layers[layer].t_batch_dl_dz || !pnet->layers[layer].t_batch_z)
 			{
 				invoke_error_callback(ERR_ALLOC, "ensure_batch_tensors");
@@ -2179,7 +2183,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	init_weights(pnet);
 
 	int converged = 0;
-	real loss;
+	real loss = (real)0.0;
 	unsigned epoch = 0;
 
 	// create indices for shuffling the inputs and outputs

@@ -29,6 +29,7 @@ void test_main(int argc, char* argv[])
     SUITE("Text Format");
     {
         PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net, 2, LAYER_HIDDEN, ACTIVATION_RELU);
         ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
@@ -53,6 +54,7 @@ void test_main(int argc, char* argv[])
     SUITE("Binary Format");
     {
         PNetwork net = ann_make_network(OPT_MOMENTUM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(net, 8, LAYER_HIDDEN, ACTIVATION_RELU);
         ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
@@ -77,18 +79,20 @@ void test_main(int argc, char* argv[])
     SUITE("Round Trip Predictions");
     {
         PNetwork original = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(original, 2, LAYER_INPUT, ACTIVATION_NULL);
         ann_add_layer(original, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
         ann_add_layer(original, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
-        ann_set_learning_rate(original, 0.3f);
+        ann_set_learning_rate(original, 0.5f);
+        ann_set_epoch_limit(original, 500);  // Limit epochs to prevent long runs
+        ann_set_convergence(original, 0.01f);  // Stop when loss is low enough
         
         real data[] = {0, 0, 0, 1, 1, 0, 1, 1};
         real targets[] = {0, 1, 1, 0};
         PTensor inputs = tensor_create_from_array(4, 2, data);
         PTensor targets_t = tensor_create_from_array(4, 1, targets);
         
-        for (int i = 0; i < 50; i++) {
-            ann_train_network(original, inputs, targets_t, 4);
-        }
+        // Single training call - let convergence/epoch limit handle termination
+        ann_train_network(original, inputs, targets_t, 4);
         
         real test_input[] = {0.5f, 0.5f};
         real original_output[1];

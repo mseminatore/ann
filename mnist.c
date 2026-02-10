@@ -291,6 +291,7 @@ int main(int argc, char *argv[])
 
 	ann_export_onnx(pnet, "fashion_mnist.onnx");
 	ann_export_pikchr(pnet, "fashion_mnist.pikchr");
+	ann_export_learning_curve(pnet, "fashion_mnist_learning_curve.csv");
 	
 #if defined(USE_CBLAS) || defined(CBLAS)
 	cblas_print_stats();

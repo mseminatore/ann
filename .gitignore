@@ -22,6 +22,7 @@ fashion_mnist.pikchr
 fashion_mnist.svg
 fashion_mnist.onnx
 fashion_mnist_learning_curve.csv
+mnist_hypertune
 
 # Object files
 *.o

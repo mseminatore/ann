@@ -4,6 +4,9 @@
 #include <math.h>
 #include "testy/test.h"
 #include "ann.h"
+#ifdef USE_CBLAS
+#include <cblas.h>
+#endif
 
 // Test callback tracking variables
 static int callback_called = 0;
@@ -21,6 +24,9 @@ void test_error_callback(int code, const char *msg, const char *func) {
 void test_main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
+#ifdef USE_CBLAS
+    cblas_init(CBLAS_DEFAULT_THREADS);
+#endif
     MODULE("Network Creation and Configuration Tests");
 
     // ========================================================================

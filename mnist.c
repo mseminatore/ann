@@ -289,6 +289,9 @@ int main(int argc, char *argv[])
 	real acc = ann_evaluate_accuracy(pnet, x_test, y_test);
 	printf("\nTest accuracy: %g%%\n", acc * 100);
 
+	ann_export_onnx(pnet, "fashion_mnist.onnx");
+	ann_export_pikchr(pnet, "fashion_mnist.pikchr");
+	
 #if defined(USE_CBLAS) || defined(CBLAS)
 	cblas_print_stats();
 #endif

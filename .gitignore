@@ -14,6 +14,9 @@ test_save_load
 test_training_convergence
 test_optimizers
 build_cblas/
+fashion_mnist.html
+fashion_mnist.pikchr
+fashion_mnist.svg
 
 # Object files
 *.o

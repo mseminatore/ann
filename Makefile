@@ -31,7 +31,7 @@ LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 #  -DMKL_ILP64  -m64  -I"${MKLROOT}/include"
 #  ${MKLROOT}/lib/libmkl_intel_ilp64.a ${MKLROOT}/lib/libmkl_tbb_thread.a ${MKLROOT}/lib/libmkl_core.a -L${TBBROOT}/lib -ltbb -lc++ -lpthread -lm -ldl
 
-all: $(LIBANN) mnist logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json
+all: $(LIBANN) mnist mnist_hypertune logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json
 
 # build the static library
 $(LIBANN): $(LIB_OBJS)
@@ -39,6 +39,9 @@ $(LIBANN): $(LIB_OBJS)
 
 $(TARGET): $(LIBANN) mnist.o
 	$(CC) -o $@ mnist.o $(LIBANN) $(LFLAGS)
+
+mnist_hypertune: $(LIBANN) mnist_hypertune.o
+	$(CC) -o $@ mnist_hypertune.o $(LIBANN) $(LFLAGS)
 
 logic: $(LIBANN) logic.o
 	$(CC) -o $@ logic.o $(LIBANN) $(LFLAGS)

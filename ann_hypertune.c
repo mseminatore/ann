@@ -1031,14 +1031,6 @@ int hypertune_bayesian_search(
     
     int trial = 0;
     
-    // Use other hyperparams from space (fixed during BO)
-    int layer_count = space->hidden_layer_counts[0];
-    int layer_size = space->hidden_layer_sizes[0];
-    Activation_type act = space->hidden_activations[0];
-    Optimizer_type opt = space->optimizers[0];
-    TopologyPattern topo = (space->topology_pattern_count > 0) ? 
-                           space->topology_patterns[0] : TOPOLOGY_CONSTANT;
-    
     // Phase 1: Initial random sampling
     unsigned seed = tune_options->seed ? tune_options->seed : (unsigned)time(NULL);
     srand(seed);
@@ -1052,6 +1044,18 @@ int hypertune_bayesian_search(
         // Denormalize
         real lr = denormalize_lr(x[0], space->learning_rate_min, space->learning_rate_max);
         unsigned batch = denormalize_batch(x[1], space->batch_sizes, space->batch_size_count);
+        
+        // Randomly sample architecture for each trial
+        int layer_count = (space->hidden_layer_count_options > 0) ?
+            space->hidden_layer_counts[rand() % space->hidden_layer_count_options] : 1;
+        int layer_size = (space->hidden_layer_size_count > 0) ?
+            space->hidden_layer_sizes[rand() % space->hidden_layer_size_count] : 64;
+        TopologyPattern topo = (space->topology_pattern_count > 0) ?
+            space->topology_patterns[rand() % space->topology_pattern_count] : TOPOLOGY_CONSTANT;
+        Activation_type act = (space->hidden_activation_count > 0) ?
+            space->hidden_activations[rand() % space->hidden_activation_count] : ACTIVATION_RELU;
+        Optimizer_type opt = (space->optimizer_count > 0) ?
+            space->optimizers[rand() % space->optimizer_count] : OPT_ADAM;
         
         // Build config
         HypertuneResult current;
@@ -1137,6 +1141,18 @@ int hypertune_bayesian_search(
         // Evaluate at best candidate
         real lr = denormalize_lr(best_x[0], space->learning_rate_min, space->learning_rate_max);
         unsigned batch = denormalize_batch(best_x[1], space->batch_sizes, space->batch_size_count);
+        
+        // Randomly sample architecture for each trial
+        int layer_count = (space->hidden_layer_count_options > 0) ?
+            space->hidden_layer_counts[rand() % space->hidden_layer_count_options] : 1;
+        int layer_size = (space->hidden_layer_size_count > 0) ?
+            space->hidden_layer_sizes[rand() % space->hidden_layer_size_count] : 64;
+        TopologyPattern topo = (space->topology_pattern_count > 0) ?
+            space->topology_patterns[rand() % space->topology_pattern_count] : TOPOLOGY_CONSTANT;
+        Activation_type act = (space->hidden_activation_count > 0) ?
+            space->hidden_activations[rand() % space->hidden_activation_count] : ACTIVATION_RELU;
+        Optimizer_type opt = (space->optimizer_count > 0) ?
+            space->optimizers[rand() % space->optimizer_count] : OPT_ADAM;
         
         HypertuneResult current;
         hypertune_result_init(&current);

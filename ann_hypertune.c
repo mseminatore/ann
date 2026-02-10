@@ -56,7 +56,7 @@
 // Optimizer names for printing
 //------------------------------
 static const char *optimizer_names[] = {
-    "SGD", "MOMENTUM", "RMSPROP", "ADAGRAD", "ADAM"
+    "SGD", "Momentum", "RMSProp", "Adagrad", "Adam"
 };
 
 static const char *activation_names[] = {

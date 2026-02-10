@@ -266,6 +266,10 @@ int main(int argc, char *argv[])
 	ann_set_epoch_limit(pnet, epoch_count);
 	ann_set_convergence(pnet, (real)0.1);
 	ann_set_batch_size(pnet, batch_size);
+	
+	// Add exponential LR decay (5% reduction per epoch)
+	static real lr_decay = 0.95f;
+	ann_set_lr_scheduler(pnet, ann_lr_scheduler_exponential, &lr_decay);
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows);

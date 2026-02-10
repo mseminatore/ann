@@ -137,13 +137,11 @@ static const int ANN_BINARY_FORMAT_VERSION = 1;
 //-----------------------------------------------
 static const char *optimizers[] = {
 	"Stochastic Gradient Descent",
-	"Stochastic Gradient Descent with decay",
-	"Adaptive Stochastic Gradient Descent",
-	"SGD with momentum",
-	"RMSPROP",
-	"ADAGRAD",
+	"SGD + Momentum",
+	"RMSProp",
+	"Adagrad",
 	"Adam",
-	"SGD"
+	"Adam"	// default
 };
 
 //-----------------------------------------------

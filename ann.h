@@ -129,8 +129,6 @@ typedef enum {
 //------------------------------
 typedef enum {
 	OPT_SGD,
-	OPT_SGD_WITH_DECAY,
-	OPT_ADAPT,
 	OPT_MOMENTUM,
 	OPT_RMSPROP,
 	OPT_ADAGRAD,

@@ -35,10 +35,6 @@ void test_main(int argc, char *argv[]) {
     TESTEX("Network has zero layers initially", 
            (net_sgd_mse != NULL && net_sgd_mse->layer_count == 0));
 
-    // Test with different optimizer
-    PNetwork net_sgd_decay = ann_make_network(OPT_SGD_WITH_DECAY, LOSS_MSE);
-    TESTEX("ann_make_network (SGD_WITH_DECAY) returns non-NULL", (net_sgd_decay != NULL));
-
     // Test with Adam optimizer
     PNetwork net_adam = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
     TESTEX("ann_make_network (ADAM, CROSS_ENTROPY) returns non-NULL", (net_adam != NULL));
@@ -244,9 +240,6 @@ void test_main(int argc, char *argv[]) {
     // Clean up all test networks one by one with verification
     ann_free_network(net_sgd_mse);
     TESTEX("Freed net_sgd_mse", 1);
-    
-    ann_free_network(net_sgd_decay);
-    TESTEX("Freed net_sgd_decay", 1);
     
     ann_free_network(net_adam);
     TESTEX("Freed net_adam", 1);

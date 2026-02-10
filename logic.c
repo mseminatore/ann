@@ -53,7 +53,7 @@ int main(int argc, char *argv[])
 	CHECK_OK(ann_load_csv(filename, CSV_NO_HEADER, &data, &rows, &stride));
 	puts("done.");
 
-	PNetwork pnet = ann_make_network(OPT_ADAPT, LOSS_MSE);
+	PNetwork pnet = ann_make_network(OPT_DEFAULT, LOSS_MSE);
 	if (!pnet)
 		return ERR_FAIL;
 

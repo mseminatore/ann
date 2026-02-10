@@ -1487,64 +1487,6 @@ static void optimize_none(PNetwork pnet)
 	// do nothing!
 }
 
-//-----------------------------------------------
-// SG with decaying learning rate
-//-----------------------------------------------
-static void optimize_decay(PNetwork pnet, real loss)
-{
-	pnet->learning_rate *= (real)DEFAULT_LEARNING_DECAY;
-}
-
-//-----------------------------------------------
-// Adaptive learning rate
-//-----------------------------------------------
-// Adapts learning rate based on convergence progress:
-// - If loss is decreasing: increase learning rate (explore more)
-// - If loss is increasing: decrease learning rate (be more careful)
-// - Averages last N losses to smooth decisions
-// - Helps avoid both premature convergence and divergence
-//-----------------------------------------------
-static void optimize_adapt(PNetwork pnet, real loss)
-{
-	// adapt the learning rate
-	optimize_decay(pnet, loss);
-
-	real lastMSE = 0.0;
-	// average the last 4 learning rates
-	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
-	{
-		lastMSE += pnet->lastMSE[i];
-	}
-
-	lastMSE /= DEFAULT_MSE_AVG;
-
-	if (lastMSE > 0.0)
-	{
-		if (loss < lastMSE)
-		{
-			pnet->learning_rate += (real)DEFAULT_LEARN_ADD;
-
-			// don't let learning rate go above 1
-			if (pnet->learning_rate > 1.0)
-				pnet->learning_rate = 1.0;
-		}
-		else
-		{
-			pnet->learning_rate -= (real)DEFAULT_LEARN_SUB * pnet->learning_rate;
-
-			// don't let rate go below minimum
-			if (pnet->learning_rate <= 0.0)
-			{
-				pnet->learning_rate = (real)1e-8;
-				invoke_error_callback(ERR_INVALID, "optimize_adaptive");
-			}
-		}
-	}
-
-	int index = (pnet->mseCounter++) & (DEFAULT_MSE_AVG - 1);
-	pnet->lastMSE[index] = loss;
-}
-
 //--------------------------------------------------------
 // Clip gradients to prevent exploding gradients
 // Called before applying gradients if max_gradient > 0
@@ -2112,19 +2054,6 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 
 	switch(opt)
 	{
-	case OPT_ADAM:
-		pnet->optimize_func = optimize_adam;
-		pnet->learning_rate = (real)0.001;
-		break;
-
-	case OPT_ADAPT:
-		pnet->optimize_func = optimize_sgd;
-		break;
-
-	case OPT_SGD_WITH_DECAY:
-		pnet->optimize_func = optimize_sgd;
-		break;
-
 	case OPT_MOMENTUM:
 		pnet->optimize_func = optimize_momentum;
 		pnet->learning_rate = (real)0.01;
@@ -2140,9 +2069,15 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 		pnet->learning_rate = (real)0.01;
 		break;
 
-	default:
 	case OPT_SGD:
 		pnet->optimize_func = optimize_sgd;
+		break;
+
+	default:
+	case OPT_ADAM:
+		pnet->optimize_func = optimize_adam;
+		pnet->learning_rate = (real)0.001;
+		break;
 	}
 
 	return pnet;
@@ -2300,12 +2235,6 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		
 		// Record training history for learning curve
 		record_history(pnet, loss, pnet->learning_rate);
-
-		// optimize learning once per epoch
-		if (pnet->optimizer == OPT_SGD_WITH_DECAY || pnet->optimizer == OPT_MOMENTUM)
-			optimize_decay(pnet, loss);
-		else if (pnet->optimizer == OPT_ADAPT)
-			optimize_adapt(pnet, loss);
 
 		if (loss < pnet->convergence_epsilon)
 		{
@@ -3731,16 +3660,16 @@ int ann_export_pikchr(const PNetwork pnet, const char *filename)
 	if (detailed_mode)
 	{
 		// Detailed mode: draw individual nodes
-		real layer_spacing = 2.0;
-		real node_radius = 0.12;
+		real layer_spacing = 2.0f;
+		real node_radius = 0.12f;
 		
 		// Draw nodes for each layer
 		for (int layer = 0; layer < pnet->layer_count; layer++)
 		{
 			int nodes = pnet->layers[layer].node_count;
 			real layer_x = layer * layer_spacing;
-			real layer_height = (nodes - 1) * 0.4;
-			real start_y = layer_height / 2.0;
+			real layer_height = (nodes - 1) * 0.4f;
+			real start_y = layer_height / 2.0f;
 			
 			const char *layer_type = (layer == 0) ? "Input" : 
 			                         (layer == pnet->layer_count - 1) ? "Output" : "Hidden";
@@ -3749,7 +3678,7 @@ int ann_export_pikchr(const PNetwork pnet, const char *filename)
 			
 			for (int n = 0; n < nodes; n++)
 			{
-				real node_y = start_y - n * 0.4;
+				real node_y = start_y - n * 0.4f;
 				fprintf(fptr, "L%dN%d: circle rad %.2f at (%.1f, %.2f)\n", 
 					layer, n, node_radius, layer_x, node_y);
 			}
@@ -3785,8 +3714,8 @@ int ann_export_pikchr(const PNetwork pnet, const char *filename)
 		{
 			real layer_x = layer * layer_spacing;
 			int nodes = pnet->layers[layer].node_count;
-			real layer_height = (nodes - 1) * 0.4;
-			real label_y = layer_height / 2.0 + 0.4;
+			real layer_height = (nodes - 1) * 0.4f;
+			real label_y = layer_height / 2.0f + 0.4f;
 			
 			const char *layer_type = (layer == 0) ? "Input" : 
 			                         (layer == pnet->layer_count - 1) ? "Output" : "Hidden";

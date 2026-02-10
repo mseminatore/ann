@@ -103,7 +103,7 @@ void test_main(int argc, char* argv[])
         if (loaded != NULL) {
             real loaded_output[1];
             ann_predict(loaded, test_input, loaded_output);
-            real diff = fabs(original_output[0] - loaded_output[0]);
+            real diff = fabsf(original_output[0] - loaded_output[0]);
             TESTEX("Predictions match after save/load", diff < 0.01f);
             ann_free_network(loaded);
         }

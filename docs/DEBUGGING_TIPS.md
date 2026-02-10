@@ -15,7 +15,7 @@
 ## Training Issues
 
 - **Loss not decreasing?** Try lower learning rate (0.01-0.001) or switch to `OPT_ADAM` with lr=0.001
-- **Loss oscillating/overshooting?** Use `OPT_ADAM` instead of `OPT_ADAPT` - Adam handles adaptive learning rates more stably
+- **Loss oscillating/overshooting?** Use `OPT_ADAM` - it handles adaptive learning rates stably
 - **NaN in outputs?** Check for uninitialized weights or exploding gradients - reduce learning rate
 - **Accuracy plateau?** Increase hidden layer size or add more layers
 - **Slow training?** Enable BLAS (`-DUSE_BLAS=1`) for large networks
@@ -29,7 +29,6 @@
 | `OPT_MOMENTUM` | When SGD oscillates | 0.01 |
 | `OPT_RMSPROP` | Non-stationary problems | 0.001 |
 | `OPT_ADAGRAD` | Sparse gradients | 0.01 |
-| `OPT_ADAPT` | Legacy - may overshoot | 0.05 (auto-adjusts) |
 
 ## Convergence Settings
 

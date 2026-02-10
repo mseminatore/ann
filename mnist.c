@@ -32,7 +32,7 @@
 #	include <cblas.h>
 #endif
 
-#define EPSILON 1e-5
+#define CONVERGENCE_EPSILON 0.01
 
 static int threads = -1;
 static int batch_size = 32;
@@ -263,9 +263,9 @@ int main(int argc, char *argv[])
 	tensor_mul_scalar(x_test, (real)(1.0 / 255.0));
 
 	// set some hyper-parameters
-	pnet->epochLimit = epoch_count;
-	pnet->convergence_epsilon = (real)EPSILON;
-	pnet->batchSize = batch_size;
+	ann_set_epoch_limit(pnet, epoch_count);
+	ann_set_convergence(pnet, (real)0.1);
+	ann_set_batch_size(pnet, batch_size);
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows);

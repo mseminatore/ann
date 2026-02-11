@@ -273,6 +273,7 @@ optimal network configurations.
 - **Grid Search** - exhaustive, tries all combinations
 - **Random Search** - samples from hyperparameter space
 - **Bayesian Optimization** - intelligent search using Gaussian Process
+- **TPE** - Tree-structured Parzen Estimator
 
 **Tunable parameters:** learning rate, batch size, optimizer, hidden layer count, 
 layer sizes, topology patterns, activations (per-layer optional).

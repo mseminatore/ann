@@ -2,13 +2,15 @@
 
 The `ann_hypertune` module provides automated hyperparameter search to find
 optimal network configurations. It supports **grid search** (exhaustive), 
-**random search** (sampling-based), and **Bayesian optimization** (intelligent) strategies.
+**random search** (sampling-based), **Bayesian optimization** (intelligent), 
+and **TPE** (Tree-structured Parzen Estimator) strategies.
 
 ## Features
 
 - **Grid Search** - exhaustively tries all combinations of hyperparameters
 - **Random Search** - randomly samples from the hyperparameter space
 - **Bayesian Optimization** - intelligent search using Gaussian Process surrogate
+- **TPE** - Tree-structured Parzen Estimator
 - **Topology Patterns** - automatic layer size generation (pyramid, funnel, etc.)
 - **Per-Layer Activations** - different activation function for each layer
 - **Data Splitting** - automatic train/validation holdout with optional shuffling
@@ -208,7 +210,7 @@ int trials = hypertune_bayesian_search(
 - Smooth objective function
 - 2-3 continuous hyperparameters
 
-## TPE (Tree-structured Parzen Estimator)
+## TPE (Tree-structured Parzen Estimator) Optimization
 
 TPE is an alternative Bayesian optimization method that handles mixed 
 categorical and continuous parameters better than GP-BO:

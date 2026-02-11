@@ -324,13 +324,59 @@ used with ML training and inference.
 > most helpful for processing the huge amounts of data involved in training 
 > networks.
 
-The code is regularly tested against [OpenBLAS](https://openblas.net) on
-multiple platforms. Though not yet tested, the 
-[Intel MKL library](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) 
+## Supported BLAS Libraries
+
+| Library | CMake Flag | Platforms | Notes |
+|---------|------------|-----------|-------|
+| [CBLAS](https://github.com/xianyi/CBLAS) | `-DUSE_CBLAS=1` | Windows, macOS, Linux (x64, ARM64) | Recommended, cross-platform |
+| [OpenBLAS](https://openblas.net) | `-DUSE_BLAS=1` | macOS, Linux | Well-established, good performance |
+
+The [Intel MKL library](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) 
 should also work with appropriate build setup.
 
-The `USE_BLAS` define controls whether the provided scalar tensor code
-path is used or the BLAS code path.
+## Building with BLAS Support
+
+To enable BLAS acceleration, pass the appropriate CMake flag:
+
+```bash
+# CBLAS (recommended for cross-platform builds)
+cmake -DUSE_CBLAS=1 ..
+cmake --build . --config Release
+
+# OpenBLAS (Linux/macOS)
+cmake -DUSE_BLAS=1 ..
+cmake --build . --config Release
+```
+
+### Library Installation Paths
+
+The build expects libraries at these default locations:
+
+| Platform | CBLAS | OpenBLAS |
+|----------|-------|----------|
+| Windows | `C:/opt/cblas` | N/A |
+| macOS/Linux | `/opt/cblas` | `/opt/OpenBLAS` |
+
+If your library is installed elsewhere, update the paths in `CMakeLists.txt`.
+
+### Using BLAS in Your Code
+
+When using CBLAS, call `cblas_init()` before any network operations:
+
+```c
+#ifdef USE_CBLAS
+#include <cblas.h>
+#endif
+
+int main() {
+#ifdef USE_CBLAS
+    cblas_init(CBLAS_DEFAULT_THREADS);
+#endif
+    
+    PNetwork pnet = ann_make_network(OPT_ADAM, LOSS_MSE);
+    // ... rest of your code
+}
+```
 
 # Error Handling
 
@@ -471,29 +517,34 @@ int main(int argc, char *argv[])
 
 You can build the code either from the provided `Makefile` or using `CMake`.
 
-If you plan to use the vectorized version, you must first download and install,
-or build, the `OpenBLAS` library. Ensure that **ann_config.h** defines `USE_BLAS`.
-
-> The default build files assume that the OpenBLAS is installed at /opt. If
-> another location is used, update `Makefile` or `CMakeLists.txt` as needed.
-
 To build using `Make`:
 
-```
-% git clone https://github.com/mseminatore/ann
-% cd ann
-% make
+```bash
+git clone https://github.com/mseminatore/ann
+cd ann
+make
 ```
 
 To build using `CMake`:
 
+```bash
+git clone https://github.com/mseminatore/ann
+cd ann
+mkdir build && cd build
+cmake ..
+cmake --build . --config Release
 ```
-% git clone https://github.com/mseminatore/ann
-% cd ann
-% mkdir build
-% cd build
-% cmake ..
-% cmake --build . --config Release
+
+To build with BLAS acceleration (see [Accelerating training with BLAS libraries](#accelerating-training-with-blas-libraries)):
+
+```bash
+# CBLAS (Windows, macOS, Linux)
+cmake -DUSE_CBLAS=1 ..
+cmake --build . --config Release
+
+# OpenBLAS (macOS, Linux)
+cmake -DUSE_BLAS=1 ..
+cmake --build . --config Release
 ```
 
 # Examples

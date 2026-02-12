@@ -99,14 +99,6 @@
 //
 //================================================================================================
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <stdarg.h>
-#include <assert.h>
-#include <time.h>
-
 //================================================================================================================
 // GLOBAL ERROR LOGGING CALLBACK
 //================================================================================================================
@@ -319,40 +311,6 @@ static real get_rand(real min, real max)
 	r *= scale;
 	r += min;
 	return r;
-}
-
-//------------------------------
-// print the network
-//------------------------------
-static void print_network(PNetwork pnet)
-{
-	if (!pnet)
-		return;
-
-	puts("");
-	// print each layer
-	for (int layer = 0; layer < pnet->layer_count; layer++)
-	{
-		// ann_printf(pnet, "\nLayer %d\n"
-		// 	"--------\n", layer);
-		putchar('[');
-
-		// print nodes in the layer
-		for (int node = 0; node < pnet->layers[layer].node_count; node++)
-		{
-//			ann_printf(pnet, "(%3.2g, ", pnet->layers[layer].nodes[node].value);
-
-			if (layer > 0)
-			{
-				for (int prev_node = 0; prev_node < pnet->layers[layer - 1].node_count; prev_node++)
-				{
-//					ann_printf(pnet, "%3.2g, ", pnet->layers[layer].nodes[node].weights[prev_node]);
-				}
-			}
-		}
-
-		puts("]");
-	}
 }
 
 //------------------------------

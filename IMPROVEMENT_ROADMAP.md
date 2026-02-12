@@ -25,7 +25,6 @@ A prioritized list of remaining improvements and enhancements for the library.
   - BLAS helps with axpy but not element-wise sqrt/divide
 
 - [ ] **Documentation Updates** *(~1-2 hours)*
-  - [ ] Update tensor_gemm header comment (no longer "not fully implemented")
   - [ ] Add example usage for new optimizers in README
 
 - [ ] **Multi-class Confusion Matrix** *(~2-3 hours)*
@@ -34,8 +33,9 @@ A prioritized list of remaining improvements and enhancements for the library.
   - Multi-class MCC calculation
 
 - [ ] **Code Cleanup** *(~1-2 hours)*
-  - [ ] Remove duplicate includes in ann.c (lines 28-35 and 107-113)
-  - [ ] Remove commented-out debug code
+  - [x] Remove duplicate includes in ann.c ~~(lines 28-35 and 107-113)~~ ✓
+  - [x] Remove dead `print_network` function ✓
+  - [ ] Remove commented-out debug code (minimal remaining)
 
 - [ ] **Performance Improvements** *(~12-24 hours remaining)*
   - [ ] Consider OpenMP parallelization for non-BLAS builds *(~4-8 hours)*

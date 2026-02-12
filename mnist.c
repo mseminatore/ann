@@ -36,7 +36,7 @@
 
 static int threads = -1;
 static int batch_size = 32;
-static int epoch_count = 5;
+static int epoch_count = 15;
 static int export_onnx = 0;
 
 //----------------------------------
@@ -214,10 +214,10 @@ int main(int argc, char *argv[])
 	// make a new network
 	PNetwork pnet = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
 
-	// define our network
+	// define our network - deeper architecture with ReLU for better accuracy
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);
-	ann_add_layer(pnet, 32, LAYER_HIDDEN, ACTIVATION_SIGMOID);
-//	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_RELU);
+	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_RELU);
+	ann_add_layer(pnet, 64, LAYER_HIDDEN, ACTIVATION_RELU);
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 
 	real *data = NULL, *test_data = NULL;
@@ -266,6 +266,8 @@ int main(int argc, char *argv[])
 	ann_set_epoch_limit(pnet, epoch_count);
 	ann_set_convergence(pnet, (real)0.1);
 	ann_set_batch_size(pnet, batch_size);
+	ann_set_dropout(pnet, 0.2f);           // 20% dropout on hidden layers
+	ann_set_gradient_clip(pnet, 5.0f);     // Clip gradients for stability
 	
 	// Add exponential LR decay (5% reduction per epoch)
 	static real lr_decay = 0.95f;

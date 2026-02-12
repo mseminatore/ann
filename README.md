@@ -548,6 +548,25 @@ cmake -DUSE_BLAS=1 ..
 cmake --build . --config Release
 ```
 
+To build a shared library (DLL/so/dylib) for use with Python or other language bindings:
+
+```bash
+# CMake shared library build
+cmake -DBUILD_SHARED=1 ..
+cmake --build . --config Release
+
+# Make shared library build (Linux/macOS)
+make shared
+```
+
+This produces `libann.dll` (Windows), `libann.so` (Linux), or `libann.dylib` (macOS).
+
+When linking against the DLL from external code, define `ANN_USING_DLL` to enable proper import declarations:
+```c
+#define ANN_USING_DLL
+#include "ann.h"
+```
+
 # Examples
 
 There are a few example projects included to help you familiarize yourself

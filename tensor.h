@@ -30,6 +30,21 @@
 #include <stdint.h>
 #include "ann_config.h"
 
+//------------------------------
+// DLL export/import macros
+//------------------------------
+#ifdef _WIN32
+#	ifdef ANN_BUILDING_DLL
+#		define ANN_API __declspec(dllexport)
+#	elif defined(ANN_USING_DLL)
+#		define ANN_API __declspec(dllimport)
+#	else
+#		define ANN_API
+#	endif
+#else
+#	define ANN_API
+#endif
+
 //----------------------------------
 // Note: change to double if desired
 //----------------------------------
@@ -72,7 +87,7 @@ typedef enum TENSOR_TRANSPOSE {
  * @param cols Number of columns (must be > 0)
  * @return Pointer to new tensor, or NULL on allocation failure
  */
-PTensor tensor_create(int rows, int cols);
+ANN_API PTensor tensor_create(int rows, int cols);
 
 /**
  * Create a tensor initialized with values from array (row-major order).
@@ -81,7 +96,7 @@ PTensor tensor_create(int rows, int cols);
  * @param vals Array of row-major values (rows*cols elements)
  * @return Pointer to new initialized tensor, or NULL on failure
  */
-PTensor tensor_create_from_array(int rows, int cols, const real *vals);
+ANN_API PTensor tensor_create_from_array(int rows, int cols, const real *vals);
 
 /**
  * Initialize existing tensor with values from array.
@@ -90,14 +105,14 @@ PTensor tensor_create_from_array(int rows, int cols, const real *vals);
  * @param cols Number of columns (should match t->cols)
  * @param array Array of values in row-major order
  */
-void tensor_set_from_array(PTensor t, int rows, int cols, const real *array);
+ANN_API void tensor_set_from_array(PTensor t, int rows, int cols, const real *array);
 
 /**
  * Free tensor and all allocated memory.
  * Safe to call with NULL pointer.
  * @param t Tensor to free
  */
-void tensor_free(PTensor t);
+ANN_API void tensor_free(PTensor t);
 
 /**
  * Create a tensor filled with ones.
@@ -105,7 +120,7 @@ void tensor_free(PTensor t);
  * @param cols Number of columns
  * @return Pointer to new tensor filled with 1.0
  */
-PTensor tensor_ones(int rows, int cols);
+ANN_API PTensor tensor_ones(int rows, int cols);
 
 /**
  * Create a tensor filled with zeros.
@@ -113,7 +128,7 @@ PTensor tensor_ones(int rows, int cols);
  * @param cols Number of columns
  * @return Pointer to new tensor filled with 0.0
  */
-PTensor tensor_zeros(int rows, int cols);
+ANN_API PTensor tensor_zeros(int rows, int cols);
 
 /**
  * Create a tensor with random uniform values.
@@ -123,7 +138,7 @@ PTensor tensor_zeros(int rows, int cols);
  * @param max Maximum value (exclusive)
  * @return Pointer to new tensor with random values
  */
-PTensor tensor_create_random_uniform(int rows, int cols, real min, real max);
+ANN_API PTensor tensor_create_random_uniform(int rows, int cols, real min, real max);
 
 /**
  * Convert a tensor of class indices to one-hot encoding.
@@ -132,14 +147,14 @@ PTensor tensor_create_random_uniform(int rows, int cols, real min, real max);
  * @param classes Number of classes
  * @return Tensor of shape (rows x classes) with one-hot encoding
  */
-PTensor tensor_onehot(const PTensor t, int classes);
+ANN_API PTensor tensor_onehot(const PTensor t, int classes);
 
 /**
  * Create a deep copy of a tensor.
  * @param t Tensor to copy
  * @return Pointer to new tensor with same values
  */
-PTensor tensor_copy(const PTensor t);
+ANN_API PTensor tensor_copy(const PTensor t);
 
 // ============================================================================
 // ELEMENT-WISE AND SCALAR OPERATIONS
@@ -151,7 +166,7 @@ PTensor tensor_copy(const PTensor t);
  * @param val Scalar value to add
  * @return Pointer to modified tensor (same as t)
  */
-PTensor tensor_add_scalar(PTensor t, real val);
+ANN_API PTensor tensor_add_scalar(PTensor t, real val);
 
 /**
  * Add two tensors element-wise (in-place): a = a + b.
@@ -160,7 +175,7 @@ PTensor tensor_add_scalar(PTensor t, real val);
  * @param b Second operand (unchanged)
  * @return Pointer to modified tensor (same as a), or NULL on shape mismatch
  */
-PTensor tensor_add(const PTensor a, const PTensor b);
+ANN_API PTensor tensor_add(const PTensor a, const PTensor b);
 
 /**
  * Subtract two tensors element-wise (in-place): a = a - b.
@@ -169,7 +184,7 @@ PTensor tensor_add(const PTensor a, const PTensor b);
  * @param b Second operand (unchanged)
  * @return Pointer to modified tensor (same as a), or NULL on shape mismatch
  */
-PTensor tensor_sub(const PTensor a, const PTensor b);
+ANN_API PTensor tensor_sub(const PTensor a, const PTensor b);
 
 /**
  * Multiply tensor by scalar (in-place): t = t * alpha.
@@ -177,7 +192,7 @@ PTensor tensor_sub(const PTensor a, const PTensor b);
  * @param val Scalar multiplier
  * @return Pointer to modified tensor (same as t)
  */
-PTensor tensor_mul_scalar(PTensor t, real val);
+ANN_API PTensor tensor_mul_scalar(PTensor t, real val);
 
 /**
  * Element-wise multiply two tensors (in-place): a = a * b.
@@ -186,7 +201,7 @@ PTensor tensor_mul_scalar(PTensor t, real val);
  * @param b Second operand (unchanged)
  * @return Pointer to modified tensor (same as a), or NULL on shape mismatch
  */
-PTensor tensor_mul(const PTensor a, const PTensor b);
+ANN_API PTensor tensor_mul(const PTensor a, const PTensor b);
 
 /**
  * Element-wise divide two tensors (in-place): a = a / b.
@@ -195,7 +210,7 @@ PTensor tensor_mul(const PTensor a, const PTensor b);
  * @param b Second operand (unchanged)
  * @return Pointer to modified tensor (same as a), or NULL on shape mismatch
  */
-PTensor tensor_div(const PTensor a, const PTensor b);
+ANN_API PTensor tensor_div(const PTensor a, const PTensor b);
 
 // ============================================================================
 // MATRIX AND ADVANCED OPERATIONS
@@ -212,21 +227,21 @@ PTensor tensor_div(const PTensor a, const PTensor b);
  * @param dest Destination vector (M elements, modified in-place)
  * @return Pointer to modified dest tensor, or NULL on shape mismatch
  */
-PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, real beta, const PTensor v, PTensor dest);
+ANN_API PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, real beta, const PTensor v, PTensor dest);
 
 /**
  * Square each element (in-place): t = t * t.
  * @param t Tensor to modify
  * @return Pointer to modified tensor (same as t)
  */
-PTensor tensor_square(PTensor t);
+ANN_API PTensor tensor_square(PTensor t);
 
 /**
  * Compute exponential of each element (in-place): t = e^t.
  * @param t Tensor to modify
  * @return Pointer to modified tensor (same as t)
  */
-PTensor tensor_exp(PTensor t);
+ANN_API PTensor tensor_exp(PTensor t);
 
 /**
  * Find index of maximum value in each column.
@@ -234,7 +249,7 @@ PTensor tensor_exp(PTensor t);
  * @param t Input tensor (MxN)
  * @return Tensor of shape 1xN with max indices, or NULL on error
  */
-PTensor tensor_argmax(const PTensor t);
+ANN_API PTensor tensor_argmax(const PTensor t);
 
 /**
  * Find maximum value in each column.
@@ -242,14 +257,14 @@ PTensor tensor_argmax(const PTensor t);
  * @param t Input tensor (MxN)
  * @return Tensor of shape 1xN with max values, or NULL on error
  */
-PTensor tensor_max(const PTensor t);
+ANN_API PTensor tensor_max(const PTensor t);
 
 /**
  * Sum all elements in a tensor (expects 1xN vector).
  * @param t Input tensor (should be 1xN row vector)
  * @return Sum of all elements
  */
-real tensor_sum(const PTensor t);
+ANN_API real tensor_sum(const PTensor t);
 
 /**
  * AXPY operation: y = alpha * x + y (in-place).
@@ -259,7 +274,7 @@ real tensor_sum(const PTensor t);
  * @param y Destination vector (modified in-place)
  * @return Pointer to modified y, or NULL on shape mismatch
  */
-PTensor tensor_axpy(real alpha, const PTensor x, PTensor y);
+ANN_API PTensor tensor_axpy(real alpha, const PTensor x, PTensor y);
 
 /**
  * General matrix multiplication: C = alpha * A*B + beta * C
@@ -271,7 +286,7 @@ PTensor tensor_axpy(real alpha, const PTensor x, PTensor y);
  * @param C Result matrix (M×N, modified in-place)
  * @return Pointer to modified C, or NULL on dimension mismatch
  */
-PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTensor C);
+ANN_API PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTensor C);
 
 /**
  * General matrix multiplication with B transposed.
@@ -284,7 +299,7 @@ PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTe
  * @param C Result matrix (M×N, modified in-place)
  * @return Pointer to modified C, or NULL on error
  */
-PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real beta, PTensor C);
+ANN_API PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real beta, PTensor C);
 
 /**
  * General matrix multiplication with A transposed.
@@ -297,7 +312,7 @@ PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real be
  * @param C Result matrix (M×N, modified in-place)
  * @return Pointer to modified C, or NULL on error
  */
-PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real beta, PTensor C);
+ANN_API PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real beta, PTensor C);
 
 /**
  * AXPBY operation: y = alpha * x + beta * y (in-place).
@@ -308,7 +323,7 @@ PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real be
  * @param y Second vector (modified in-place)
  * @return Pointer to modified y, or NULL on shape mismatch
  */
-PTensor tensor_axpby(real alpha, const PTensor x, real beta, PTensor y);
+ANN_API PTensor tensor_axpby(real alpha, const PTensor x, real beta, PTensor y);
 
 /**
  * Outer product: dest = alpha * a * b^T + dest (in-place).
@@ -319,7 +334,7 @@ PTensor tensor_axpby(real alpha, const PTensor x, real beta, PTensor y);
  * @param dest Destination matrix MxN (modified in-place)
  * @return Pointer to modified dest, or NULL on shape mismatch
  */
-PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest);
+ANN_API PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest);
 
 /**
  * Heaviside step function (in-place): t = (t > 0) ? 1 : 0.
@@ -327,7 +342,7 @@ PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest)
  * @param a Tensor to modify
  * @return Pointer to modified tensor (same as a)
  */
-PTensor tensor_heaviside(const PTensor a);
+ANN_API PTensor tensor_heaviside(const PTensor a);
 
 // ============================================================================
 // ELEMENT ACCESS AND MANIPULATION
@@ -340,7 +355,7 @@ PTensor tensor_heaviside(const PTensor a);
  * @param col Column index (0-based)
  * @return Element value, or 0.0 if indices out of bounds
  */
-real tensor_get_element(const PTensor t, int row, int col);
+ANN_API real tensor_get_element(const PTensor t, int row, int col);
 
 /**
  * Set single element in tensor at [row, col].
@@ -349,7 +364,7 @@ real tensor_get_element(const PTensor t, int row, int col);
  * @param col Column index (0-based)
  * @param val Value to set
  */
-void tensor_set_element(PTensor t, int row, int col, real val);
+ANN_API void tensor_set_element(PTensor t, int row, int col, real val);
 
 /**
  * Create new tensor from specified rows (bottom rows of input).
@@ -358,7 +373,7 @@ void tensor_set_element(PTensor t, int row, int col, real val);
  * @param rows Number of rows to remove from top
  * @return New tensor containing rows [rows..t->rows)
  */
-PTensor tensor_slice_rows(const PTensor t, int rows);
+ANN_API PTensor tensor_slice_rows(const PTensor t, int rows);
 
 /**
  * Create new tensor from specified columns (rightmost columns of input).
@@ -367,14 +382,14 @@ PTensor tensor_slice_rows(const PTensor t, int rows);
  * @param cols Number of columns to remove from left
  * @return New tensor containing cols [cols..t->cols)
  */
-PTensor tensor_slice_cols(const PTensor t, int cols);
+ANN_API PTensor tensor_slice_cols(const PTensor t, int cols);
 
 /**
  * Fill entire tensor with a constant value (in-place).
  * @param t Tensor to fill
  * @param val Value to fill with
  */
-void tensor_fill(PTensor t, real val);
+ANN_API void tensor_fill(PTensor t, real val);
 
 /**
  * Fill tensor with random uniform values (in-place).
@@ -382,7 +397,7 @@ void tensor_fill(PTensor t, real val);
  * @param min Minimum value (inclusive)
  * @param max Maximum value (exclusive)
  */
-void tensor_random_uniform(PTensor t, real min, real max);
+ANN_API void tensor_random_uniform(PTensor t, real min, real max);
 
 /**
  * Fill tensor with random normal (Gaussian) values (in-place).
@@ -391,7 +406,7 @@ void tensor_random_uniform(PTensor t, real min, real max);
  * @param mean Mean of the distribution
  * @param std Standard deviation of the distribution
  */
-void tensor_random_normal(PTensor t, real mean, real std);
+ANN_API void tensor_random_normal(PTensor t, real mean, real std);
 
 /**
  * Clip tensor values to a specified range (in-place).
@@ -400,7 +415,7 @@ void tensor_random_normal(PTensor t, real mean, real std);
  * @param min_val Minimum allowed value
  * @param max_val Maximum allowed value
  */
-void tensor_clip(PTensor t, real min_val, real max_val);
+ANN_API void tensor_clip(PTensor t, real min_val, real max_val);
 
 // ============================================================================
 // INPUT/OUTPUT
@@ -410,7 +425,7 @@ void tensor_clip(PTensor t, real min_val, real max_val);
  * Print tensor to stdout in matrix format.
  * @param t Tensor to print
  */
-void tensor_print(const PTensor t);
+ANN_API void tensor_print(const PTensor t);
 
 /**
  * Save tensor to CSV file (comma-separated values).
@@ -419,6 +434,6 @@ void tensor_print(const PTensor t);
  * @param filename Output file path
  * @return ERR_OK on success, error code on failure
  */
-int tensor_save_to_file(const PTensor t, const char *filename);
+ANN_API int tensor_save_to_file(const PTensor t, const char *filename);
 
 #endif

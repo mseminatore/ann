@@ -23,6 +23,7 @@ fashion_mnist.svg
 fashion_mnist.onnx
 fashion_mnist_learning_curve.csv
 mnist_hypertune
+build_shared/
 
 # Object files
 *.o

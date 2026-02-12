@@ -203,21 +203,21 @@ typedef struct {
  *
  * @param space Space to initialize
  */
-void hypertune_space_init(HyperparamSpace *space);
+ANN_API void hypertune_space_init(HyperparamSpace *space);
 
 /**
  * Initialize hypertuning options with defaults.
  *
  * @param options Options to initialize
  */
-void hypertune_options_init(HypertuneOptions *options);
+ANN_API void hypertune_options_init(HypertuneOptions *options);
 
 /**
  * Initialize a result structure.
  *
  * @param result Result to initialize
  */
-void hypertune_result_init(HypertuneResult *result);
+ANN_API void hypertune_result_init(HypertuneResult *result);
 
 // ============================================================================
 // DATA SPLITTING
@@ -237,7 +237,7 @@ void hypertune_result_init(HypertuneResult *result);
  *
  * Note: Caller must free split tensors with hypertune_free_split()
  */
-int hypertune_split_data(
+ANN_API int hypertune_split_data(
     PTensor inputs,
     PTensor outputs,
     real train_ratio,
@@ -251,7 +251,7 @@ int hypertune_split_data(
  *
  * @param split Split to free
  */
-void hypertune_free_split(DataSplit *split);
+ANN_API void hypertune_free_split(DataSplit *split);
 
 // ============================================================================
 // SEARCH ALGORITHMS
@@ -273,7 +273,7 @@ void hypertune_free_split(DataSplit *split);
  * @param best_result Output: best result found
  * @return Number of trials completed, or negative error code
  */
-int hypertune_grid_search(
+ANN_API int hypertune_grid_search(
     const HyperparamSpace *space,
     int input_size,
     int output_size,
@@ -303,7 +303,7 @@ int hypertune_grid_search(
  * @param best_result Output: best result found
  * @return Number of trials completed, or negative error code
  */
-int hypertune_random_search(
+ANN_API int hypertune_random_search(
     const HyperparamSpace *space,
     int num_trials,
     int input_size,
@@ -326,7 +326,7 @@ int hypertune_random_search(
  *
  * @param result Result to print
  */
-void hypertune_print_result(const HypertuneResult *result);
+ANN_API void hypertune_print_result(const HypertuneResult *result);
 
 /**
  * Print summary of top N results.
@@ -335,7 +335,7 @@ void hypertune_print_result(const HypertuneResult *result);
  * @param count Number of results
  * @param top_n Number of top results to show
  */
-void hypertune_print_summary(const HypertuneResult *results, int count, int top_n);
+ANN_API void hypertune_print_summary(const HypertuneResult *results, int count, int top_n);
 
 /**
  * Calculate total number of trials for grid search.
@@ -343,7 +343,7 @@ void hypertune_print_summary(const HypertuneResult *results, int count, int top_
  * @param space Hyperparameter space
  * @return Total number of combinations
  */
-int hypertune_count_grid_trials(const HyperparamSpace *space);
+ANN_API int hypertune_count_grid_trials(const HyperparamSpace *space);
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -386,7 +386,7 @@ real hypertune_score_accuracy(
  * @param layer_count Number of hidden layers
  * @param output_sizes Array to fill with layer sizes (must be >= layer_count)
  */
-void hypertune_generate_topology(
+ANN_API void hypertune_generate_topology(
     TopologyPattern pattern,
     int base_size,
     int layer_count,
@@ -399,7 +399,7 @@ void hypertune_generate_topology(
  * @param pattern Topology pattern
  * @return Static string name
  */
-const char* hypertune_topology_name(TopologyPattern pattern);
+ANN_API const char* hypertune_topology_name(TopologyPattern pattern);
 
 // ============================================================================
 // BAYESIAN OPTIMIZATION
@@ -498,7 +498,7 @@ void bayesian_options_init(BayesianOptions *opts);
  * @param best_result Output: best result found
  * @return Number of trials completed, or negative error code
  */
-int hypertune_bayesian_search(
+ANN_API int hypertune_bayesian_search(
     const HyperparamSpace *space,
     int input_size,
     int output_size,
@@ -534,7 +534,7 @@ typedef struct {
  *
  * @param opts Options to initialize
  */
-void tpe_options_init(TPEOptions *opts);
+ANN_API void tpe_options_init(TPEOptions *opts);
 
 /**
  * Perform TPE-based hyperparameter search.
@@ -554,7 +554,7 @@ void tpe_options_init(TPEOptions *opts);
  * @param best_result Output: best result found
  * @return Number of trials completed, or negative error code
  */
-int hypertune_tpe_search(
+ANN_API int hypertune_tpe_search(
     const HyperparamSpace *space,
     int input_size,
     int output_size,

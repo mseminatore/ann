@@ -34,6 +34,8 @@
 #	include <alloca.h>
 #endif
 
+// ANN_API is defined in tensor.h
+
 //------------------------------
 // Configurable parameters
 //------------------------------
@@ -277,7 +279,7 @@ struct Network
  * @see ann_add_layer() to add layers to the network
  * @see ann_free_network() to free network resources
  */
-PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type);
+ANN_API PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type);
 
 /**
  * Add a layer to the network.
@@ -301,7 +303,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type);
  * @see ann_make_network()
  * @see ann_train_network()
  */
-int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type);
+ANN_API int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type);
 
 /**
  * Free all memory associated with a network.
@@ -311,7 +313,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
  * 
  * @param pnet Network to free
  */
-void ann_free_network(PNetwork pnet);
+ANN_API void ann_free_network(PNetwork pnet);
 
 // ============================================================================
 // DATA LOADING AND SAVING
@@ -334,7 +336,7 @@ void ann_free_network(PNetwork pnet);
  * 
  * Data is allocated in row-major order: data[row * stride + col]
  */
-int ann_load_csv(const char *filename, int has_header, real **data, int *rows, int *stride);
+ANN_API int ann_load_csv(const char *filename, int has_header, real **data, int *rows, int *stride);
 
 /**
  * Save trained network to text file (human-readable).
@@ -350,7 +352,7 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
  * 
  * @see ann_load_network()
  */
-int ann_save_network(const PNetwork pnet, const char *filename);
+ANN_API int ann_save_network(const PNetwork pnet, const char *filename);
 
 /**
  * Save trained network to binary file (compact format).
@@ -366,7 +368,7 @@ int ann_save_network(const PNetwork pnet, const char *filename);
  * 
  * @see ann_load_network_binary()
  */
-int ann_save_network_binary(const PNetwork pnet, const char *filename);
+ANN_API int ann_save_network_binary(const PNetwork pnet, const char *filename);
 
 /**
  * Export trained network to ONNX JSON format.
@@ -384,7 +386,7 @@ int ann_save_network_binary(const PNetwork pnet, const char *filename);
  * @return ERR_INVALID if network has no layers or unsupported configuration
  * @return ERR_IO if file cannot be created/written
  */
-int ann_export_onnx(const PNetwork pnet, const char *filename);
+ANN_API int ann_export_onnx(const PNetwork pnet, const char *filename);
 
 /**
  * Import a network from ONNX JSON file.
@@ -404,7 +406,7 @@ int ann_export_onnx(const PNetwork pnet, const char *filename);
  * 
  * @see ann_export_onnx()
  */
-PNetwork ann_import_onnx(const char *filename);
+ANN_API PNetwork ann_import_onnx(const char *filename);
 
 /**
  * Export network architecture as PIKCHR diagram.
@@ -423,7 +425,7 @@ PNetwork ann_import_onnx(const char *filename);
  * @return ERR_INVALID if network has no layers
  * @return ERR_IO if file cannot be created/written
  */
-int ann_export_pikchr(const PNetwork pnet, const char *filename);
+ANN_API int ann_export_pikchr(const PNetwork pnet, const char *filename);
 
 /**
  * Export training history as CSV for learning curve visualization.
@@ -438,14 +440,14 @@ int ann_export_pikchr(const PNetwork pnet, const char *filename);
  * @return ERR_INVALID if no training history available
  * @return ERR_IO if file cannot be created/written
  */
-int ann_export_learning_curve(const PNetwork pnet, const char *filename);
+ANN_API int ann_export_learning_curve(const PNetwork pnet, const char *filename);
 
 /**
  * Clear training history to free memory or before retraining.
  * 
  * @param pnet Network to clear history from
  */
-void ann_clear_history(PNetwork pnet);
+ANN_API void ann_clear_history(PNetwork pnet);
 
 /**
  * Load trained network from text file.
@@ -455,7 +457,7 @@ void ann_clear_history(PNetwork pnet);
  * 
  * @see ann_save_network()
  */
-PNetwork ann_load_network(const char *filename);
+ANN_API PNetwork ann_load_network(const char *filename);
 
 /**
  * Load trained network from binary file.
@@ -465,7 +467,7 @@ PNetwork ann_load_network(const char *filename);
  * 
  * @see ann_save_network_binary()
  */
-PNetwork ann_load_network_binary(const char *filename);
+ANN_API PNetwork ann_load_network_binary(const char *filename);
 
 // ============================================================================
 // TRAINING AND INFERENCE
@@ -490,7 +492,7 @@ PNetwork ann_load_network_binary(const char *filename);
  * @see ann_set_convergence() to set convergence threshold
  * @see ann_predict() for inference
  */
-real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows);
+ANN_API real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows);
 
 /**
  * Run trained network on single input to produce output.
@@ -506,7 +508,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
  * @return ERR_NULL_PTR if network or data pointers are NULL
  * @return ERR_INVALID if network state is invalid
  */
-int ann_predict(const PNetwork pnet, const real *inputs, real *outputs);
+ANN_API int ann_predict(const PNetwork pnet, const real *inputs, real *outputs);
 
 /**
  * Determine predicted class from output activations.
@@ -518,7 +520,7 @@ int ann_predict(const PNetwork pnet, const real *inputs, real *outputs);
  * @param classes Number of classes (length of outputs vector)
  * @return Index of maximum value (class prediction), or -1 on error
  */
-int ann_class_prediction(const real *outputs, int classes);
+ANN_API int ann_class_prediction(const real *outputs, int classes);
 
 /**
  * Evaluate network accuracy on a dataset.
@@ -534,7 +536,7 @@ int ann_class_prediction(const real *outputs, int classes);
  * @see ann_predict()
  * @see ann_class_prediction()
  */
-real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTensor outputs);
+ANN_API real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTensor outputs);
 
 /**
  * Compute binary confusion matrix and Matthews Correlation Coefficient.
@@ -551,7 +553,7 @@ real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTen
  * @param fn Pointer to store false negatives count (can be NULL)
  * @return Matthews Correlation Coefficient [-1, 1], or 0 on error
  */
-real ann_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs,
+ANN_API real ann_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs,
                           int *tp, int *fp, int *tn, int *fn);
 
 /**
@@ -564,7 +566,7 @@ real ann_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs,
  * @param inputs Input tensor [rows × input_features]
  * @param outputs Expected outputs tensor [rows × 2] (one-hot encoded)
  */
-void ann_print_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs);
+ANN_API void ann_print_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs);
 
 // ============================================================================
 // CONFIGURATION AND PROPERTIES
@@ -581,7 +583,7 @@ void ann_print_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs);
  * @param pnet Network to configure
  * @param rate Learning rate (suggested range: 0.001 - 0.1)
  */
-void ann_set_learning_rate(PNetwork pnet, real rate);
+ANN_API void ann_set_learning_rate(PNetwork pnet, real rate);
 
 /**
  * Set the loss function used for training.
@@ -589,7 +591,7 @@ void ann_set_learning_rate(PNetwork pnet, real rate);
  * @param pnet Network to configure
  * @param loss_type LOSS_MSE (regression) or LOSS_CATEGORICAL_CROSS_ENTROPY (classification)
  */
-void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
+ANN_API void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
 
 /**
  * Set the convergence criterion for training.
@@ -600,7 +602,7 @@ void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
  * @param pnet Network to configure
  * @param limit Loss threshold for convergence
  */
-void ann_set_convergence(PNetwork pnet, real limit);
+ANN_API void ann_set_convergence(PNetwork pnet, real limit);
 
 /**
  * Set gradient clipping threshold for training stability.
@@ -614,7 +616,7 @@ void ann_set_convergence(PNetwork pnet, real limit);
  * @param pnet Network to configure
  * @param max_grad Maximum gradient magnitude (0 = disabled)
  */
-void ann_set_gradient_clip(PNetwork pnet, real max_grad);
+ANN_API void ann_set_gradient_clip(PNetwork pnet, real max_grad);
 
 /**
  * Set weight initialization strategy.
@@ -630,7 +632,7 @@ void ann_set_gradient_clip(PNetwork pnet, real max_grad);
  * @param pnet Network to configure
  * @param init_type Weight initialization strategy
  */
-void ann_set_weight_init(PNetwork pnet, Weight_init_type init_type);
+ANN_API void ann_set_weight_init(PNetwork pnet, Weight_init_type init_type);
 
 /**
  * Set the mini-batch size for training.
@@ -643,7 +645,7 @@ void ann_set_weight_init(PNetwork pnet, Weight_init_type init_type);
  * @param pnet Network to configure
  * @param batch_size Number of samples per mini-batch (must be > 0)
  */
-void ann_set_batch_size(PNetwork pnet, unsigned batch_size);
+ANN_API void ann_set_batch_size(PNetwork pnet, unsigned batch_size);
 
 /**
  * Set the maximum number of training epochs.
@@ -654,7 +656,7 @@ void ann_set_batch_size(PNetwork pnet, unsigned batch_size);
  * @param pnet Network to configure
  * @param limit Maximum number of epochs
  */
-void ann_set_epoch_limit(PNetwork pnet, unsigned limit);
+ANN_API void ann_set_epoch_limit(PNetwork pnet, unsigned limit);
 
 // ============================================================================
 // LEARNING RATE SCHEDULERS
@@ -672,7 +674,7 @@ void ann_set_epoch_limit(PNetwork pnet, unsigned limit);
  * 
  * @see ann_lr_scheduler_step, ann_lr_scheduler_exponential, ann_lr_scheduler_cosine
  */
-void ann_set_lr_scheduler(PNetwork pnet, LRSchedulerFunc scheduler, void *user_data);
+ANN_API void ann_set_lr_scheduler(PNetwork pnet, LRSchedulerFunc scheduler, void *user_data);
 
 /**
  * Parameters for step decay scheduler.
@@ -709,7 +711,7 @@ typedef struct {
  * @param user_data Pointer to LRStepParams
  * @return Scheduled learning rate
  */
-real ann_lr_scheduler_step(unsigned epoch, real base_lr, void *user_data);
+ANN_API real ann_lr_scheduler_step(unsigned epoch, real base_lr, void *user_data);
 
 /**
  * Exponential decay scheduler: multiplies LR by gamma each epoch.
@@ -720,7 +722,7 @@ real ann_lr_scheduler_step(unsigned epoch, real base_lr, void *user_data);
  * @param user_data Pointer to LRExponentialParams
  * @return Scheduled learning rate
  */
-real ann_lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data);
+ANN_API real ann_lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data);
 
 /**
  * Cosine annealing scheduler: smooth decay to min_lr.
@@ -731,7 +733,7 @@ real ann_lr_scheduler_exponential(unsigned epoch, real base_lr, void *user_data)
  * @param user_data Pointer to LRCosineParams
  * @return Scheduled learning rate
  */
-real ann_lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data);
+ANN_API real ann_lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data);
 
 // ============================================================================
 // DROPOUT REGULARIZATION
@@ -751,7 +753,7 @@ real ann_lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data);
  * @note Use ann_set_layer_dropout() to override the rate for specific layers.
  * @see ann_set_layer_dropout, ann_set_training_mode
  */
-void ann_set_dropout(PNetwork pnet, real rate);
+ANN_API void ann_set_dropout(PNetwork pnet, real rate);
 
 /**
  * Set the dropout rate for a specific layer.
@@ -764,7 +766,7 @@ void ann_set_dropout(PNetwork pnet, real rate);
  * 
  * @note Setting dropout on input or output layers has no effect.
  */
-void ann_set_layer_dropout(PNetwork pnet, int layer, real rate);
+ANN_API void ann_set_layer_dropout(PNetwork pnet, int layer, real rate);
 
 /**
  * Set training/inference mode for the network.
@@ -778,7 +780,7 @@ void ann_set_layer_dropout(PNetwork pnet, int layer, real rate);
  * @param pnet Network to configure
  * @param is_training 1 for training mode, 0 for inference mode
  */
-void ann_set_training_mode(PNetwork pnet, int is_training);
+ANN_API void ann_set_training_mode(PNetwork pnet, int is_training);
 
 /**
  * Get the number of layers in the network.
@@ -786,7 +788,7 @@ void ann_set_training_mode(PNetwork pnet, int is_training);
  * @param pnet Network to query (must not be NULL)
  * @return Number of layers, or -1 if pnet is NULL
  */
-int ann_get_layer_count(const PNetwork pnet);
+ANN_API int ann_get_layer_count(const PNetwork pnet);
 
 /**
  * Get the number of nodes in a specific layer.
@@ -795,7 +797,7 @@ int ann_get_layer_count(const PNetwork pnet);
  * @param layer Layer index (0 = input layer)
  * @return Number of nodes in the layer, or -1 on error
  */
-int ann_get_layer_nodes(const PNetwork pnet, int layer);
+ANN_API int ann_get_layer_nodes(const PNetwork pnet, int layer);
 
 /**
  * Get the activation type of a specific layer.
@@ -804,7 +806,7 @@ int ann_get_layer_nodes(const PNetwork pnet, int layer);
  * @param layer Layer index (0 = input layer)
  * @return Activation type, or ACTIVATION_NULL on error
  */
-Activation_type ann_get_layer_activation(const PNetwork pnet, int layer);
+ANN_API Activation_type ann_get_layer_activation(const PNetwork pnet, int layer);
 
 /**
  * Print network properties and configuration to stdout.
@@ -813,7 +815,7 @@ Activation_type ann_get_layer_activation(const PNetwork pnet, int layer);
  * 
  * @param pnet Network to describe (must not be NULL)
  */
-void ann_print_props(const PNetwork pnet);
+ANN_API void ann_print_props(const PNetwork pnet);
 
 // ============================================================================
 // DEBUGGING AND INSPECTION
@@ -826,7 +828,7 @@ void ann_print_props(const PNetwork pnet);
  * 
  * @param pnet Network whose outputs to print (must not be NULL)
  */
-void ann_print_outputs(const PNetwork pnet);
+ANN_API void ann_print_outputs(const PNetwork pnet);
 
 // ============================================================================
 // ERROR HANDLING
@@ -849,7 +851,7 @@ void ann_print_outputs(const PNetwork pnet);
  * 
  * @see ERR_OK ERR_NULL_PTR ERR_ALLOC ERR_INVALID ERR_IO ERR_FAIL
  */
-const char* ann_strerror(int error_code);
+ANN_API const char* ann_strerror(int error_code);
 
 /**
  * Set the error logging callback for library errors.
@@ -876,14 +878,14 @@ const char* ann_strerror(int error_code);
  * 
  * @see ErrorLogCallback
  */
-void ann_set_error_log_callback(ErrorLogCallback callback);
+ANN_API void ann_set_error_log_callback(ErrorLogCallback callback);
 
 /**
  * Get the currently installed error logging callback.
  * 
  * @return Current callback function pointer, or NULL if none is set
  */
-ErrorLogCallback ann_get_error_log_callback(void);
+ANN_API ErrorLogCallback ann_get_error_log_callback(void);
 
 /**
  * Clear (disable) the error logging callback.
@@ -893,6 +895,6 @@ ErrorLogCallback ann_get_error_log_callback(void);
  * 
  * @see ann_set_error_log_callback
  */
-void ann_clear_error_log_callback(void);
+ANN_API void ann_clear_error_log_callback(void);
 
 #endif

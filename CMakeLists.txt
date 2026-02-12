@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.10)
 # set the project name and version
 project(ann VERSION 1.0)
 
+# options
+option(BUILD_SHARED "Build shared library (DLL/so/dylib)" OFF)
 
 # testing
 enable_testing()
@@ -64,7 +66,12 @@ else()
 endif()
 
 # add the core library (includes hypertuning)
-add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c)
+if (BUILD_SHARED)
+    add_library(libann SHARED ann.c tensor.c ann_hypertune.c json.c)
+    target_compile_definitions(libann PRIVATE ANN_BUILDING_DLL)
+else()
+    add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c)
+endif()
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
 #

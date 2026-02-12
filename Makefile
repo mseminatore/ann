@@ -37,6 +37,18 @@ all: $(LIBANN) mnist mnist_hypertune logic digit5x7 save_test save_test_binary b
 $(LIBANN): $(LIB_OBJS)
 	$(AR) rcs $@ $^
 
+# build the shared library
+LIBANN_SO = libann.so
+SHARED_OBJS = ann.pic.o tensor.pic.o json.pic.o ann_hypertune.pic.o
+
+%.pic.o: %.c $(DEPS)
+	$(CC) -c -fPIC $(CFLAGS) -o $@ $<
+
+shared: $(LIBANN_SO)
+
+$(LIBANN_SO): $(SHARED_OBJS)
+	$(CC) -shared -o $@ $^ $(LFLAGS)
+
 $(TARGET): $(LIBANN) mnist.o
 	$(CC) -o $@ mnist.o $(LIBANN) $(LFLAGS)
 
@@ -95,5 +107,5 @@ test_json: $(LIBANN) test_json.o testy/test_main.o
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) $< -o $@
 
 clean:
-	rm -f $(LIBANN) $(LIB_OBJS) $(TARGET) logic digit5x7 logic.o digit5x7.o mnist.o save_test.o save_test save_test_binary save_test_binary.o blas_perf blas_perf.o test_tensor test_tensor.o test_network test_network.o test_activations test_activations.o test_loss_functions test_loss_functions.o test_save_load test_save_load.o test_optimizers test_optimizers.o test_forward_pass test_forward_pass.o test_training_convergence test_training_convergence.o test_onnx_export test_onnx_export.o test_hypertune test_hypertune.o test_json test_json.o testy/test_main.o
+	rm -f $(LIBANN) $(LIBANN_SO) $(LIB_OBJS) $(SHARED_OBJS) $(TARGET) logic digit5x7 logic.o digit5x7.o mnist.o save_test.o save_test save_test_binary save_test_binary.o blas_perf blas_perf.o test_tensor test_tensor.o test_network test_network.o test_activations test_activations.o test_loss_functions test_loss_functions.o test_save_load test_save_load.o test_optimizers test_optimizers.o test_forward_pass test_forward_pass.o test_training_convergence test_training_convergence.o test_onnx_export test_onnx_export.o test_hypertune test_hypertune.o test_json test_json.o testy/test_main.o
 

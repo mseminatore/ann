@@ -124,6 +124,8 @@ ann_set_batch_size | set the mini-batch size
 ann_set_epoch_limit | set the maximum number of epochs
 ann_set_lr_scheduler | set learning rate scheduler callback
 ann_set_gradient_clip | set gradient clipping threshold
+ann_set_weight_decay | set L2 regularization (weight decay) coefficient
+ann_set_l1_regularization | set L1 regularization (LASSO) coefficient
 ann_set_dropout | set default dropout rate for hidden layers
 ann_set_layer_dropout | set dropout rate for a specific layer
 ann_get_layer_count | get the number of layers in the network

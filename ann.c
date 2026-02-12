@@ -1502,6 +1502,49 @@ static void clip_gradients(PNetwork pnet)
 }
 
 //--------------------------------------------------------
+// Apply L1/L2 weight regularization
+// L2 (weight decay): W = W * (1 - lr * lambda)
+// L1 (LASSO): W = W - lr * lambda * sign(W)
+// Note: Only applied to weights, not biases (standard practice)
+//--------------------------------------------------------
+static void apply_regularization(PNetwork pnet)
+{
+	real lr = pnet->learning_rate;
+	real l2 = pnet->l2_lambda;
+	real l1 = pnet->l1_lambda;
+
+	if (l2 <= (real)0.0 && l1 <= (real)0.0)
+		return;
+
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		PTensor W = pnet->layers[layer].t_weights;
+		int size = W->rows * W->cols;
+
+		// L2 regularization: W = W * (1 - lr * l2)
+		if (l2 > (real)0.0)
+		{
+			real decay = (real)1.0 - lr * l2;
+			tensor_mul_scalar(W, decay);
+		}
+
+		// L1 regularization: W = W - lr * l1 * sign(W)
+		if (l1 > (real)0.0)
+		{
+			real *w = W->values;
+			real delta = lr * l1;
+			for (int i = 0; i < size; i++)
+			{
+				if (w[i] > (real)0.0)
+					w[i] -= delta;
+				else if (w[i] < (real)0.0)
+					w[i] += delta;
+			}
+		}
+	}
+}
+
+//--------------------------------------------------------
 // Stochastic Gradient Descent (SGD)
 //
 // update the weights based on gradients
@@ -1522,6 +1565,8 @@ static void optimize_sgd(PNetwork pnet)
 		// bias = bias + n * bias_grad
 		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_bias_grad, pnet->layers[layer].t_bias);
 	}
+
+	apply_regularization(pnet);
 }
 
 //-----------------------------------------------
@@ -1554,6 +1599,8 @@ static void optimize_momentum(PNetwork pnet)
 		// bias = bias + n * bias_m
 		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_bias_m, pnet->layers[layer].t_bias);
 	}
+
+	apply_regularization(pnet);
 }
 
 //-----------------------------------------------
@@ -1599,6 +1646,8 @@ static void optimize_adagrad(PNetwork pnet)
 			b->values[i] += pnet->learning_rate * grad / ((real)sqrt(bv->values[i]) + epsilon);
 		}
 	}
+
+	apply_regularization(pnet);
 }
 
 //-----------------------------------------------
@@ -1646,6 +1695,8 @@ static void optimize_rmsprop(PNetwork pnet)
 			b->values[i] += pnet->learning_rate * grad / ((real)sqrt(bv->values[i]) + epsilon);
 		}
 	}
+
+	apply_regularization(pnet);
 }
 
 //-----------------------------------------------
@@ -1721,6 +1772,8 @@ static void optimize_adam(PNetwork pnet)
 			b->values[i] += pnet->learning_rate * mhat / ((real)sqrt(vhat) + epsilon);
 		}
 	}
+
+	apply_regularization(pnet);
 }
 
 //[]---------------------------------------------[]
@@ -2043,6 +2096,8 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->base_learning_rate = (real)0.0;		// set when training starts
 	pnet->default_dropout	= (real)0.0;		// dropout disabled by default
 	pnet->is_training		= 0;				// inference mode by default
+	pnet->l2_lambda			= (real)0.0;		// L2 regularization disabled
+	pnet->l1_lambda			= (real)0.0;		// L1 regularization disabled
 	
 	// Training history
 	pnet->loss_history		= NULL;
@@ -2428,6 +2483,28 @@ void ann_set_gradient_clip(PNetwork pnet, real max_grad)
 		return;
 
 	pnet->max_gradient = max_grad;
+}
+
+//------------------------------
+// set L2 regularization (weight decay)
+//------------------------------
+void ann_set_weight_decay(PNetwork pnet, real lambda)
+{
+	if (!pnet)
+		return;
+
+	pnet->l2_lambda = lambda;
+}
+
+//------------------------------
+// set L1 regularization (LASSO)
+//------------------------------
+void ann_set_l1_regularization(PNetwork pnet, real lambda)
+{
+	if (!pnet)
+		return;
+
+	pnet->l1_lambda = lambda;
 }
 
 //------------------------------

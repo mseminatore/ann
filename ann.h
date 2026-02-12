@@ -242,6 +242,9 @@ struct Network
 	real default_dropout;				// default dropout rate for hidden layers (0 = disabled)
 	int is_training;					// 1 = training mode (apply dropout), 0 = inference mode
 
+	real l2_lambda;						// L2 regularization (weight decay) coefficient (0 = disabled)
+	real l1_lambda;						// L1 regularization (LASSO) coefficient (0 = disabled)
+
 	Loss_func loss_func;				// the error function
 	Output_func print_func;				// print output function
 	Optimization_func optimize_func;	// learning rate/weight optimizer
@@ -617,6 +620,36 @@ ANN_API void ann_set_convergence(PNetwork pnet, real limit);
  * @param max_grad Maximum gradient magnitude (0 = disabled)
  */
 ANN_API void ann_set_gradient_clip(PNetwork pnet, real max_grad);
+
+/**
+ * Set L2 regularization (weight decay) coefficient.
+ * 
+ * L2 regularization penalizes large weights by adding lambda * ||W||^2 to the loss.
+ * This encourages smaller, more distributed weights and helps prevent overfitting.
+ * Applied as: W = W * (1 - lr * lambda) during weight updates.
+ * 
+ * Default: 0 (disabled)
+ * Common values: 1e-4 to 1e-2
+ * 
+ * @param pnet Network to configure
+ * @param lambda L2 regularization strength (0 = disabled)
+ */
+ANN_API void ann_set_weight_decay(PNetwork pnet, real lambda);
+
+/**
+ * Set L1 regularization (LASSO) coefficient.
+ * 
+ * L1 regularization penalizes the absolute value of weights, encouraging sparsity.
+ * Pushes small weights toward exactly zero, useful for feature selection.
+ * Applied as: W = W - lr * lambda * sign(W) during weight updates.
+ * 
+ * Default: 0 (disabled)
+ * Common values: 1e-5 to 1e-3
+ * 
+ * @param pnet Network to configure
+ * @param lambda L1 regularization strength (0 = disabled)
+ */
+ANN_API void ann_set_l1_regularization(PNetwork pnet, real lambda);
 
 /**
  * Set weight initialization strategy.

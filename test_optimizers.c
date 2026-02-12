@@ -313,5 +313,61 @@ void test_main(int argc, char *argv[]) {
         ann_free_network(net_large_lr);
     }
 
+    // ========================================================================
+    // L1/L2 REGULARIZATION
+    // ========================================================================
+    SUITE("Weight Regularization");
+    COMMENT("Testing L1 and L2 regularization...");
+
+    // L2 regularization (weight decay)
+    PNetwork net_l2 = create_xor_network(OPT_ADAM);
+    if (net_l2) {
+        ann_set_weight_decay(net_l2, 0.001f);
+        TESTEX("L2 lambda set correctly", (fabs(net_l2->l2_lambda - 0.001f) < 1e-6));
+
+        real loss_l2 = train_xor(net_l2);
+        TESTEX("Training with L2 regularization completed", (isfinite(loss_l2)));
+        TESTEX("L2 regularization still allows learning (<0.3)", (loss_l2 < 0.3f));
+
+        // Verify weights are smaller with regularization (spot check)
+        real max_weight = 0.0f;
+        PTensor w = net_l2->layers[1].t_weights;
+        for (int i = 0; i < w->rows * w->cols; i++) {
+            if (fabs(w->values[i]) > max_weight)
+                max_weight = (real)fabs(w->values[i]);
+        }
+        TESTEX("L2 regularization limits weight magnitude (<10)", (max_weight < 10.0f));
+
+        ann_free_network(net_l2);
+    }
+
+    // L1 regularization (LASSO)
+    PNetwork net_l1 = create_xor_network(OPT_ADAM);
+    if (net_l1) {
+        ann_set_l1_regularization(net_l1, 0.0001f);
+        TESTEX("L1 lambda set correctly", (fabs(net_l1->l1_lambda - 0.0001f) < 1e-7));
+
+        real loss_l1 = train_xor(net_l1);
+        TESTEX("Training with L1 regularization completed", (isfinite(loss_l1)));
+        TESTEX("L1 regularization still allows learning (<0.3)", (loss_l1 < 0.3f));
+
+        ann_free_network(net_l1);
+    }
+
+    // Combined L1 + L2 regularization
+    PNetwork net_elastic = create_xor_network(OPT_ADAM);
+    if (net_elastic) {
+        ann_set_weight_decay(net_elastic, 0.001f);
+        ann_set_l1_regularization(net_elastic, 0.0001f);
+        TESTEX("Combined L1+L2 set correctly", 
+               (fabs(net_elastic->l2_lambda - 0.001f) < 1e-6 && 
+                fabs(net_elastic->l1_lambda - 0.0001f) < 1e-7));
+
+        real loss_elastic = train_xor(net_elastic);
+        TESTEX("Training with elastic net regularization completed", (isfinite(loss_elastic)));
+
+        ann_free_network(net_elastic);
+    }
+
     TESTEX("Optimizer tests completed", 1);
 }

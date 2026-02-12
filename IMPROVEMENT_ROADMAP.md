@@ -8,12 +8,6 @@ A prioritized list of remaining improvements and enhancements for the library.
   - Would significantly improve training stability for deeper networks
   - Requires forward pass normalization, learnable gamma/beta, and backward pass gradients
 
-- [ ] **L1/L2 Weight Regularization** *(~2-3 hours)*
-  - L2 (Ridge): Penalize large weights, reduces overfitting
-  - L1 (LASSO): Encourage sparse weights for feature selection
-  - Add `ann_set_weight_decay()` for L2, `ann_set_l1_regularization()` for L1
-  - Apply in all optimizers during weight update
-
 ## Low Priority
 
 - [ ] **Complete Network Serialization for Resumable Training** *(~4-6 hours)*
@@ -74,3 +68,4 @@ A prioritized list of remaining improvements and enhancements for the library.
 - Learning curve CSV export
 - Tensor optimizations (memcpy, memset, loop unrolling, cache-friendly access)
 - TPE hyperparameter optimization (`hypertune_tpe_search()`)
+- L1/L2 weight regularization (`ann_set_weight_decay()`, `ann_set_l1_regularization()`)

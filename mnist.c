@@ -36,7 +36,7 @@
 
 static int threads = -1;
 static int batch_size = 32;
-static int epoch_count = 15;
+static int epoch_count = 5;
 static int export_onnx = 0;
 
 //----------------------------------
@@ -216,8 +216,8 @@ int main(int argc, char *argv[])
 
 	// define our network - deeper architecture with ReLU for better accuracy
 	ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);
-	ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_RELU);
 	ann_add_layer(pnet, 64, LAYER_HIDDEN, ACTIVATION_RELU);
+	// ann_add_layer(pnet, 64, LAYER_HIDDEN, ACTIVATION_RELU);
 	ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 
 	real *data = NULL, *test_data = NULL;

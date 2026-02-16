@@ -115,6 +115,9 @@ ann_save_network | save a trained network (text)
 ann_load_network_binary | load a previously saved network (binary)
 ann_save_network_binary | save a trained network (binary)
 ann_train_network | train a network
+ann_train_begin | begin an online/incremental training session
+ann_train_step | train one mini-batch step (online training)
+ann_train_end | end an online/incremental training session
 ann_predict | predict an output using a previously trained network
 ann_set_convergence | set the convergence threshold (optional)
 ann_evaluate_accuracy | evaluate accuracy of trained network using test data
@@ -265,6 +268,37 @@ epoch,loss,learning_rate
 ```
 
 Plot with gnuplot, Python matplotlib, or Excel to diagnose training issues.
+
+## Online / Incremental Training
+
+For scenarios where data arrives incrementally (streaming, fine-tuning a loaded model, or user feedback), use the step-based training API:
+
+```c
+PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+ann_add_layer(net, 784, LAYER_INPUT, ACTIVATION_NULL);
+ann_add_layer(net, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+ann_add_layer(net, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+
+ann_train_begin(net);
+
+// Feed mini-batches one at a time
+for (int i = 0; i < num_batches; i++)
+{
+    real loss = ann_train_step(net, batch_inputs[i], batch_targets[i], batch_size);
+    printf("Step %d loss: %f\n", i, loss);
+
+    // Safe to predict mid-training (dropout is auto-disabled)
+    ann_predict(net, test_input, prediction);
+}
+
+ann_train_end(net);
+```
+
+Key differences from `ann_train_network()`:
+- **Does not reset optimizer state** — Adam momentum/variance are preserved across calls
+- **Does not reinitialize weights** — safe for fine-tuning loaded/pre-trained models
+- **Single sample training** — pass `batch_size=1` to train on individual examples
+- **`ann_predict()` is safe mid-training** — dropout is automatically disabled during inference
 
 # Hyperparameter Tuning
 

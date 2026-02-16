@@ -2281,6 +2281,114 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	return loss;
 }
 
+//-----------------------------------------------
+// Begin an online/incremental training session
+//-----------------------------------------------
+int ann_train_begin(PNetwork pnet)
+{
+	if (!pnet)
+		return ERR_NULL_PTR;
+
+	if (pnet->layer_count <= 0 || !pnet->layers)
+		return ERR_INVALID;
+
+	// Enable training mode (for dropout)
+	pnet->is_training = 1;
+
+	// Save base learning rate for schedulers
+	if (pnet->base_learning_rate == (real)0.0)
+		pnet->base_learning_rate = pnet->learning_rate;
+
+	// Initialize weights only if not already set (e.g. loaded model)
+	init_weights(pnet);
+
+	// Ensure batch tensors are allocated for the configured batch size
+	if (ensure_batch_tensors(pnet, pnet->batchSize) != ERR_OK)
+	{
+		invoke_error_callback(ERR_ALLOC, "ann_train_begin");
+		return ERR_ALLOC;
+	}
+
+	return ERR_OK;
+}
+
+//-----------------------------------------------
+// Train one mini-batch step (online training)
+//-----------------------------------------------
+real ann_train_step(PNetwork pnet, const real *inputs, const real *targets, int batch_size)
+{
+	if (!pnet || !inputs || !targets)
+		return (real)0.0;
+
+	if (batch_size <= 0)
+		return (real)0.0;
+
+	int input_node_count = pnet->layers[0].node_count;
+	int output_node_count = pnet->layers[pnet->layer_count - 1].node_count;
+
+	unsigned actual_batch_size = (unsigned)batch_size;
+
+	// Reallocate batch tensors if batch size changed
+	if (pnet->current_batch_size != actual_batch_size)
+	{
+		if (ensure_batch_tensors(pnet, actual_batch_size) != ERR_OK)
+		{
+			invoke_error_callback(ERR_ALLOC, "ann_train_step");
+			return (real)0.0;
+		}
+	}
+
+	// Allocate temporary batch target tensor
+	PTensor batch_targets = tensor_create(actual_batch_size, output_node_count);
+	if (!batch_targets)
+	{
+		invoke_error_callback(ERR_ALLOC, "ann_train_step");
+		return (real)0.0;
+	}
+
+	// Zero gradients
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		tensor_fill(pnet->layers[layer].t_gradients, (real)0.0);
+		tensor_fill(pnet->layers[layer].t_bias_grad, (real)0.0);
+	}
+
+	// Copy inputs into batch input tensor
+	PTensor batch_input = pnet->layers[0].t_batch_values;
+	memcpy(batch_input->values, inputs, actual_batch_size * input_node_count * sizeof(real));
+
+	// Copy targets into batch target tensor
+	memcpy(batch_targets->values, targets, actual_batch_size * output_node_count * sizeof(real));
+
+	// Forward pass
+	eval_network_batched(pnet, actual_batch_size);
+
+	// Backward pass (computes loss and gradients)
+	real loss = back_propagate_batched(pnet, actual_batch_size, batch_targets);
+
+	// Increment training iteration (for Adam bias correction)
+	pnet->train_iteration++;
+
+	// Update weights
+	pnet->optimize_func(pnet);
+
+	tensor_free(batch_targets);
+
+	return loss;
+}
+
+//-----------------------------------------------
+// End an online/incremental training session
+//-----------------------------------------------
+void ann_train_end(PNetwork pnet)
+{
+	if (!pnet)
+		return;
+
+	// Disable training mode (for dropout)
+	pnet->is_training = 0;
+}
+
 //------------------------------
 // evaluate the accuracy 
 //------------------------------
@@ -2842,8 +2950,15 @@ int ann_predict(const PNetwork pnet, const real *inputs, real *outputs)
 		pnet->layers[0].t_values->values[node] = *inputs++;
 	}
 
+	// Temporarily disable training mode for inference (prevents dropout)
+	int was_training = pnet->is_training;
+	pnet->is_training = 0;
+
 	// evaluate network
 	eval_network(pnet);
+
+	// Restore training mode
+	pnet->is_training = was_training;
 
 	// get the outputs
 	node_count = pnet->layers[pnet->layer_count - 1].node_count;

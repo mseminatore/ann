@@ -498,10 +498,66 @@ ANN_API PNetwork ann_load_network_binary(const char *filename);
 ANN_API real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows);
 
 /**
+ * Begin an online/incremental training session.
+ * 
+ * Prepares the network for step-by-step training without resetting
+ * optimizer state (e.g. Adam momentum). Weights are initialized only 
+ * if not already set (safe for loaded/pre-trained models).
+ * 
+ * Call ann_train_step() to train on individual mini-batches, then
+ * ann_train_end() when finished.
+ * 
+ * @param pnet Network to train (must have layers defined)
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if pnet is NULL
+ * @return ERR_INVALID if network has no layers
+ * @return ERR_ALLOC if batch tensor allocation fails
+ * 
+ * @see ann_train_step() to train on a single mini-batch
+ * @see ann_train_end() to finish the training session
+ */
+ANN_API int ann_train_begin(PNetwork pnet);
+
+/**
+ * Train on a single mini-batch (online/incremental training).
+ * 
+ * Performs one forward pass, backward pass, and weight update on the
+ * provided mini-batch. Does not reset optimizer state between calls,
+ * enabling incremental learning on streaming data.
+ * 
+ * Must be called between ann_train_begin() and ann_train_end().
+ * 
+ * @param pnet Network being trained
+ * @param inputs Input data (batch_size consecutive input vectors, each of
+ *               size = first layer node_count)
+ * @param targets Target data (batch_size consecutive target vectors, each of
+ *                size = last layer node_count)
+ * @param batch_size Number of samples in this mini-batch
+ * @return Loss for this mini-batch, or 0.0 on error
+ * 
+ * @see ann_train_begin() to start a training session
+ * @see ann_train_end() to finish the training session
+ */
+ANN_API real ann_train_step(PNetwork pnet, const real *inputs, const real *targets, int batch_size);
+
+/**
+ * End an online/incremental training session.
+ * 
+ * Disables training mode (stops dropout from being applied).
+ * The network is ready for inference after this call.
+ * 
+ * @param pnet Network that was being trained
+ * 
+ * @see ann_train_begin() to start a training session
+ */
+ANN_API void ann_train_end(PNetwork pnet);
+
+/**
  * Run trained network on single input to produce output.
  * 
  * Forward-propagates input through all layers and returns the output
- * layer activations. Network must be trained before calling.
+ * layer activations. Safe to call during online training (between
+ * ann_train_begin/ann_train_end) — dropout is automatically disabled.
  * 
  * @param pnet Trained network (must not be NULL)
  * @param inputs Input feature vector (size = first layer node_count)

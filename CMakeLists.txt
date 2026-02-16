@@ -126,6 +126,10 @@ add_executable(test_training_convergence test_training_convergence.c testy/test_
 target_link_libraries(test_training_convergence libann ${BLAS_LIB} ${MATH_LIB})
 add_test(NAME test_training_convergence COMMAND test_training_convergence)
 
+add_executable(test_online_training test_online_training.c testy/test_main.c)
+target_link_libraries(test_online_training libann ${BLAS_LIB} ${MATH_LIB})
+add_test(NAME test_online_training COMMAND test_online_training)
+
 add_executable(test_json test_json.c testy/test_main.c)
 target_link_libraries(test_json libann ${BLAS_LIB} ${MATH_LIB})
 add_test(NAME test_json COMMAND test_json)

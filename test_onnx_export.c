@@ -288,6 +288,30 @@ void test_main(int argc, char *argv[]) {
     
     remove_file(import_file);
 
+    // ========================================================================
+    // NaN/Inf HANDLING TESTS
+    // ========================================================================
+    SUITE("ONNX Export NaN/Inf Handling");
+    COMMENT("Testing that NaN/Inf values are serialized as valid JSON...");
+
+    net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+
+    // Inject NaN and Inf into weights
+    net->layers[0].t_weights->values[0] = NAN;
+    net->layers[0].t_weights->values[1] = INFINITY;
+    net->layers[0].t_bias->values[0] = -INFINITY;
+
+    result = ann_export_onnx(net, test_file);
+    TESTEX("Export with NaN/Inf values returns ERR_OK", (result == ERR_OK));
+    TESTEX("Output does not contain 'nan'", !file_contains(test_file, "nan"));
+    TESTEX("Output does not contain 'inf'", !file_contains(test_file, "inf"));
+    TESTEX("Output contains 0.0 replacement", file_contains(test_file, "0.0"));
+
+    remove_file(test_file);
+    ann_free_network(net);
+
     // Cleanup any remaining test files
     remove_file(test_file);
     remove_file(pikchr_file);

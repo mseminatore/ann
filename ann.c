@@ -278,25 +278,29 @@ static void record_history(PNetwork pnet, real loss, real learning_rate);
 //------------------------------
 static void softmax(PNetwork pnet)
 {
-	real one_over_sum = 0.0;
 	real sum = 0.0;
 
 	// find the sum of the output node values, excluding the bias node
 	int output_layer = pnet->layer_count - 1;
 	int node_count = pnet->layers[output_layer].node_count;
-	
-	//tensor_exp(pnet->layers[output_layer].t_values);
-	//one_over_sum = (real)1.0 / (tensor_sum(pnet->layers[output_layer].t_values) - 1.0);
-	//tensor_mul_scalar(pnet->layers[output_layer].t_values, one_over_sum);
+	real *values = pnet->layers[output_layer].t_values->values;
 
-	for (int node = 0; node < node_count; node++)
+	// Find max for numerical stability
+	real max_val = values[0];
+	for (int node = 1; node < node_count; node++)
 	{
-		sum += (real)exp(pnet->layers[output_layer].t_values->values[node]);
+		if (values[node] > max_val)
+			max_val = values[node];
 	}
 
 	for (int node = 0; node < node_count; node++)
 	{
-		pnet->layers[output_layer].t_values->values[node] = (real)(exp(pnet->layers[output_layer].t_values->values[node]) / sum);
+		sum += (real)exp(values[node] - max_val);
+	}
+
+	for (int node = 0; node < node_count; node++)
+	{
+		values[node] = (real)(exp(values[node] - max_val) / sum);
 	}
 }
 
@@ -543,7 +547,7 @@ static real compute_cross_entropy(PNetwork pnet, PTensor outputs)
 
 	for (int i = 0; i < poutput_layer->node_count; i++)
 	{
-		xe += (real)(outputs->values[i] * log(poutput_layer->t_values->values[i]));
+		xe += (real)(outputs->values[i] * log(fmax(poutput_layer->t_values->values[i], (real)1e-7)));
 	}
 
 	return -xe;
@@ -598,10 +602,18 @@ static void softmax_batched(PNetwork pnet, int batch_size)
 		real sum = (real)0.0;
 		int row_offset = b * node_count;
 
-		// Compute exp and sum for this sample
+		// Find max for numerical stability
+		real max_val = batch->values[row_offset];
+		for (int n = 1; n < node_count; n++)
+		{
+			if (batch->values[row_offset + n] > max_val)
+				max_val = batch->values[row_offset + n];
+		}
+
+		// Compute exp(x - max) and sum for this sample
 		for (int n = 0; n < node_count; n++)
 		{
-			batch->values[row_offset + n] = (real)exp(batch->values[row_offset + n]);
+			batch->values[row_offset + n] = (real)exp(batch->values[row_offset + n] - max_val);
 			sum += batch->values[row_offset + n];
 		}
 
@@ -3289,7 +3301,11 @@ static void write_json_float_array(FILE *fptr, const real *values, int count)
 	for (int i = 0; i < count; i++)
 	{
 		if (i > 0) fprintf(fptr, ", ");
-		fprintf(fptr, "%.8g", (double)values[i]);
+		double v = (double)values[i];
+		if (isnan(v) || isinf(v))
+			fprintf(fptr, "0.0");
+		else
+			fprintf(fptr, "%.8g", v);
 	}
 	fprintf(fptr, "]");
 }

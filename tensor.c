@@ -95,6 +95,18 @@
 #	include <cblas.h>
 #endif
 
+// SIMD support detection
+#if !defined(USE_BLAS)
+#	if defined(__AVX__) || (defined(_MSC_VER) && defined(__AVX__))
+#		include <immintrin.h>
+#		define USE_AVX_SIMD
+#	elif defined(__SSE__) || defined(_M_X64) || defined(_M_AMD64)
+#		include <xmmintrin.h>
+#		include <emmintrin.h>
+#		define USE_SSE_SIMD
+#	endif
+#endif
+
 #define TENSOR_ALIGN 32
 
 //------------------------------
@@ -102,10 +114,14 @@
 //------------------------------
 static void *tmalloc(int size)
 {
-	#if defined(_WIN32) && !defined(_WIN64)
+	#ifdef _WIN32
 		return _aligned_malloc(size, TENSOR_ALIGN);
+	#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && !defined(__APPLE__)
+		return aligned_alloc(TENSOR_ALIGN, ((size + TENSOR_ALIGN - 1) / TENSOR_ALIGN) * TENSOR_ALIGN);
 	#else
-		return malloc(size);
+		void *ptr = NULL;
+		posix_memalign(&ptr, TENSOR_ALIGN, size);
+		return ptr;
 	#endif
 }
 
@@ -114,7 +130,7 @@ static void *tmalloc(int size)
 //------------------------------
 static void tfree(void *block)
 {
-	#if defined(_WIN32) && !defined(_WIN64)
+	#ifdef _WIN32
 		_aligned_free(block);
 	#else
 		free(block);
@@ -126,10 +142,15 @@ static void tfree(void *block)
 //------------------------------
 static void *trealloc(void *block, int size)
 {
-	#if defined(_WIN32) && !defined(_WIN64)
+	#ifdef _WIN32
 		return _aligned_realloc(block, size, TENSOR_ALIGN);
 	#else
-		return realloc(block, size);
+		// No standard aligned_realloc; allocate new, copy, free old
+		void *new_block = tmalloc(size);
+		if (new_block && block)
+			memcpy(new_block, block, size);  // caller must ensure size <= old size
+		free(block);
+		return new_block;
 	#endif
 }
 
@@ -1206,14 +1227,25 @@ PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTe
 			real a_ik = alpha * a_row[k];
 			const real *b_row = B->values + k * N;
 			int j = 0;
-			int unroll_limit = N - 3;
-			for (; j < unroll_limit; j += 4)
+#if defined(USE_AVX_SIMD)
+			__m256 va = _mm256_set1_ps(a_ik);
+			for (; j + 7 < N; j += 8)
 			{
-				c_row[j]     += a_ik * b_row[j];
-				c_row[j + 1] += a_ik * b_row[j + 1];
-				c_row[j + 2] += a_ik * b_row[j + 2];
-				c_row[j + 3] += a_ik * b_row[j + 3];
+				__m256 vc = _mm256_loadu_ps(c_row + j);
+				__m256 vb = _mm256_loadu_ps(b_row + j);
+				vc = _mm256_add_ps(vc, _mm256_mul_ps(va, vb));
+				_mm256_storeu_ps(c_row + j, vc);
 			}
+#elif defined(USE_SSE_SIMD)
+			__m128 va = _mm_set1_ps(a_ik);
+			for (; j + 3 < N; j += 4)
+			{
+				__m128 vc = _mm_loadu_ps(c_row + j);
+				__m128 vb = _mm_loadu_ps(b_row + j);
+				vc = _mm_add_ps(vc, _mm_mul_ps(va, vb));
+				_mm_storeu_ps(c_row + j, vc);
+			}
+#endif
 			for (; j < N; j++)
 				c_row[j] += a_ik * b_row[j];
 		}
@@ -1270,14 +1302,34 @@ PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real be
 			const real *b_row = B->values + j * K;
 			real sum = (real)0.0;
 			int k = 0;
-			int unroll_limit = K - 3;
-			for (; k < unroll_limit; k += 4)
+#if defined(USE_AVX_SIMD)
+			__m256 vsum = _mm256_setzero_ps();
+			for (; k + 7 < K; k += 8)
 			{
-				sum += a_row[k]     * b_row[k];
-				sum += a_row[k + 1] * b_row[k + 1];
-				sum += a_row[k + 2] * b_row[k + 2];
-				sum += a_row[k + 3] * b_row[k + 3];
+				__m256 va = _mm256_loadu_ps(a_row + k);
+				__m256 vb = _mm256_loadu_ps(b_row + k);
+				vsum = _mm256_add_ps(vsum, _mm256_mul_ps(va, vb));
 			}
+			// Horizontal sum of 8 floats
+			__m128 hi = _mm256_extractf128_ps(vsum, 1);
+			__m128 lo = _mm256_castps256_ps128(vsum);
+			__m128 s4 = _mm_add_ps(lo, hi);
+			__m128 s2 = _mm_add_ps(s4, _mm_movehl_ps(s4, s4));
+			__m128 s1 = _mm_add_ss(s2, _mm_shuffle_ps(s2, s2, 1));
+			sum = _mm_cvtss_f32(s1);
+#elif defined(USE_SSE_SIMD)
+			__m128 vsum = _mm_setzero_ps();
+			for (; k + 3 < K; k += 4)
+			{
+				__m128 va = _mm_loadu_ps(a_row + k);
+				__m128 vb = _mm_loadu_ps(b_row + k);
+				vsum = _mm_add_ps(vsum, _mm_mul_ps(va, vb));
+			}
+			// Horizontal sum of 4 floats
+			__m128 s2 = _mm_add_ps(vsum, _mm_movehl_ps(vsum, vsum));
+			__m128 s1 = _mm_add_ss(s2, _mm_shuffle_ps(s2, s2, 1));
+			sum = _mm_cvtss_f32(s1);
+#endif
 			for (; k < K; k++)
 				sum += a_row[k] * b_row[k];
 			c_row[j] += alpha * sum;
@@ -1336,14 +1388,25 @@ PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real be
 			real a_ki = alpha * a_row[i];  // A[k,i] = A^T[i,k]
 			real *c_row = C->values + i * N;
 			int j = 0;
-			int unroll_limit = N - 3;
-			for (; j < unroll_limit; j += 4)
+#if defined(USE_AVX_SIMD)
+			__m256 va = _mm256_set1_ps(a_ki);
+			for (; j + 7 < N; j += 8)
 			{
-				c_row[j]     += a_ki * b_row[j];
-				c_row[j + 1] += a_ki * b_row[j + 1];
-				c_row[j + 2] += a_ki * b_row[j + 2];
-				c_row[j + 3] += a_ki * b_row[j + 3];
+				__m256 vc = _mm256_loadu_ps(c_row + j);
+				__m256 vb = _mm256_loadu_ps(b_row + j);
+				vc = _mm256_add_ps(vc, _mm256_mul_ps(va, vb));
+				_mm256_storeu_ps(c_row + j, vc);
 			}
+#elif defined(USE_SSE_SIMD)
+			__m128 va = _mm_set1_ps(a_ki);
+			for (; j + 3 < N; j += 4)
+			{
+				__m128 vc = _mm_loadu_ps(c_row + j);
+				__m128 vb = _mm_loadu_ps(b_row + j);
+				vc = _mm_add_ps(vc, _mm_mul_ps(va, vb));
+				_mm_storeu_ps(c_row + j, vc);
+			}
+#endif
 			for (; j < N; j++)
 				c_row[j] += a_ki * b_row[j];
 		}

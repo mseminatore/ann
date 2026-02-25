@@ -1187,22 +1187,35 @@ PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTe
 		B->values, N,
 		beta, C->values, N);
 #else
-	// Naive triple-loop implementation
-	// First scale C by beta
-	for (int i = 0; i < M * N; i++)
-		C->values[i] *= beta;
+	// Cache-friendly i-k-j loop order
+	// Scale C by beta first
+	if (beta == (real)0.0)
+		memset(C->values, 0, M * N * sizeof(real));
+	else if (beta != (real)1.0)
+		for (int i = 0; i < M * N; i++)
+			C->values[i] *= beta;
 
-	// Then add alpha * A * B
+	// i-k-j: A rows accessed sequentially, B[k,:] reused across j,
+	// C[i,:] stays in cache for the inner j-loop
 	for (int i = 0; i < M; i++)
 	{
-		for (int j = 0; j < N; j++)
+		real *c_row = C->values + i * N;
+		const real *a_row = A->values + i * K;
+		for (int k = 0; k < K; k++)
 		{
-			real sum = 0;
-			for (int k = 0; k < K; k++)
+			real a_ik = alpha * a_row[k];
+			const real *b_row = B->values + k * N;
+			int j = 0;
+			int unroll_limit = N - 3;
+			for (; j < unroll_limit; j += 4)
 			{
-				sum += A->values[i * K + k] * B->values[k * N + j];
+				c_row[j]     += a_ik * b_row[j];
+				c_row[j + 1] += a_ik * b_row[j + 1];
+				c_row[j + 2] += a_ik * b_row[j + 2];
+				c_row[j + 3] += a_ik * b_row[j + 3];
 			}
-			C->values[i * N + j] += alpha * sum;
+			for (; j < N; j++)
+				c_row[j] += a_ik * b_row[j];
 		}
 	}
 #endif
@@ -1239,22 +1252,35 @@ PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real be
 		B->values, K,            // ldb = K (row stride of B, which has K cols)
 		beta, C->values, N);     // ldc = N (row stride of C)
 #else
-	// First scale C by beta
-	for (int i = 0; i < M * N; i++)
-		C->values[i] *= beta;
+	// Scale C by beta
+	if (beta == (real)0.0)
+		memset(C->values, 0, M * N * sizeof(real));
+	else if (beta != (real)1.0)
+		for (int i = 0; i < M * N; i++)
+			C->values[i] *= beta;
 
-	// Then add alpha * A * B^T
+	// A[i,k] * B^T[k,j] = A[i,k] * B[j,k]
+	// Both A and B rows are accessed sequentially for each (i,j) pair
 	for (int i = 0; i < M; i++)
 	{
+		const real *a_row = A->values + i * K;
+		real *c_row = C->values + i * N;
 		for (int j = 0; j < N; j++)
 		{
-			real sum = 0;
-			for (int k = 0; k < K; k++)
+			const real *b_row = B->values + j * K;
+			real sum = (real)0.0;
+			int k = 0;
+			int unroll_limit = K - 3;
+			for (; k < unroll_limit; k += 4)
 			{
-				// A[i,k] * B^T[k,j] = A[i,k] * B[j,k]
-				sum += A->values[i * K + k] * B->values[j * K + k];
+				sum += a_row[k]     * b_row[k];
+				sum += a_row[k + 1] * b_row[k + 1];
+				sum += a_row[k + 2] * b_row[k + 2];
+				sum += a_row[k + 3] * b_row[k + 3];
 			}
-			C->values[i * N + j] += alpha * sum;
+			for (; k < K; k++)
+				sum += a_row[k] * b_row[k];
+			c_row[j] += alpha * sum;
 		}
 	}
 #endif
@@ -1291,22 +1317,35 @@ PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real be
 		B->values, N,            // ldb = N (row stride of B)
 		beta, C->values, N);     // ldc = N (row stride of C)
 #else
-	// First scale C by beta
-	for (int i = 0; i < M * N; i++)
-		C->values[i] *= beta;
+	// Scale C by beta
+	if (beta == (real)0.0)
+		memset(C->values, 0, M * N * sizeof(real));
+	else if (beta != (real)1.0)
+		for (int i = 0; i < M * N; i++)
+			C->values[i] *= beta;
 
-	// Then add alpha * A^T * B
-	for (int i = 0; i < M; i++)
+	// Cache-friendly: iterate over k in outer loop
+	// A^T[i,k] = A[k,i], so A[k,:] is accessed sequentially
+	// B[k,:] is accessed sequentially, C[i,:] is accumulated
+	for (int k = 0; k < K; k++)
 	{
-		for (int j = 0; j < N; j++)
+		const real *a_row = A->values + k * M;  // row k of A
+		const real *b_row = B->values + k * N;  // row k of B
+		for (int i = 0; i < M; i++)
 		{
-			real sum = 0;
-			for (int k = 0; k < K; k++)
+			real a_ki = alpha * a_row[i];  // A[k,i] = A^T[i,k]
+			real *c_row = C->values + i * N;
+			int j = 0;
+			int unroll_limit = N - 3;
+			for (; j < unroll_limit; j += 4)
 			{
-				// A^T[i,k] * B[k,j] = A[k,i] * B[k,j]
-				sum += A->values[k * M + i] * B->values[k * N + j];
+				c_row[j]     += a_ki * b_row[j];
+				c_row[j + 1] += a_ki * b_row[j + 1];
+				c_row[j + 2] += a_ki * b_row[j + 2];
+				c_row[j + 3] += a_ki * b_row[j + 3];
 			}
-			C->values[i * N + j] += alpha * sum;
+			for (; j < N; j++)
+				c_row[j] += a_ki * b_row[j];
 		}
 	}
 #endif

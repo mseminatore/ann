@@ -569,6 +569,65 @@ ANN_API void ann_train_end(PNetwork pnet);
  */
 ANN_API int ann_predict(const PNetwork pnet, const real *inputs, real *outputs);
 
+// ============================================================================
+// GPU INFERENCE (Apple Metal - macOS only, requires USE_METAL)
+// ============================================================================
+
+/**
+ * Initialize the Metal GPU compute context.
+ * 
+ * Creates the MTLDevice, command queue, and compiles activation kernels
+ * from the Metal shader library. Must be called before any GPU operations.
+ * 
+ * @return 1 on success, 0 if Metal is unavailable or initialization fails
+ */
+ANN_API int ann_gpu_init(void);
+
+/**
+ * Upload network weights and biases to the GPU.
+ * 
+ * Copies all layer weights and biases into MTLBuffers on the GPU.
+ * Must be called after the network is fully trained or loaded.
+ * After this call, ann_predict() and ann_predict_batch() will use the GPU path.
+ * 
+ * @param pnet Trained network (must have weights initialized)
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if pnet is NULL or GPU not initialized
+ * @return ERR_FAIL if any GPU buffer allocation fails
+ */
+ANN_API int ann_gpu_upload_network(PNetwork pnet);
+
+/**
+ * Release all GPU buffers associated with the network.
+ * 
+ * Frees MTLBuffers for all layer weights and biases. After this call,
+ * ann_predict() falls back to CPU inference.
+ * Safe to call even if the network was never uploaded to GPU.
+ * 
+ * @param pnet Network whose GPU buffers should be freed
+ */
+ANN_API void ann_gpu_free_network(PNetwork pnet);
+
+/**
+ * Run batch inference on the GPU.
+ * 
+ * Performs forward propagation for `batch_size` samples simultaneously,
+ * leveraging GPU parallelism. This is the primary way to benefit from
+ * GPU acceleration — single-sample inference has high transfer overhead.
+ * 
+ * Requires: ann_gpu_init() and ann_gpu_upload_network() called first.
+ * 
+ * @param pnet       Trained network with weights on GPU
+ * @param inputs     Row-major input array [batch_size × input_node_count]
+ * @param outputs    Row-major output array [batch_size × output_node_count] (written)
+ * @param batch_size Number of samples to process simultaneously
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if any pointer is NULL or batch_size <= 0
+ * @return ERR_FAIL if GPU is not initialized or computation fails
+ * @return ERR_ALLOC if GPU buffer allocation fails
+ */
+ANN_API int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, int batch_size);
+
 /**
  * Determine predicted class from output activations.
  * 

@@ -63,6 +63,9 @@ typedef struct
 	int stride;			// not currently used
 	real *values;
 	int rank;			// not currently used
+#ifdef USE_METAL
+	void *gpu_buf;		// MTLBuffer* for GPU-resident data (Metal inference)
+#endif
 } Tensor, *PTensor;
 
 //------------------------------

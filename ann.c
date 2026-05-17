@@ -35,6 +35,12 @@
 #include "ann.h"
 #include "json.h"
 
+#ifdef USE_METAL
+// GPU forward pass (implemented in tensor_metal.m)
+int ann_gpu_eval_single(PNetwork pnet);
+int ann_predict_batch_metal(const PNetwork pnet, const real *inputs, real *outputs, int batch_size);
+#endif
+
 //================================================================================================
 // NEURAL NETWORK IMPLEMENTATION - Architecture and Design Overview
 //================================================================================================
@@ -567,6 +573,16 @@ static void eval_network(PNetwork pnet)
 {
 	if (!pnet)
 		return;
+
+#ifdef USE_METAL
+	// Dispatch to GPU if weights are uploaded
+	if (pnet->layers[0].t_weights && pnet->layers[0].t_weights->gpu_buf)
+	{
+		if (ann_gpu_eval_single(pnet))
+			return;
+		// Fall through to CPU path if GPU eval fails
+	}
+#endif
 
 	// loop over the non-output layers
 	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
@@ -2977,6 +2993,52 @@ int ann_predict(const PNetwork pnet, const real *inputs, real *outputs)
 	for (int node = 0; node < node_count; node++)
 	{
 		*outputs++ = pnet->layers[pnet->layer_count - 1].t_values->values[node];
+	}
+
+	return ERR_OK;
+}
+
+//-----------------------------------------------------------
+// GPU batch inference (ann_predict_batch)
+//
+// Runs forward pass on `batch_size` samples in parallel on the GPU.
+// Falls back to sequential CPU inference if Metal is not available.
+//
+// @param pnet       Network with weights (GPU-uploaded for acceleration)
+// @param inputs     [batch_size x input_nodes] row-major flat array
+// @param outputs    [batch_size x output_nodes] row-major flat array (written)
+// @param batch_size Number of samples to process
+// @return ERR_OK on success, error code otherwise
+//-----------------------------------------------------------
+int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, int batch_size)
+{
+	if (!pnet || !inputs || !outputs || batch_size <= 0)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_predict_batch");
+		return ERR_NULL_PTR;
+	}
+
+	if (pnet->layer_count <= 0 || !pnet->layers)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_predict_batch");
+		return ERR_INVALID;
+	}
+
+#ifdef USE_METAL
+	// Use GPU batch inference when weights are uploaded
+	if (pnet->layers[0].t_weights && pnet->layers[0].t_weights->gpu_buf)
+		return ann_predict_batch_metal(pnet, inputs, outputs, batch_size);
+#endif
+
+	// CPU fallback: sequential single-sample prediction
+	int in_nodes  = pnet->layers[0].node_count;
+	int out_nodes = pnet->layers[pnet->layer_count - 1].node_count;
+
+	for (int i = 0; i < batch_size; i++)
+	{
+		int err = ann_predict(pnet, inputs + i * in_nodes, outputs + i * out_nodes);
+		if (err != ERR_OK)
+			return err;
 	}
 
 	return ERR_OK;

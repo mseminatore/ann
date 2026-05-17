@@ -65,13 +65,32 @@ else()
     set(BLAS_LIB "")
 endif()
 
+# build with or without Apple Metal GPU inference support
+set(METAL_LIB "")
+set(METAL_SRC "")
+if ( USE_METAL )
+    if ( NOT APPLE )
+        message(FATAL_ERROR "USE_METAL is only supported on macOS/Apple platforms")
+    endif()
+    message("Apple Metal GPU inference build requested...")
+    add_compile_options(-DUSE_METAL)
+    set(METAL_SRC "tensor_metal.m")
+    set(METAL_LIB "-framework Metal" "-framework Foundation" "-framework MetalPerformanceShaders")
+    # Compile tensor_metal.m as Objective-C
+    set_source_files_properties(tensor_metal.m PROPERTIES
+        COMPILE_FLAGS "-x objective-c"
+        LANGUAGE C
+    )
+endif()
+
 # add the core library (includes hypertuning)
 if (BUILD_SHARED)
-    add_library(libann SHARED ann.c tensor.c ann_hypertune.c json.c)
+    add_library(libann SHARED ann.c tensor.c ann_hypertune.c json.c ${METAL_SRC})
     target_compile_definitions(libann PRIVATE ANN_BUILDING_DLL)
 else()
-    add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c)
+    add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c ${METAL_SRC})
 endif()
+target_link_libraries(libann ${METAL_LIB})
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
 #
@@ -133,6 +152,12 @@ add_test(NAME test_online_training COMMAND test_online_training)
 add_executable(test_json test_json.c testy/test_main.c)
 target_link_libraries(test_json libann ${BLAS_LIB} ${MATH_LIB})
 add_test(NAME test_json COMMAND test_json)
+
+if ( USE_METAL )
+    add_executable(test_metal test_metal.c testy/test_main.c)
+    target_link_libraries(test_metal libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB})
+    add_test(NAME test_metal COMMAND test_metal)
+endif()
 
 #add_executable(test_forward_pass test_forward_pass.c testy/test_main.c)
 #target_link_libraries(test_forward_pass ann ${BLAS_LIB} ${MATH_LIB})

@@ -31,6 +31,11 @@
 #include <math.h>
 #include "tensor.h"
 
+#ifdef USE_METAL
+// Forward declaration: implemented in tensor_metal.m
+void tensor_metal_release_buffer(void *gpu_buf);
+#endif
+
 //================================================================================================
 // LINEAR ALGEBRA LIBRARY - Tensor (Matrix/Vector) Implementation
 //================================================================================================
@@ -158,6 +163,10 @@ PTensor tensor_create(int rows, int cols)
 	// only rank 2 tensors supported now
 	t->rank = 2;
 
+#ifdef USE_METAL
+	t->gpu_buf = NULL;
+#endif
+
 	t->values = tmalloc(rows * cols * sizeof(real));
 	if (!t->values)
 	{
@@ -214,6 +223,10 @@ void tensor_free(PTensor t)
 
 	t->rows = t->cols = t->stride = -1;
 	tfree(t->values);
+#ifdef USE_METAL
+	if (t->gpu_buf)
+		tensor_metal_release_buffer(t->gpu_buf);
+#endif
 	free(t);
 }
 

@@ -28,4 +28,7 @@
 // define to compile in BLAS library support
 //#define USE_BLAS
 
+// define to compile in Apple Metal GPU inference support (macOS only)
+//#define USE_METAL
+
 #endif

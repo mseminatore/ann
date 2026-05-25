@@ -157,6 +157,9 @@ if ( USE_METAL )
     add_executable(test_metal test_metal.c testy/test_main.c)
     target_link_libraries(test_metal libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB})
     add_test(NAME test_metal COMMAND test_metal)
+
+    add_executable(bench_gpu_training bench_gpu_training.c)
+    target_link_libraries(bench_gpu_training libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB})
 endif()
 
 #add_executable(test_forward_pass test_forward_pass.c testy/test_main.c)

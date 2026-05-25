@@ -39,6 +39,8 @@
 // GPU forward pass (implemented in tensor_metal.m)
 int ann_gpu_eval_single(PNetwork pnet);
 int ann_predict_batch_metal(const PNetwork pnet, const real *inputs, real *outputs, int batch_size);
+// GPU training (implemented in tensor_metal.m)
+int ann_gpu_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, real *loss_out);
 #endif
 
 //================================================================================================
@@ -2199,7 +2201,11 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		return 0.0;
 	}
 
-	// train over epochs until done
+#ifdef USE_METAL
+	// Check if GPU training is available (weights uploaded to GPU)
+	int use_gpu_training = (pnet->layers[0].t_weights != NULL &&
+	                        pnet->layers[0].t_weights->gpu_buf != NULL);
+#endif
 	while (!converged)
 	{
 		// re-shuffle the indices for this epoch
@@ -2245,18 +2251,28 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 				       output_node_count * sizeof(real));
 			}
 
-			// Batched forward pass
-			eval_network_batched(pnet, actual_batch_size);
+		// Batched forward + backward + optimize (CPU or GPU path)
+#ifdef USE_METAL
+			if (use_gpu_training && ann_gpu_train_batch(pnet, batch_targets, actual_batch_size, &loss))
+			{
+				// GPU handled this batch (forward + backward + optimizer + train_iteration++)
+			}
+			else
+#endif
+			{
+				// CPU path: forward pass
+				eval_network_batched(pnet, actual_batch_size);
 
-			// Batched backward pass (also computes loss)
-			loss = back_propagate_batched(pnet, actual_batch_size, batch_targets);
+				// Batched backward pass (also computes loss)
+				loss = back_propagate_batched(pnet, actual_batch_size, batch_targets);
 
-			// Increment training iteration for Adam bias correction
-			pnet->train_iteration++;
+				// Increment training iteration for Adam bias correction
+				pnet->train_iteration++;
 
-			// update weights based on batched gradients
-			// using the chosen optimization function
-			pnet->optimize_func(pnet);
+				// update weights based on batched gradients
+				// using the chosen optimization function
+				pnet->optimize_func(pnet);
+			}
 
 			// Progress indicator: show one '=' per ~5% of batches
 			if (batch % max(1, batch_count / 20) == 0)

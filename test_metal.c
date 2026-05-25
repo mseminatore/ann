@@ -232,6 +232,90 @@ void test_main(int argc, char *argv[])
 
     int upload_null = ann_gpu_upload_network(NULL);
     TESTEX("ann_gpu_upload_network(NULL) returns ERR_NULL_PTR", (upload_null == ERR_NULL_PTR));
+
+    // ========================================================================
+    SUITE("GPU Training - SGD");
+    // ========================================================================
+
+    // Create fresh network (NOT pre-trained)
+    PNetwork train_net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(train_net, 2, LAYER_INPUT,  ACTIVATION_NULL);
+    ann_add_layer(train_net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+    ann_add_layer(train_net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+    ann_set_convergence(train_net, 0.05f);
+    ann_set_epoch_limit(train_net, 500);  // Short training for test
+
+    TESTEX("XOR network for GPU training created", (train_net != NULL));
+
+    int train_upload = ann_gpu_upload_network(train_net);
+    TESTEX("ann_gpu_upload_network() succeeds for training", (train_upload == ERR_OK));
+
+    // XOR training data (2 inputs, 1 output, 4 samples)
+    real xor_data[] = {
+        0, 0,  0,
+        0, 1,  1,
+        1, 0,  1,
+        1, 1,  0
+    };
+    PTensor xor_inputs = tensor_create(4, 2);
+    PTensor xor_targets = tensor_create(4, 1);
+    for (int i = 0; i < 4; i++) {
+        xor_inputs->values[i * 2 + 0] = xor_data[i * 3 + 0];
+        xor_inputs->values[i * 2 + 1] = xor_data[i * 3 + 1];
+        xor_targets->values[i] = xor_data[i * 3 + 2];
+    }
+
+    real loss = ann_train_network(train_net, xor_inputs, xor_targets, 4);
+
+    ann_gpu_sync_weights(train_net);
+    TESTEX("GPU training completed with loss < 0.1", (loss < 0.1f));
+
+    // Verify predictions after GPU training
+    real pred[1];
+    ann_predict(train_net, (real[]){0, 0}, pred);
+    int pred_ok = (pred[0] < 0.5f); // XOR(0,0) = 0
+    TESTEX("After GPU training, XOR(0,0) predicts 0", (pred_ok));
+
+    tensor_free(xor_inputs);
+    tensor_free(xor_targets);
+    ann_free_network(train_net);
+
+    // ========================================================================
+    SUITE("GPU Sync Weights");
+    // ========================================================================
+
+    PNetwork sync_net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(sync_net, 2, LAYER_INPUT,  ACTIVATION_NULL);
+    ann_add_layer(sync_net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+    ann_add_layer(sync_net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+    ann_set_convergence(sync_net, 0.05f);
+    ann_set_epoch_limit(sync_net, 500);
+
+    TESTEX("Network for sync test created", (sync_net != NULL));
+
+    ann_gpu_upload_network(sync_net);
+    
+    // Create small training set
+    PTensor sync_inputs = tensor_create(4, 2);
+    PTensor sync_targets = tensor_create(4, 1);
+    for (int i = 0; i < 4; i++) {
+        sync_inputs->values[i * 2 + 0] = xor_data[i * 3 + 0];
+        sync_inputs->values[i * 2 + 1] = xor_data[i * 3 + 1];
+        sync_targets->values[i] = xor_data[i * 3 + 2];
+    }
+
+    ann_train_network(sync_net, sync_inputs, sync_targets, 4);
+    ann_gpu_sync_weights(sync_net);
+
+    // After sync, CPU predict should work correctly
+    real sync_pred[1];
+    ann_predict(sync_net, (real[]){1, 1}, sync_pred);
+    int sync_ok = (sync_pred[0] < 0.5f); // XOR(1,1) = 0
+    TESTEX("After GPU train + sync, CPU predict works", (sync_ok));
+
+    tensor_free(sync_inputs);
+    tensor_free(sync_targets);
+    ann_free_network(sync_net);
 }
 
 #else  /* USE_METAL not defined */

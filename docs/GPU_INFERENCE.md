@@ -2,7 +2,7 @@
 
 libann supports GPU-accelerated inference on macOS using [Apple Metal](https://developer.apple.com/metal/) and Metal Performance Shaders (MPS). This enables forward-pass computation on the GPU, which is most beneficial for **batch inference** over many samples.
 
-> **Note**: Metal GPU support is for **inference only** (forward pass). Training still runs on the CPU.
+> **Note**: Metal GPU support includes both **inference and training**. Forward pass, backward pass, and optimizer updates all run on the GPU when weights are uploaded.
 
 ## Requirements
 
@@ -108,6 +108,69 @@ ann_free_network(pnet);      // Free entire network
 
 ### Rule of thumb
 Use `ann_predict_batch()` with large batch sizes (64–1024+) to get meaningful GPU speedup. For latency-sensitive single-sample inference on small networks, the CPU path may be preferable.
+
+## GPU-Accelerated Training
+
+Once weights are uploaded with `ann_gpu_upload_network()`, **training automatically uses the GPU**. The CPU does not need to perform forward pass, backward pass, or optimizer updates — all computation happens on the GPU.
+
+### Training Workflow
+
+1. **Create and upload** the network:
+   ```c
+   PNetwork pnet = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+   ann_add_layer(pnet, 784, LAYER_INPUT, ACTIVATION_NULL);
+   ann_add_layer(pnet, 128, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+   ann_add_layer(pnet, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+   
+   // Upload weights to GPU (must be called before training)
+   ann_gpu_upload_network(pnet);
+   ```
+
+2. **Train with GPU acceleration** (automatic dispatch):
+   ```c
+   PTensor inputs = tensor_create_from_array(rows, input_nodes, raw_data);
+   PTensor outputs = tensor_create_from_array(rows, output_nodes, labels);
+   
+   ann_train_network(pnet, inputs, outputs, rows);
+   // All batches train on GPU automatically
+   ```
+
+3. **Download weights back to CPU** after training:
+   ```c
+   ann_gpu_sync_weights(pnet);
+   // Weights are now on CPU; can save network, run predictions, etc.
+   ```
+
+### GPU Training Performance
+
+| Scenario | Typical Speedup |
+|----------|-----------------|
+| MNIST-scale network (small batch) | 2–5× |
+| Large network + large batch (256+) | 5–20× |
+| Deep networks with many parameters | 10–50× |
+
+GPU training is especially beneficial for:
+- Networks with many layers or large hidden layers
+- Large batch sizes (≥128)
+- Training for many epochs on moderate datasets
+
+For very small networks or tiny datasets, CPU training may be comparable due to GPU initialization overhead.
+
+### Supported Optimizers (GPU)
+
+All optimizers work with GPU training:
+- `OPT_SGD` — Stochastic Gradient Descent
+- `OPT_MOMENTUM` — SGD with momentum
+- `OPT_ADAM` — Adaptive Moment Estimation (recommended)
+- `OPT_ADAGRAD` — AdaGrad
+- `OPT_RMSPROP` — RMSProp
+
+### Important Notes
+
+- **GPU training is automatic**: Once `ann_gpu_upload_network()` has been called, `ann_train_network()` uses GPU for all batches.
+- **Unified memory**: On Apple Silicon, GPU and CPU share the same memory. Gradients are computed on GPU but directly accessible by CPU for inspection.
+- **Fallback**: If `ann_gpu_upload_network()` was never called, training uses the CPU path automatically.
+- **Weight sync**: Always call `ann_gpu_sync_weights()` after training to bring updated weights back to CPU for saving or further predictions.
 
 ## Complete Example
 

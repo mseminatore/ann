@@ -629,6 +629,26 @@ ANN_API void ann_gpu_free_network(PNetwork pnet);
 ANN_API int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, int batch_size);
 
 /**
+ * Download updated weights and biases from GPU back to CPU.
+ *
+ * After GPU-accelerated training (ann_train_network() with weights uploaded),
+ * the weights live on the GPU. Call this function to synchronize them back
+ * to the CPU-side tensor values so that ann_predict(), ann_save_network(),
+ * and other CPU-path functions see the trained parameters.
+ *
+ * Safe to call even if no GPU training occurred (no-op in that case).
+ *
+ * Typical usage:
+ *   ann_gpu_upload_network(net);
+ *   ann_train_network(net, inputs, outputs, rows);
+ *   ann_gpu_sync_weights(net);     // <-- download trained weights
+ *   ann_predict(net, input, out);  // now uses updated weights
+ *
+ * @param pnet Network whose weights should be downloaded from GPU
+ */
+ANN_API void ann_gpu_sync_weights(PNetwork pnet);
+
+/**
  * Determine predicted class from output activations.
  * 
  * Returns the index of the maximum output value, useful for classification

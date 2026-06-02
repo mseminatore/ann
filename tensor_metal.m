@@ -49,6 +49,7 @@
 #include <string.h>
 #include "tensor.h"
 #include "ann.h"
+#include "ann_gpu_backend.h"
 
 //-----------------------------------------------------------
 // Internal GPU context (singleton)
@@ -642,18 +643,18 @@ static int metal_forward_pass(PNetwork pnet,
 }
 
 //-----------------------------------------------------------
-// Public C API (called from ann.c)
+// Internal Metal backend functions (registered in metal_backend vtable).
+// These are not part of the public libann API.
 //-----------------------------------------------------------
 
-int ann_gpu_init(void)
-{
-    return tensor_metal_init();
-}
-
-int ann_gpu_upload_network(PNetwork pnet)
+static int metal_upload_network(PNetwork pnet)
 {
     if (!pnet || !g_metal.initialized)
         return ERR_NULL_PTR;
+
+    // Force per-network training buffer rebind/allocation on next train call.
+    g_metal.training_buffers_ready = 0;
+    g_metal.training_batch_size = 0;
 
     for (int layer = 0; layer < pnet->layer_count - 1; layer++)
     {
@@ -666,7 +667,7 @@ int ann_gpu_upload_network(PNetwork pnet)
     return ERR_OK;
 }
 
-void ann_gpu_free_network(PNetwork pnet)
+static void metal_free_network(PNetwork pnet)
 {
     if (!pnet) return;
 
@@ -683,14 +684,18 @@ void ann_gpu_free_network(PNetwork pnet)
             l->t_bias->gpu_buf = NULL;
         }
     }
+
+    // Network-local training buffers are released by tensor_free() during
+    // ann_free_network(); reset global readiness so stale state is never reused.
+    g_metal.training_buffers_ready = 0;
+    g_metal.training_batch_size = 0;
 }
 
 //-----------------------------------------------------------
-// GPU-accelerated single-sample inference.
-// Called from eval_network() when Metal is available.
+// GPU-accelerated single-sample inference (Metal).
 // Returns 1 on success, 0 if GPU not ready (fallback to CPU).
 //-----------------------------------------------------------
-int ann_gpu_eval_single(PNetwork pnet)
+static int metal_eval_single(PNetwork pnet)
 {
     if (!pnet || !g_metal.initialized)
         return 0;
@@ -738,7 +743,7 @@ int ann_gpu_eval_single(PNetwork pnet)
 // @param batch_size Number of samples to process
 // @return ERR_OK on success
 //-----------------------------------------------------------
-int ann_predict_batch_metal(const PNetwork pnet, const real *inputs, real *outputs, int batch_size)
+static int metal_eval_batch(const PNetwork pnet, const real *inputs, real *outputs, int batch_size)
 {
     if (!pnet || !inputs || !outputs || batch_size <= 0)
         return ERR_NULL_PTR;
@@ -986,10 +991,15 @@ static int gpu_backward_pass(PNetwork pnet, int batch_size)
 
         NSUInteger elem_count = (NSUInteger)(batch_size * nodes);
 
-        // --- Apply activation derivative (skip for output layer which uses softmax/delta directly) ---
-        // For output layer, delta = T - Y is already set (no derivative needed for softmax/MSE).
-        // For hidden layers, apply the per-activation derivative.
-        if (li < layer_count - 1) {
+        // --- Apply activation derivative ---
+        // Keep the softmax+cross-entropy shortcut at the output (delta = T - Y),
+        // but apply derivatives for other output activations.
+        int is_output_layer = (li == layer_count - 1);
+        int skip_output_derivative =
+            is_output_layer &&
+            (layer->activation == ACTIVATION_SOFTMAX) &&
+            (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY);
+        if (!skip_output_derivative) {
             id<MTLComputePipelineState> pso_d = pso_for_deriv(layer->activation);
             if (pso_d) {
                 // Use Z (pre-activation) for ReLU/LeakyReLU, A (post-activation) for others
@@ -1377,12 +1387,12 @@ static void gpu_optimizer_step(PNetwork pnet)
 }
 
 //-----------------------------------------------------------
-// ann_gpu_sync_weights()
+// metal_sync_weights()
 // Download all layer weights and biases from GPU to CPU.
 // Call after ann_train_network() completes to make the trained
 // weights available for ann_predict(), ann_save_network(), etc.
 //-----------------------------------------------------------
-void ann_gpu_sync_weights(PNetwork pnet)
+static void metal_sync_weights(PNetwork pnet)
 {
     if (!pnet || !g_metal.initialized) return;
 
@@ -1403,7 +1413,7 @@ void ann_gpu_sync_weights(PNetwork pnet)
 }
 
 //-----------------------------------------------------------
-// ann_gpu_train_batch()
+// metal_train_batch()
 // Top-level GPU training hook called from ann_train_network().
 //
 // Steps:
@@ -1419,7 +1429,7 @@ void ann_gpu_sync_weights(PNetwork pnet)
 //
 // Returns 1 if GPU handled the batch, 0 to fall back to CPU.
 //-----------------------------------------------------------
-int ann_gpu_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, real *loss_out)
+static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, real *loss_out)
 {
     if (!pnet || !g_metal.initialized) return 0;
     if (!pnet->layers[0].t_weights || !pnet->layers[0].t_weights->gpu_buf) return 0;
@@ -1434,6 +1444,16 @@ int ann_gpu_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, re
     int output_layer_idx = pnet->layer_count - 1;
     int input_nodes  = pnet->layers[0].node_count;
     int output_nodes = pnet->layers[output_layer_idx].node_count;
+
+    // Defensive re-allocation for stale backend state across network lifetimes.
+    if (!pnet->layers[0].t_batch_values->gpu_buf ||
+        !pnet->layers[output_layer_idx].t_batch_values ||
+        !pnet->layers[output_layer_idx].t_batch_values->gpu_buf ||
+        !pnet->layers[output_layer_idx].t_batch_dl_dz ||
+        !pnet->layers[output_layer_idx].t_batch_dl_dz->gpu_buf) {
+        g_metal.training_buffers_ready = 0;
+        if (!gpu_alloc_training_buffers(pnet, batch_size)) return 0;
+    }
 
     // --- Step 2: Zero gradient buffers (CPU memset on shared memory — no kernel needed) ---
     for (int layer = 0; layer < pnet->layer_count - 1; layer++) {
@@ -1452,6 +1472,7 @@ int ann_gpu_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, re
     {
         id<MTLBuffer> in_buf = (__bridge id<MTLBuffer>)pnet->layers[0].t_batch_values->gpu_buf;
         size_t nbytes = (size_t)(batch_size * input_nodes) * sizeof(real);
+        if (!in_buf || ![in_buf contents]) return 0;
         memcpy([in_buf contents], pnet->layers[0].t_batch_values->values, nbytes);
     }
 
@@ -1465,6 +1486,7 @@ int ann_gpu_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, re
         id<MTLBuffer> delta_buf = (__bridge id<MTLBuffer>)
             pnet->layers[output_layer_idx].t_batch_dl_dz->gpu_buf;
 
+        if (!Y_buf || !delta_buf) return 0;
         float *Y     = (float *)[Y_buf     contents];
         float *delta = (float *)[delta_buf contents];
         float *T     = batch_targets->values;
@@ -1504,5 +1526,20 @@ int ann_gpu_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, re
 
     return 1;
 }
+
+//-----------------------------------------------------------
+// Metal backend vtable instance.
+// ann_gpu_init() (in ann.c) sets g_gpu_backend = &metal_backend.
+//-----------------------------------------------------------
+GpuBackend metal_backend = {
+    tensor_metal_init,       /* init           */
+    metal_upload_network,    /* upload_network */
+    metal_free_network,      /* free_network   */
+    metal_sync_weights,      /* sync_weights   */
+    tensor_metal_release_buffer, /* release_buffer */
+    metal_eval_single,       /* eval_single    */
+    metal_eval_batch,        /* eval_batch     */
+    metal_train_batch,       /* train_batch    */
+};
 
 #endif /* USE_METAL */

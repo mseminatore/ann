@@ -570,26 +570,27 @@ ANN_API void ann_train_end(PNetwork pnet);
 ANN_API int ann_predict(const PNetwork pnet, const real *inputs, real *outputs);
 
 // ============================================================================
-// GPU INFERENCE (Apple Metal - macOS only, requires USE_METAL)
+// GPU ACCELERATION (requires USE_METAL or USE_CUDA; see ann_config.h)
 // ============================================================================
 
 /**
- * Initialize the Metal GPU compute context.
- * 
- * Creates the MTLDevice, command queue, and compiles activation kernels
- * from the Metal shader library. Must be called before any GPU operations.
- * 
- * @return 1 on success, 0 if Metal is unavailable or initialization fails
+ * Initialize the GPU compute context.
+ *
+ * Selects the best available GPU backend (Metal on macOS, CUDA on NVIDIA),
+ * creates the device, command queue, and compiles/loads kernels.
+ * Must be called before any other ann_gpu_* function.
+ *
+ * @return 1 on success, 0 if no GPU backend is available or initialization fails
  */
 ANN_API int ann_gpu_init(void);
 
 /**
  * Upload network weights and biases to the GPU.
- * 
- * Copies all layer weights and biases into MTLBuffers on the GPU.
+ *
+ * Copies all layer weights and biases into GPU buffers.
  * Must be called after the network is fully trained or loaded.
  * After this call, ann_predict() and ann_predict_batch() will use the GPU path.
- * 
+ *
  * @param pnet Trained network (must have weights initialized)
  * @return ERR_OK on success
  * @return ERR_NULL_PTR if pnet is NULL or GPU not initialized
@@ -599,11 +600,11 @@ ANN_API int ann_gpu_upload_network(PNetwork pnet);
 
 /**
  * Release all GPU buffers associated with the network.
- * 
- * Frees MTLBuffers for all layer weights and biases. After this call,
+ *
+ * Frees GPU buffers for all layer weights and biases. After this call,
  * ann_predict() falls back to CPU inference.
  * Safe to call even if the network was never uploaded to GPU.
- * 
+ *
  * @param pnet Network whose GPU buffers should be freed
  */
 ANN_API void ann_gpu_free_network(PNetwork pnet);

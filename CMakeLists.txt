@@ -83,14 +83,26 @@ if ( USE_METAL )
     )
 endif()
 
+# build with or without NVIDIA CUDA GPU support
+set(CUDA_LIBS "")
+set(CUDA_SRC "")
+if ( USE_CUDA )
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    message("NVIDIA CUDA GPU build requested...")
+    add_compile_options(-DUSE_CUDA)
+    set(CUDA_SRC "tensor_cuda.cu" "shaders.cu")
+    set(CUDA_LIBS CUDA::cudart CUDA::cublas)
+endif()
+
 # add the core library (includes hypertuning)
 if (BUILD_SHARED)
-    add_library(libann SHARED ann.c tensor.c ann_hypertune.c json.c ${METAL_SRC})
+    add_library(libann SHARED ann.c tensor.c ann_hypertune.c json.c ${METAL_SRC} ${CUDA_SRC})
     target_compile_definitions(libann PRIVATE ANN_BUILDING_DLL)
 else()
-    add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c ${METAL_SRC})
+    add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c ${METAL_SRC} ${CUDA_SRC})
 endif()
-target_link_libraries(libann ${METAL_LIB})
+target_link_libraries(libann ${METAL_LIB} ${CUDA_LIBS})
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
 #
@@ -157,11 +169,12 @@ if ( USE_METAL )
     add_executable(test_metal test_metal.c testy/test_main.c)
     target_link_libraries(test_metal libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB})
     add_test(NAME test_metal COMMAND test_metal)
+endif()
 
+if ( USE_METAL OR USE_CUDA )
     add_executable(bench_gpu_training bench_gpu_training.c)
-    target_link_libraries(bench_gpu_training libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB})
+    target_link_libraries(bench_gpu_training libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB} ${CUDA_LIBS})
 endif()
 
 #add_executable(test_forward_pass test_forward_pass.c testy/test_main.c)
 #target_link_libraries(test_forward_pass ann ${BLAS_LIB} ${MATH_LIB})
-

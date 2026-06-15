@@ -4,10 +4,18 @@
 #include "tensor.h"
 #include "testy/test.h"
 
+#if defined(USE_CBLAS)
+#	include <cblas.h>
+#endif
+
 void test_main(int argc, char* argv[])
 {
     (void)argc;
     (void)argv;
+
+#if defined(USE_CBLAS)
+    cblas_init(CBLAS_DEFAULT_THREADS);
+#endif
 
     MODULE("Online Training");
 

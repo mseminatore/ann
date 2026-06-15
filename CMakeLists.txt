@@ -6,6 +6,14 @@ project(ann VERSION 1.0)
 # options
 option(BUILD_SHARED "Build shared library (DLL/so/dylib)" OFF)
 
+# default to an optimized Release build if the user didn't specify one.
+# single-config generators (Unix Makefiles) ignore --config, so this is
+# required to get -O3 instead of an unoptimized -O0 build.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    message("No build type specified, defaulting to Release (-O3)")
+endif()
+
 # testing
 enable_testing()
 add_test(NAME logic COMMAND logic "${CMAKE_SOURCE_DIR}/and.csv")
@@ -28,6 +36,8 @@ include_directories(${PROJECT_SOURCE_DIR})
 # set compiler and arch specific optimizations
 if ("${CMAKE_C_COMPILER_ID}" STREQUAL "MSVC")
     add_compile_options(/arch:AVX)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    add_compile_options(-mavx2 -mfma)
 endif()
 
 # link math lib for gcc/linux

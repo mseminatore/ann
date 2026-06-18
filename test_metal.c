@@ -26,9 +26,10 @@
 //-----------------------------------------------------------
 static PNetwork make_xor_net(void)
 {
-    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
     if (!net) return NULL;
 
+    ann_set_learning_rate(net, 0.01f);
     ann_add_layer(net, 2, LAYER_INPUT,  ACTIVATION_NULL);
     ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
     ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
@@ -234,16 +235,17 @@ void test_main(int argc, char *argv[])
     TESTEX("ann_gpu_upload_network(NULL) returns ERR_NULL_PTR", (upload_null == ERR_NULL_PTR));
 
     // ========================================================================
-    SUITE("GPU Training - SGD");
+    SUITE("GPU Training - Adam");
     // ========================================================================
 
     // Create fresh network (NOT pre-trained)
-    PNetwork train_net = ann_make_network(OPT_SGD, LOSS_MSE);
+    PNetwork train_net = ann_make_network(OPT_ADAM, LOSS_MSE);
     ann_add_layer(train_net, 2, LAYER_INPUT,  ACTIVATION_NULL);
     ann_add_layer(train_net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
     ann_add_layer(train_net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+    ann_set_learning_rate(train_net, 0.01f);
     ann_set_convergence(train_net, 0.05f);
-    ann_set_epoch_limit(train_net, 500);  // Short training for test
+    ann_set_epoch_limit(train_net, 500);
 
     TESTEX("XOR network for GPU training created", (train_net != NULL));
 
@@ -284,10 +286,11 @@ void test_main(int argc, char *argv[])
     SUITE("GPU Sync Weights");
     // ========================================================================
 
-    PNetwork sync_net = ann_make_network(OPT_SGD, LOSS_MSE);
+    PNetwork sync_net = ann_make_network(OPT_ADAM, LOSS_MSE);
     ann_add_layer(sync_net, 2, LAYER_INPUT,  ACTIVATION_NULL);
     ann_add_layer(sync_net, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
     ann_add_layer(sync_net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+    ann_set_learning_rate(sync_net, 0.01f);
     ann_set_convergence(sync_net, 0.05f);
     ann_set_epoch_limit(sync_net, 500);
 

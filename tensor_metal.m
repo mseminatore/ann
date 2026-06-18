@@ -992,13 +992,11 @@ static int gpu_backward_pass(PNetwork pnet, int batch_size)
         NSUInteger elem_count = (NSUInteger)(batch_size * nodes);
 
         // --- Apply activation derivative ---
-        // Keep the softmax+cross-entropy shortcut at the output (delta = T - Y),
-        // but apply derivatives for other output activations.
+        // The CPU path never applies an activation derivative on the output layer:
+        // back_propagate_output_batched() uses raw delta = T - Y for all loss types.
+        // Only hidden layers get the activation derivative applied.
         int is_output_layer = (li == layer_count - 1);
-        int skip_output_derivative =
-            is_output_layer &&
-            (layer->activation == ACTIVATION_SOFTMAX) &&
-            (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY);
+        int skip_output_derivative = is_output_layer;
         if (!skip_output_derivative) {
             id<MTLComputePipelineState> pso_d = pso_for_deriv(layer->activation);
             if (pso_d) {

@@ -50,12 +50,13 @@ ANN_API int ann_gpu_init(void)
 {
 #ifdef USE_METAL
     extern GpuBackend metal_backend;
-    if (metal_backend.init()) { g_gpu_backend = &metal_backend; return 1; }
+    if (metal_backend.init()) { g_gpu_backend = &metal_backend; printf("[ann] Using Metal GPU backend\n"); return 1; }
 #endif
 #ifdef USE_CUDA
     extern GpuBackend cuda_backend;
-    if (cuda_backend.init()) { g_gpu_backend = &cuda_backend; return 1; }
+    if (cuda_backend.init()) { g_gpu_backend = &cuda_backend; printf("[ann] Using CUDA GPU backend\n"); return 1; }
 #endif
+    printf("[ann] Using CPU backend\n");
     return 0;
 }
 

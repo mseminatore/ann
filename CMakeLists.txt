@@ -38,6 +38,8 @@ if ("${CMAKE_C_COMPILER_ID}" STREQUAL "MSVC")
     add_compile_options(/arch:AVX)
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     add_compile_options(-mavx2 -mfma)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    add_compile_options(-mcpu=native)
 endif()
 
 # link math lib for gcc/linux

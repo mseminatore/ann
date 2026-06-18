@@ -104,6 +104,9 @@
 #		include <xmmintrin.h>
 #		include <emmintrin.h>
 #		define USE_SSE_SIMD
+#	elif defined(__ARM_NEON) || defined(__aarch64__)
+#		include <arm_neon.h>
+#		define USE_NEON_SIMD
 #	endif
 #endif
 
@@ -140,16 +143,15 @@ static void tfree(void *block)
 //------------------------------
 // aligned realloc where needed
 //------------------------------
-static void *trealloc(void *block, int size)
+static void *trealloc(void *block, int old_size, int new_size)
 {
 	#ifdef _WIN32
-		return _aligned_realloc(block, size, TENSOR_ALIGN);
+		return _aligned_realloc(block, new_size, TENSOR_ALIGN);
 	#else
-		// No standard aligned_realloc; allocate new, copy, free old
-		void *new_block = tmalloc(size);
+		void *new_block = tmalloc(new_size);
 		if (new_block && block)
-			memcpy(new_block, block, size);  // caller must ensure size <= old size
-		free(block);
+			memcpy(new_block, block, old_size < new_size ? old_size : new_size);
+		tfree(block);
 		return new_block;
 	#endif
 }
@@ -771,10 +773,11 @@ PTensor tensor_slice_rows(const PTensor t, int row_start)
 		r->values[i] = *v++;
 
 	// adjust size of t to remove sliced rows
+	int old_size = t->rows * t->cols * sizeof(real);
 	t->rows -= (t->rows - row_start);
 
 	// release t's extra memory
-	t->values = trealloc(t->values, t->rows * t->cols * sizeof(real));
+	t->values = trealloc(t->values, old_size, t->rows * t->cols * sizeof(real));
 	if (!t->values)
 		return NULL;
 
@@ -820,10 +823,11 @@ PTensor tensor_slice_cols(const PTensor t, int col_start)
 	}
 
 	// adjust size of t to remove sliced cols
+	int old_size = t->rows * t->cols * sizeof(real);
 	t->cols -= (t->cols - col_start);
 
 	// release t's extra memory
-	t->values = trealloc(t->values, t->rows * t->cols * sizeof(real));
+	t->values = trealloc(t->values, old_size, t->rows * t->cols * sizeof(real));
 	if (!t->values)
 		return NULL;
 
@@ -1245,6 +1249,15 @@ PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTe
 				vc = _mm_add_ps(vc, _mm_mul_ps(va, vb));
 				_mm_storeu_ps(c_row + j, vc);
 			}
+#elif defined(USE_NEON_SIMD)
+			float32x4_t va = vdupq_n_f32(a_ik);
+			for (; j + 3 < N; j += 4)
+			{
+				float32x4_t vc = vld1q_f32(c_row + j);
+				float32x4_t vb = vld1q_f32(b_row + j);
+				vc = vmlaq_f32(vc, va, vb);
+				vst1q_f32(c_row + j, vc);
+			}
 #endif
 			for (; j < N; j++)
 				c_row[j] += a_ik * b_row[j];
@@ -1329,6 +1342,15 @@ PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real be
 			__m128 s2 = _mm_add_ps(vsum, _mm_movehl_ps(vsum, vsum));
 			__m128 s1 = _mm_add_ss(s2, _mm_shuffle_ps(s2, s2, 1));
 			sum = _mm_cvtss_f32(s1);
+#elif defined(USE_NEON_SIMD)
+			float32x4_t vsum = vdupq_n_f32(0.0f);
+			for (; k + 3 < K; k += 4)
+			{
+				float32x4_t va = vld1q_f32(a_row + k);
+				float32x4_t vb = vld1q_f32(b_row + k);
+				vsum = vmlaq_f32(vsum, va, vb);
+			}
+			sum = vaddvq_f32(vsum);
 #endif
 			for (; k < K; k++)
 				sum += a_row[k] * b_row[k];
@@ -1405,6 +1427,15 @@ PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real be
 				__m128 vb = _mm_loadu_ps(b_row + j);
 				vc = _mm_add_ps(vc, _mm_mul_ps(va, vb));
 				_mm_storeu_ps(c_row + j, vc);
+			}
+#elif defined(USE_NEON_SIMD)
+			float32x4_t va = vdupq_n_f32(a_ki);
+			for (; j + 3 < N; j += 4)
+			{
+				float32x4_t vc = vld1q_f32(c_row + j);
+				float32x4_t vb = vld1q_f32(b_row + j);
+				vc = vmlaq_f32(vc, va, vb);
+				vst1q_f32(c_row + j, vc);
 			}
 #endif
 			for (; j < N; j++)

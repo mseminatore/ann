@@ -1,3 +1,5 @@
+# Project files
+
 # Prerequisites
 *.d
 
@@ -24,6 +26,8 @@ fashion_mnist.onnx
 fashion_mnist_learning_curve.csv
 mnist_hypertune
 build_shared/
+build_metal/
+build_test/
 
 # Object files
 *.o

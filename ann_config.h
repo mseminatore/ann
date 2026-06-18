@@ -28,4 +28,16 @@
 // define to compile in BLAS library support
 //#define USE_BLAS
 
+// define to compile in Apple Metal GPU support (macOS only)
+//#define USE_METAL
+
+// define to compile in CUDA GPU support (requires NVIDIA GPU + CUDA Toolkit)
+//#define USE_CUDA
+
+// USE_GPU is set automatically when any GPU backend is active.
+// Use #ifdef USE_GPU in portable code instead of testing each backend.
+#if defined(USE_METAL) || defined(USE_CUDA)
+#  define USE_GPU
+#endif
+
 #endif

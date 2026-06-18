@@ -35,6 +35,45 @@
 #include "ann.h"
 #include "json.h"
 
+#include "ann_gpu_backend.h"
+
+// Active GPU backend. NULL when no GPU is initialized.
+// Set by ann_gpu_init(); read by dispatch logic throughout this file.
+GpuBackend *g_gpu_backend = NULL;
+
+//-----------------------------------------------------------
+// Public GPU API — delegate to the active backend vtable.
+// Backends register themselves by providing a GpuBackend instance.
+//-----------------------------------------------------------
+
+ANN_API int ann_gpu_init(void)
+{
+#ifdef USE_METAL
+    extern GpuBackend metal_backend;
+    if (metal_backend.init()) { g_gpu_backend = &metal_backend; return 1; }
+#endif
+#ifdef USE_CUDA
+    extern GpuBackend cuda_backend;
+    if (cuda_backend.init()) { g_gpu_backend = &cuda_backend; return 1; }
+#endif
+    return 0;
+}
+
+ANN_API int ann_gpu_upload_network(PNetwork pnet)
+{
+    return g_gpu_backend ? g_gpu_backend->upload_network(pnet) : ERR_FAIL;
+}
+
+ANN_API void ann_gpu_free_network(PNetwork pnet)
+{
+    if (g_gpu_backend) g_gpu_backend->free_network(pnet);
+}
+
+ANN_API void ann_gpu_sync_weights(PNetwork pnet)
+{
+    if (g_gpu_backend) g_gpu_backend->sync_weights(pnet);
+}
+
 //================================================================================================
 // NEURAL NETWORK IMPLEMENTATION - Architecture and Design Overview
 //================================================================================================
@@ -567,6 +606,16 @@ static void eval_network(PNetwork pnet)
 {
 	if (!pnet)
 		return;
+
+#ifdef USE_GPU
+	// Dispatch to GPU if a backend is active and weights are uploaded
+	if (g_gpu_backend && pnet->layers[0].t_weights && pnet->layers[0].t_weights->gpu_buf)
+	{
+		if (g_gpu_backend->eval_single(pnet))
+			return;
+		// Fall through to CPU path if GPU eval fails
+	}
+#endif
 
 	// loop over the non-output layers
 	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
@@ -2181,7 +2230,16 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		return 0.0;
 	}
 
-	// train over epochs until done
+#ifdef USE_GPU
+	// Check if GPU training is available (backend active + weights uploaded to GPU)
+	int use_gpu_training = (g_gpu_backend != NULL &&
+	                        pnet->layers[0].t_weights != NULL &&
+	                        pnet->layers[0].t_weights->gpu_buf != NULL);
+	// init_weights() may have just randomized CPU weights; re-upload once so GPU
+	// training always starts from the same initialized parameters as CPU training.
+	if (use_gpu_training && g_gpu_backend->upload_network(pnet) != ERR_OK)
+		use_gpu_training = 0;
+#endif
 	while (!converged)
 	{
 		// re-shuffle the indices for this epoch
@@ -2231,18 +2289,28 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 				       output_node_count * sizeof(real));
 			}
 
-			// Batched forward pass
-			eval_network_batched(pnet, actual_batch_size);
+		// Batched forward + backward + optimize (CPU or GPU path)
+#ifdef USE_GPU
+			if (use_gpu_training && g_gpu_backend->train_batch(pnet, batch_targets, actual_batch_size, &loss))
+			{
+				// GPU handled this batch (forward + backward + optimizer + train_iteration++)
+			}
+			else
+#endif
+			{
+				// CPU path: forward pass
+				eval_network_batched(pnet, actual_batch_size);
 
-			// Batched backward pass (also computes loss)
-			loss = back_propagate_batched(pnet, actual_batch_size, batch_targets);
+				// Batched backward pass (also computes loss)
+				loss = back_propagate_batched(pnet, actual_batch_size, batch_targets);
 
-			// Increment training iteration for Adam bias correction
-			pnet->train_iteration++;
+				// Increment training iteration for Adam bias correction
+				pnet->train_iteration++;
 
-			// update weights based on batched gradients
-			// using the chosen optimization function
-			pnet->optimize_func(pnet);
+				// update weights based on batched gradients
+				// using the chosen optimization function
+				pnet->optimize_func(pnet);
+			}
 
 			// Progress indicator: buffer instead of per-batch I/O
 			if (batch % progress_step == 0 && progress_len < 60)
@@ -2977,6 +3045,52 @@ int ann_predict(const PNetwork pnet, const real *inputs, real *outputs)
 	for (int node = 0; node < node_count; node++)
 	{
 		*outputs++ = pnet->layers[pnet->layer_count - 1].t_values->values[node];
+	}
+
+	return ERR_OK;
+}
+
+//-----------------------------------------------------------
+// GPU batch inference (ann_predict_batch)
+//
+// Runs forward pass on `batch_size` samples in parallel on the GPU.
+// Falls back to sequential CPU inference if Metal is not available.
+//
+// @param pnet       Network with weights (GPU-uploaded for acceleration)
+// @param inputs     [batch_size x input_nodes] row-major flat array
+// @param outputs    [batch_size x output_nodes] row-major flat array (written)
+// @param batch_size Number of samples to process
+// @return ERR_OK on success, error code otherwise
+//-----------------------------------------------------------
+int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, int batch_size)
+{
+	if (!pnet || !inputs || !outputs || batch_size <= 0)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_predict_batch");
+		return ERR_NULL_PTR;
+	}
+
+	if (pnet->layer_count <= 0 || !pnet->layers)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_predict_batch");
+		return ERR_INVALID;
+	}
+
+#ifdef USE_GPU
+	// Use GPU batch inference when a backend is active and weights are uploaded
+	if (g_gpu_backend && pnet->layers[0].t_weights && pnet->layers[0].t_weights->gpu_buf)
+		return g_gpu_backend->eval_batch(pnet, inputs, outputs, batch_size);
+#endif
+
+	// CPU fallback: sequential single-sample prediction
+	int in_nodes  = pnet->layers[0].node_count;
+	int out_nodes = pnet->layers[pnet->layer_count - 1].node_count;
+
+	for (int i = 0; i < batch_size; i++)
+	{
+		int err = ann_predict(pnet, inputs + i * in_nodes, outputs + i * out_nodes);
+		if (err != ERR_OK)
+			return err;
 	}
 
 	return ERR_OK;

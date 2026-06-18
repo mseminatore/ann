@@ -30,6 +30,7 @@
 #include <string.h>
 #include <math.h>
 #include "tensor.h"
+#include "ann_gpu_backend.h"
 
 //================================================================================================
 // LINEAR ALGEBRA LIBRARY - Tensor (Matrix/Vector) Implementation
@@ -181,6 +182,10 @@ PTensor tensor_create(int rows, int cols)
 	// only rank 2 tensors supported now
 	t->rank = 2;
 
+#ifdef USE_GPU
+	t->gpu_buf = NULL;
+#endif
+
 	t->values = tmalloc(rows * cols * sizeof(real));
 	if (!t->values)
 	{
@@ -237,6 +242,13 @@ void tensor_free(PTensor t)
 
 	t->rows = t->cols = t->stride = -1;
 	tfree(t->values);
+#ifdef USE_GPU
+	if (t->gpu_buf)
+	{
+		if (g_gpu_backend && g_gpu_backend->release_buffer)
+			g_gpu_backend->release_buffer(t->gpu_buf);
+	}
+#endif
 	free(t);
 }
 

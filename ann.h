@@ -569,6 +569,86 @@ ANN_API void ann_train_end(PNetwork pnet);
  */
 ANN_API int ann_predict(const PNetwork pnet, const real *inputs, real *outputs);
 
+// ============================================================================
+// GPU ACCELERATION (requires USE_METAL or USE_CUDA; see ann_config.h)
+// ============================================================================
+
+/**
+ * Initialize the GPU compute context.
+ *
+ * Selects the best available GPU backend (Metal on macOS, CUDA on NVIDIA),
+ * creates the device, command queue, and compiles/loads kernels.
+ * Must be called before any other ann_gpu_* function.
+ *
+ * @return 1 on success, 0 if no GPU backend is available or initialization fails
+ */
+ANN_API int ann_gpu_init(void);
+
+/**
+ * Upload network weights and biases to the GPU.
+ *
+ * Copies all layer weights and biases into GPU buffers.
+ * Must be called after the network is fully trained or loaded.
+ * After this call, ann_predict() and ann_predict_batch() will use the GPU path.
+ *
+ * @param pnet Trained network (must have weights initialized)
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if pnet is NULL or GPU not initialized
+ * @return ERR_FAIL if any GPU buffer allocation fails
+ */
+ANN_API int ann_gpu_upload_network(PNetwork pnet);
+
+/**
+ * Release all GPU buffers associated with the network.
+ *
+ * Frees GPU buffers for all layer weights and biases. After this call,
+ * ann_predict() falls back to CPU inference.
+ * Safe to call even if the network was never uploaded to GPU.
+ *
+ * @param pnet Network whose GPU buffers should be freed
+ */
+ANN_API void ann_gpu_free_network(PNetwork pnet);
+
+/**
+ * Run batch inference on the GPU.
+ * 
+ * Performs forward propagation for `batch_size` samples simultaneously,
+ * leveraging GPU parallelism. This is the primary way to benefit from
+ * GPU acceleration — single-sample inference has high transfer overhead.
+ * 
+ * Requires: ann_gpu_init() and ann_gpu_upload_network() called first.
+ * 
+ * @param pnet       Trained network with weights on GPU
+ * @param inputs     Row-major input array [batch_size × input_node_count]
+ * @param outputs    Row-major output array [batch_size × output_node_count] (written)
+ * @param batch_size Number of samples to process simultaneously
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if any pointer is NULL or batch_size <= 0
+ * @return ERR_FAIL if GPU is not initialized or computation fails
+ * @return ERR_ALLOC if GPU buffer allocation fails
+ */
+ANN_API int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, int batch_size);
+
+/**
+ * Download updated weights and biases from GPU back to CPU.
+ *
+ * After GPU-accelerated training (ann_train_network() with weights uploaded),
+ * the weights live on the GPU. Call this function to synchronize them back
+ * to the CPU-side tensor values so that ann_predict(), ann_save_network(),
+ * and other CPU-path functions see the trained parameters.
+ *
+ * Safe to call even if no GPU training occurred (no-op in that case).
+ *
+ * Typical usage:
+ *   ann_gpu_upload_network(net);
+ *   ann_train_network(net, inputs, outputs, rows);
+ *   ann_gpu_sync_weights(net);     // <-- download trained weights
+ *   ann_predict(net, input, out);  // now uses updated weights
+ *
+ * @param pnet Network whose weights should be downloaded from GPU
+ */
+ANN_API void ann_gpu_sync_weights(PNetwork pnet);
+
 /**
  * Determine predicted class from output activations.
  * 

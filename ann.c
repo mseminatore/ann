@@ -599,30 +599,27 @@ static void softmax_batched(PNetwork pnet, int batch_size)
 
 	for (int b = 0; b < batch_size; b++)
 	{
-		real sum = (real)0.0;
-		int row_offset = b * node_count;
+		real *row = batch->values + b * node_count;
 
 		// Find max for numerical stability
-		real max_val = batch->values[row_offset];
+		real max_val = row[0];
 		for (int n = 1; n < node_count; n++)
 		{
-			if (batch->values[row_offset + n] > max_val)
-				max_val = batch->values[row_offset + n];
+			if (row[n] > max_val)
+				max_val = row[n];
 		}
 
-		// Compute exp(x - max) and sum for this sample
+		// Fused exp + sum + normalize in two passes (down from three)
+		real sum = (real)0.0;
 		for (int n = 0; n < node_count; n++)
 		{
-			batch->values[row_offset + n] = (real)exp(batch->values[row_offset + n] - max_val);
-			sum += batch->values[row_offset + n];
+			row[n] = (real)exp(row[n] - max_val);
+			sum += row[n];
 		}
 
-		// Normalize
 		real inv_sum = (real)1.0 / sum;
 		for (int n = 0; n < node_count; n++)
-		{
-			batch->values[row_offset + n] *= inv_sum;
-		}
+			row[n] *= inv_sum;
 	}
 }
 
@@ -706,6 +703,10 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 		// X is [batch × in], W is [out × in], Y is [batch × out]
 		tensor_gemm_transB((real)1.0, X, W, (real)0.0, Y);
 
+		// Fused bias add + pre-activation save + activation (single pass over Y)
+		Activation_type act_type = pnet->layers[layer + 1].activation;
+		int total = batch_size * out_nodes;
+
 		// Add bias to each row and save pre-activation Z
 		for (int b = 0; b < batch_size; b++)
 		{
@@ -713,22 +714,37 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 			for (int n = 0; n < out_nodes; n++)
 			{
 				Y->values[row_offset + n] += bias->values[n];
-				// Store pre-activation for derivative computation
-				Z->values[row_offset + n] = Y->values[row_offset + n];
 			}
 		}
+		memcpy(Z->values, Y->values, total * sizeof(real));
 
-		// Apply activation row-wise (skip softmax here, handled separately)
-		Activation_func act_func = pnet->layers[layer + 1].activation_func;
-		if (pnet->layers[layer + 1].activation != ACTIVATION_SOFTMAX)
+		// Inlined activation (avoids function pointer overhead, enables auto-vectorization)
+		if (act_type != ACTIVATION_SOFTMAX)
 		{
-			for (int b = 0; b < batch_size; b++)
+			switch (act_type)
 			{
-				int row_offset = b * out_nodes;
-				for (int n = 0; n < out_nodes; n++)
-				{
-					Y->values[row_offset + n] = act_func(Y->values[row_offset + n]);
-				}
+			case ACTIVATION_SIGMOID:
+				for (int i = 0; i < total; i++)
+					Y->values[i] = (real)1.0 / ((real)1.0 + (real)exp(-Y->values[i]));
+				break;
+			case ACTIVATION_RELU:
+				for (int i = 0; i < total; i++)
+					Y->values[i] = Y->values[i] > (real)0.0 ? Y->values[i] : (real)0.0;
+				break;
+			case ACTIVATION_LEAKY_RELU:
+				for (int i = 0; i < total; i++)
+					Y->values[i] = Y->values[i] > (real)0.0 ? Y->values[i] : (real)0.01 * Y->values[i];
+				break;
+			case ACTIVATION_TANH:
+				for (int i = 0; i < total; i++)
+					Y->values[i] = (real)tanh(Y->values[i]);
+				break;
+			case ACTIVATION_SOFTSIGN:
+				for (int i = 0; i < total; i++)
+					Y->values[i] = Y->values[i] / ((real)1.0 + (real)fabs(Y->values[i]));
+				break;
+			default:
+				break;
 			}
 		}
 		
@@ -954,6 +970,30 @@ static void back_propagate(PNetwork pnet, PTensor outputs)
 }
 
 //-------------------------------------------
+// Accumulate column sums from a [batch × cols] matrix into a [1 × cols] vector.
+// bias_grad[n] += sum over batch rows of src[b * cols + n]
+//-------------------------------------------
+static void accumulate_bias_gradient(PTensor bias_grad, const PTensor src, int batch_size, int cols)
+{
+	for (int b = 0; b < batch_size; b++)
+	{
+		const real *row = src->values + b * cols;
+		real *bg = bias_grad->values;
+		int n = 0;
+		int unroll_limit = cols - 3;
+		for (; n < unroll_limit; n += 4)
+		{
+			bg[n]     += row[n];
+			bg[n + 1] += row[n + 1];
+			bg[n + 2] += row[n + 2];
+			bg[n + 3] += row[n + 3];
+		}
+		for (; n < cols; n++)
+			bg[n] += row[n];
+	}
+}
+
+//-------------------------------------------
 // Batched output layer backpropagation
 // Computes: delta = predicted - target for full batch
 // Gradient: dW = delta^T * A_prev (using gemm)
@@ -1017,14 +1057,7 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 	tensor_gemm_transA((real)1.0, delta, A_prev, (real)1.0, prev_layer->t_gradients);
 	
 	// Bias gradient: sum of delta columns
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * out_nodes;
-		for (int n = 0; n < out_nodes; n++)
-		{
-			prev_layer->t_bias_grad->values[n] += delta->values[offset + n];
-		}
-	}
+	accumulate_bias_gradient(prev_layer->t_bias_grad, delta, batch_size, out_nodes);
 	
 	// Propagate to previous layer: dl_dz_prev = delta * W
 	// delta is [batch × out], W is [out × in]
@@ -1094,14 +1127,7 @@ static void back_propagate_sigmoid_batched(PNetwork pnet, int batch_size, int la
 	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
 	
 	// Bias gradient: sum of dl_dz columns
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			prev_layer->t_bias_grad->values[n] += dl_dz->values[offset + n];
-		}
-	}
+	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	// Propagate: dl_dz_prev = dl_dz * W
 	if (layer_idx > 1)  // Don't propagate to input layer
@@ -1142,14 +1168,7 @@ static void back_propagate_relu_batched(PNetwork pnet, int batch_size, int layer
 	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
 	
 	// Bias gradient
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			prev_layer->t_bias_grad->values[n] += dl_dz->values[offset + n];
-		}
-	}
+	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	// Propagate
 	if (layer_idx > 1)
@@ -1188,14 +1207,7 @@ static void back_propagate_leaky_relu_batched(PNetwork pnet, int batch_size, int
 	
 	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
 	
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			prev_layer->t_bias_grad->values[n] += dl_dz->values[offset + n];
-		}
-	}
+	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	if (layer_idx > 1)
 	{
@@ -1234,14 +1246,7 @@ static void back_propagate_tanh_batched(PNetwork pnet, int batch_size, int layer
 	
 	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
 	
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			prev_layer->t_bias_grad->values[n] += dl_dz->values[offset + n];
-		}
-	}
+	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	if (layer_idx > 1)
 	{
@@ -1281,14 +1286,7 @@ static void back_propagate_softsign_batched(PNetwork pnet, int batch_size, int l
 	
 	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
 	
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			prev_layer->t_bias_grad->values[n] += dl_dz->values[offset + n];
-		}
-	}
+	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	if (layer_idx > 1)
 	{
@@ -2197,8 +2195,12 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		}
 		
 		// iterate over all sets of inputs in this epoch/minibatch
-		ann_printf(pnet, "%sEpoch %u/%u%s\n[", COLOR(ANSI_BOLD_WHITE), epoch, pnet->epochLimit, RESET());
 		loss = (real)0.0;
+
+		// Progress bar buffer (avoid per-batch console I/O)
+		char progress[64];
+		int progress_len = 0;
+		int progress_step = max(1, batch_count / 20);
 
 		// iterate over all batches
 		for (int batch = 0; batch < batch_count; batch++)
@@ -2242,17 +2244,15 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 			// using the chosen optimization function
 			pnet->optimize_func(pnet);
 
-			// Progress indicator: show one '=' per ~5% of batches
-			if (batch % max(1, batch_count / 20) == 0)
-			{
-				if (colors_enabled())
-					fputs(ANSI_GREEN "=" ANSI_RESET, stdout);
-				else
-					putchar('=');
-			}
+			// Progress indicator: buffer instead of per-batch I/O
+			if (batch % progress_step == 0 && progress_len < 60)
+				progress[progress_len++] = '=';
 		}
+		progress[progress_len] = '\0';
 
-		ann_printf(pnet, "] - loss: %s%3.2g%s - LR: %s%3.2g%s\n", 
+		ann_printf(pnet, "%sEpoch %u/%u%s\n[%s%s%s] - loss: %s%3.2g%s - LR: %s%3.2g%s\n",
+			COLOR(ANSI_BOLD_WHITE), epoch, pnet->epochLimit, RESET(),
+			COLOR(ANSI_GREEN), progress, RESET(),
 			COLOR(ANSI_YELLOW), loss, RESET(),
 			COLOR(ANSI_BLUE), pnet->learning_rate, RESET());
 		

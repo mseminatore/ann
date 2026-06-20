@@ -16,10 +16,10 @@ endif()
 
 # testing
 enable_testing()
-add_test(NAME logic COMMAND logic "${CMAKE_SOURCE_DIR}/and.csv")
-add_test(NAME digit5x7 COMMAND digit5x7 "${CMAKE_SOURCE_DIR}/num5x7.csv")
-add_test(NAME save_test COMMAND save_test "${CMAKE_SOURCE_DIR}/mnist-fashion.nna" "${CMAKE_SOURCE_DIR}/fashion-mnist_test.csv")
-add_test(NAME save_test_binary COMMAND save_test_binary "${CMAKE_SOURCE_DIR}/mnist-fashion.nnb" "${CMAKE_SOURCE_DIR}/fashion-mnist_test.csv")
+add_test(NAME logic COMMAND logic "${CMAKE_SOURCE_DIR}/data/and.csv")
+add_test(NAME digit5x7 COMMAND digit5x7 "${CMAKE_SOURCE_DIR}/data/num5x7.csv")
+add_test(NAME save_test COMMAND save_test "${CMAKE_SOURCE_DIR}/data/mnist-fashion.nna" "${CMAKE_SOURCE_DIR}/data/fashion-mnist_test.csv")
+add_test(NAME save_test_binary COMMAND save_test_binary "${CMAKE_SOURCE_DIR}/data/mnist-fashion.nnb" "${CMAKE_SOURCE_DIR}/data/fashion-mnist_test.csv")
 add_test(NAME test_tensor COMMAND test_tensor)
 add_test(NAME test_network COMMAND test_network)
 add_test(NAME test_activations COMMAND test_activations)
@@ -130,75 +130,78 @@ target_link_libraries(libann ${METAL_LIB} ${CUDA_LIBS})
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
 #
-# add the executables
+# examples
 #
-#add_executable(blas_perf blas_perf.c)
+#add_executable(blas_perf examples/blas_perf.c)
 #target_link_libraries(blas_perf libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(mnist mnist.c)
+add_executable(mnist examples/mnist.c)
 target_link_libraries(mnist libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(mnist_hypertune mnist_hypertune.c)
+add_executable(mnist_hypertune examples/mnist_hypertune.c)
 target_link_libraries(mnist_hypertune libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(digit5x7 digit5x7.c)
+add_executable(digit5x7 examples/digit5x7.c)
 target_link_libraries(digit5x7 libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(logic logic.c)
+add_executable(logic examples/logic.c)
 target_link_libraries(logic libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(save_test save_test.c)
+add_executable(save_test examples/save_test.c)
 target_link_libraries(save_test libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(save_test_binary save_test_binary.c)
+add_executable(save_test_binary examples/save_test_binary.c)
 target_link_libraries(save_test_binary libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(test_tensor test_tensor.c testy/test_main.c)
+#
+# tests
+#
+add_executable(test_tensor tests/test_tensor.c testy/test_main.c)
 target_link_libraries(test_tensor libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(test_network test_network.c testy/test_main.c)
+add_executable(test_network tests/test_network.c testy/test_main.c)
 target_link_libraries(test_network libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(test_activations test_activations.c testy/test_main.c)
+add_executable(test_activations tests/test_activations.c testy/test_main.c)
 target_link_libraries(test_activations libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(test_onnx_export test_onnx_export.c testy/test_main.c)
+add_executable(test_onnx_export tests/test_onnx_export.c testy/test_main.c)
 target_link_libraries(test_onnx_export libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(test_loss_functions test_loss_functions.c testy/test_main.c)
+add_executable(test_loss_functions tests/test_loss_functions.c testy/test_main.c)
 target_link_libraries(test_loss_functions libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(test_save_load test_save_load.c testy/test_main.c)
+add_executable(test_save_load tests/test_save_load.c testy/test_main.c)
 target_link_libraries(test_save_load libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(test_hypertune test_hypertune.c testy/test_main.c)
+add_executable(test_hypertune tests/test_hypertune.c testy/test_main.c)
 target_link_libraries(test_hypertune libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(test_optimizers test_optimizers.c testy/test_main.c)
+add_executable(test_optimizers tests/test_optimizers.c testy/test_main.c)
 target_link_libraries(test_optimizers libann ${BLAS_LIB} ${MATH_LIB})
 
-add_executable(test_training_convergence test_training_convergence.c testy/test_main.c)
+add_executable(test_training_convergence tests/test_training_convergence.c testy/test_main.c)
 target_link_libraries(test_training_convergence libann ${BLAS_LIB} ${MATH_LIB})
 add_test(NAME test_training_convergence COMMAND test_training_convergence)
 
-add_executable(test_online_training test_online_training.c testy/test_main.c)
+add_executable(test_online_training tests/test_online_training.c testy/test_main.c)
 target_link_libraries(test_online_training libann ${BLAS_LIB} ${MATH_LIB})
 add_test(NAME test_online_training COMMAND test_online_training)
 
-add_executable(test_json test_json.c testy/test_main.c)
+add_executable(test_json tests/test_json.c testy/test_main.c)
 target_link_libraries(test_json libann ${BLAS_LIB} ${MATH_LIB})
 add_test(NAME test_json COMMAND test_json)
 
 if ( USE_METAL )
-    add_executable(test_metal test_metal.c testy/test_main.c)
+    add_executable(test_metal tests/test_metal.c testy/test_main.c)
     target_link_libraries(test_metal libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB})
     add_test(NAME test_metal COMMAND test_metal)
 endif()
 
 if ( USE_METAL OR USE_CUDA )
-    add_executable(bench_gpu_training bench_gpu_training.c)
+    add_executable(bench_gpu_training examples/bench_gpu_training.c)
     target_link_libraries(bench_gpu_training libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB} ${CUDA_LIBS})
 endif()
 
-#add_executable(test_forward_pass test_forward_pass.c testy/test_main.c)
+#add_executable(test_forward_pass tests/test_forward_pass.c testy/test_main.c)
 #target_link_libraries(test_forward_pass ann ${BLAS_LIB} ${MATH_LIB})

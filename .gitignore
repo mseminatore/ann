@@ -1,15 +1,18 @@
-# Project files
+# Build directories
 build*/
 
-# Prerequisites
-*.d
-
-# build files
-IMPROVEMENTS.md
-STRERROR_IMPLEMENTATION.md
+# Makefile-built executables (built in project root)
+mnist
+mnist_hypertune
+logic
+digit5x7
+save_test
+save_test_binary
+blas_perf
+pima
 test_tensor
-test_activations
 test_network
+test_activations
 test_comprehensive_callbacks
 test_forward_pass
 test_loss_functions
@@ -19,22 +22,30 @@ test_optimizers
 test_json
 test_hypertune
 test_onnx_export
-build_cblas/
+test_metal
+test_online_training
+bench_gpu_training
+
+# Generated data files
+data/fashion_mnist.onnx
+data/fashion_mnist_learning_curve.csv
+data/fashion-mnist_train.csv
+data/mnist_train.csv
+data/mnist_test.csv
+
+# Generated docs
 fashion_mnist.html
 fashion_mnist.pikchr
 fashion_mnist.svg
-fashion_mnist.onnx
-fashion_mnist_learning_curve.csv
-mnist_hypertune
-build_shared/
-build_metal/
-build_test/
+IMPROVEMENTS.md
+STRERROR_IMPLEMENTATION.md
 
 # Object files
 *.o
 *.ko
 *.obj
 *.elf
+*.d
 
 # Linker output
 *.ilk
@@ -51,7 +62,7 @@ build_test/
 *.la
 *.lo
 
-# Shared objects (inc. Windows DLLs)
+# Shared objects
 *.dll
 *.so
 *.so.*
@@ -71,7 +82,18 @@ build_test/
 *.idb
 *.pdb
 
-# Kernel Module Compile Results
+# IDE / OS
+.vs/
+.vscode
+Debug/
+Release/
+.DS_Store
+*.opendb
+*.user
+*.db
+*.filters
+
+# Misc
 *.mod*
 *.cmd
 .tmp_versions/
@@ -79,28 +101,6 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
-
 cblas.h
-*.opendb
-*.user
-*.db
-*.filters
-.vs/
-Debug/
-Release/
-.DS_Store
-#fashion-mnist_test.csv
-fashion-mnist_train.csv
-mnist_train.csv
-mnist_test.csv
-logic
-digit5x7
-pima
-save_test
-blas_perf
-.vscode
-mnist
-build/
 cblas/
 test5x7/
-save_test_binary

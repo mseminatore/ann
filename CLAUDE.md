@@ -6,6 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `libann` is a compact, portable ANSI C library for training and evaluating neural networks. It has two core modules — `tensor` (the math layer over vectors/matrices) and `ann` (the training/inference runtime built on top of `tensor`) — plus `ann_hypertune` (automated hyperparameter search) and `json` (ONNX JSON I/O). All four compile into `libann`. To embed in another project, add only `ann.c` + `tensor.c`, or link `libann`.
 
+## Project layout
+
+- Library sources (`.c`, `.h`) live in the **project root**
+- `tests/` — test source files (`test_*.c`), use the `testy` framework
+- `examples/` — example programs (`mnist.c`, `logic.c`, `digit5x7.c`, etc.)
+- `data/` — CSV datasets, saved models (`.nna`, `.nnb`), ONNX exports
+- `testy/` — embedded test framework
+- `docs/` — topic guides (ONNX, hypertuning, debugging, GPU)
+
 ## Build
 
 CMake is preferred and drives the test suite. There is also a root `Makefile`.
@@ -19,6 +28,7 @@ cmake --build . --config Release
 # BLAS acceleration (training speedup; inference is fast without it)
 cmake -DUSE_BLAS=1 ..             # OpenBLAS, expects /opt/OpenBLAS
 cmake -DUSE_CBLAS=1 ..            # CBLAS, expects /opt/cblas (requires C11 atomics)
+cmake -DUSE_MKL=1 ..              # Intel MKL, uses $ONEAPI_ROOT env var
 
 # Shared library (libann.so/.dylib/.dll)
 cmake -DBUILD_SHARED=1 ..
@@ -32,7 +42,7 @@ Note: the root `Makefile` currently hard-codes OpenBLAS at `/opt/OpenBLAS`. On a
 
 ## Test
 
-Tests use the embedded `testy` framework (`testy/test.h`, linked with `testy/test_main.c`). Each test is its own executable, registered with CTest.
+Test source files live in `tests/`. They use the embedded `testy` framework (`testy/test.h`, linked with `testy/test_main.c`). Each test is its own executable, registered with CTest.
 
 ```bash
 cd build

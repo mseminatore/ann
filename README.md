@@ -367,9 +367,7 @@ used with ML training and inference.
 |---------|------------|-----------|-------|
 | [CBLAS](https://github.com/xianyi/CBLAS) | `-DUSE_CBLAS=1` | Windows, macOS, Linux (x64, ARM64) | Recommended, cross-platform |
 | [OpenBLAS](https://openblas.net) | `-DUSE_BLAS=1` | macOS, Linux | Well-established, good performance |
-
-The [Intel MKL library](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) 
-should also work with appropriate build setup.
+| [Intel MKL](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) | `-DUSE_MKL=1` | macOS, Linux (x64) | Highest performance on Intel CPUs |
 
 ## Building with BLAS Support
 
@@ -383,18 +381,22 @@ cmake --build . --config Release
 # OpenBLAS (Linux/macOS)
 cmake -DUSE_BLAS=1 ..
 cmake --build . --config Release
+
+# Intel MKL (requires oneAPI toolkit; uses ONEAPI_ROOT env var)
+cmake -DUSE_MKL=1 ..
+cmake --build . --config Release
 ```
 
 ### Library Installation Paths
 
 The build expects libraries at these default locations:
 
-| Platform | CBLAS | OpenBLAS |
-|----------|-------|----------|
-| Windows | `C:/opt/cblas` | N/A |
-| macOS/Linux | `/opt/cblas` | `/opt/OpenBLAS` |
+| Platform | CBLAS | OpenBLAS | Intel MKL |
+|----------|-------|----------|-----------|
+| Windows | `C:/opt/cblas` | N/A | N/A |
+| macOS/Linux | `/opt/cblas` | `/opt/OpenBLAS` | `$ONEAPI_ROOT/mkl/latest` |
 
-If your library is installed elsewhere, update the paths in `CMakeLists.txt`.
+For CBLAS and OpenBLAS, update paths in `CMakeLists.txt` if your install differs. MKL uses the `ONEAPI_ROOT` environment variable set by the Intel oneAPI installer.
 
 ### Using BLAS in Your Code
 

@@ -10,7 +10,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-#include <cblas.h>
+#if defined(USE_MKL)
+#	include <mkl_cblas.h>
+#else
+#	if defined(USE_MKL)
+#		include <mkl_cblas.h>
+#	else
+#		include <cblas.h>
+#	endif
+#endif
 
 #ifdef WIN32
 #   include <Windows.h>

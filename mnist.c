@@ -29,7 +29,11 @@
 #include "ann.h"
 
 #ifdef USE_BLAS
-#	include <cblas.h>
+#	if defined(USE_MKL)
+#		include <mkl_cblas.h>
+#	else
+#		include <cblas.h>
+#	endif
 #endif
 
 #define CONVERGENCE_EPSILON 0.01
@@ -194,11 +198,13 @@ int main(int argc, char *argv[])
 		cblas_init(CBLAS_DEFAULT_THREADS);
 		if (threads != -1)
 			cblas_set_num_threads(threads);
-		
-		// cblas_autotune_thresholds();	
+
+		// cblas_autotune_thresholds();
 		printf( "%s\n", cblas_get_config());
 		printf("      CPU uArch: %s\n", cblas_get_corename());
 		printf("  Cores/Threads: %d/%d\n", cblas_get_num_procs(), cblas_get_num_threads());
+	#elif defined(USE_MKL)
+		printf("Intel MKL BLAS\n");
 	#else
 		if (threads != -1)
 			openblas_set_num_threads(threads);

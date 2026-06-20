@@ -4,7 +4,11 @@
 #include "testy/test.h"
 
 #if defined(USE_CBLAS)
-#	include <cblas.h>
+#	if defined(USE_MKL)
+#		include <mkl_cblas.h>
+#	else
+#		include <cblas.h>
+#	endif
 #endif
 
 void test_main(int argc, char* argv[])

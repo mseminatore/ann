@@ -1,4 +1,5 @@
 # Project files
+build*/
 
 # Prerequisites
 *.d

@@ -6,7 +6,11 @@
 #include "ann_hypertune.h"
 
 #if defined(USE_CBLAS)
-#	include <cblas.h>
+#	if defined(USE_MKL)
+#		include <mkl_cblas.h>
+#	else
+#		include <cblas.h>
+#	endif
 #endif
 
 // ============================================================================

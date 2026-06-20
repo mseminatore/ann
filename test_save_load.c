@@ -6,7 +6,11 @@
 #include "testy/test.h"
 
 #if defined(USE_CBLAS)
-#	include <cblas.h>
+#	if defined(USE_MKL)
+#		include <mkl_cblas.h>
+#	else
+#		include <cblas.h>
+#	endif
 #endif
 
 #define TEST_FILE_TXT "test_roundtrip.nna"

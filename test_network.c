@@ -5,7 +5,15 @@
 #include "testy/test.h"
 #include "ann.h"
 #ifdef USE_CBLAS
-#include <cblas.h>
+#if defined(USE_MKL)
+#	include <mkl_cblas.h>
+#else
+#	if defined(USE_MKL)
+#		include <mkl_cblas.h>
+#	else
+#		include <cblas.h>
+#	endif
+#endif
 #endif
 
 // Test callback tracking variables

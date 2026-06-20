@@ -129,6 +129,11 @@ endif()
 target_link_libraries(libann ${METAL_LIB} ${CUDA_LIBS})
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
+# install rules
+install(TARGETS libann ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
+install(FILES ann.h tensor.h ann_config.h ann_hypertune.h json.h ann_gpu_backend.h
+        DESTINATION include/ann)
+
 #
 # examples
 #

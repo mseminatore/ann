@@ -26,12 +26,17 @@ test_metal
 test_online_training
 bench_gpu_training
 
+# CSV data files in project root (downloaded/generated datasets)
+*.csv
+
 # Generated data files
 data/fashion_mnist.onnx
 data/fashion_mnist_learning_curve.csv
 data/fashion-mnist_train.csv
+data/fashion-mnist_test.csv
 data/mnist_train.csv
 data/mnist_test.csv
+*.onnx
 
 # Generated docs
 fashion_mnist.html

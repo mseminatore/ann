@@ -22,7 +22,7 @@ DEPS = ann.h tensor.h ann_config.h json.h ann_hypertune.h
 # LFLAGS += -L. -lcblas
 
 # use openblas
-CFLAGS += -g -O2 -DUSE_BLAS -I"/opt/OpenBLAS/include"
+CFLAGS += -g -O2 -I. -DUSE_BLAS -I"/opt/OpenBLAS/include"
 LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 
 #-DMKL_ILP64  -m64  -I"${MKLROOT}/include"

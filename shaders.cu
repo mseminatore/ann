@@ -258,4 +258,33 @@ extern "C" __global__ void cuda_l1_regularize(float *weights, float l1_scale, in
     }
 }
 
+// Output delta + per-element loss, computed on-device (one thread per element).
+// delta[i] = T[i] - Y[i]  (the codebase's gradient convention; see optimizer note above).
+// Categorical cross-entropy: loss[i] = (Y[i] > 1e-7) ? -T[i]*log(Y[i]) : 0   (matches CPU guard).
+extern "C" __global__ void cuda_xent_delta_loss(
+    const float *Y, const float *T, float *delta, float *loss, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        float y = Y[i], t = T[i];
+        delta[i] = t - y;
+        loss[i] = (y > 1e-7f) ? (-t * logf(y)) : 0.0f;
+    }
+}
+
+// MSE variant: loss[i] = (Y[i] - T[i])^2.
+extern "C" __global__ void cuda_mse_delta_loss(
+    const float *Y, const float *T, float *delta, float *loss, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        float y = Y[i], t = T[i];
+        delta[i] = t - y;
+        float d = y - t;
+        loss[i] = d * d;
+    }
+}
+
 #endif /* USE_CUDA */

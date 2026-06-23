@@ -47,6 +47,16 @@ typedef struct {
     cublasHandle_t cublas;
     int training_buffers_ready;   // training-time GPU buffers allocated
     int training_batch_size;      // batch size the training buffers were sized for
+
+    // Cached inference ping-pong buffers (avoid cudaMalloc/cudaFree per predict call).
+    float *infer_bufA;
+    float *infer_bufB;
+    size_t infer_buf_bytes;       // current capacity of each inference buffer
+
+    // Cached training loss/delta buffers (device-side targets + per-element loss).
+    float *train_targets;         // [batch x out_nodes] uploaded targets
+    float *train_lossbuf;         // [batch x out_nodes] per-element loss terms
+    size_t train_loss_bytes;      // current capacity of each of the two buffers above
 } CudaContext;
 
 static CudaContext g_cuda = {0};
@@ -67,16 +77,39 @@ static int cublas_check(cublasStatus_t st, const char *where)
     return 0;
 }
 
+// Check for errors from the most recent kernel launch(es).  cudaGetLastError() does not
+// synchronize, so this is cheap and catches launch-configuration failures (e.g. an invalid
+// launch on an unsupported architecture) that would otherwise be silent until the next sync.
+#define CUDA_KERNEL_CHECK(where) cuda_check(cudaGetLastError(), (where))
+
 static int cuda_backend_init(void)
 {
     if (g_cuda.initialized)
         return 1;
 
     int device_count = 0;
-    if (!cuda_check(cudaGetDeviceCount(&device_count), "cudaGetDeviceCount"))
+    cudaError_t cnt_err = cudaGetDeviceCount(&device_count);
+    if (cnt_err != cudaSuccess || device_count <= 0)
+    {
+        int driver_ver = 0, runtime_ver = 0;
+        cudaDriverGetVersion(&driver_ver);
+        cudaRuntimeGetVersion(&runtime_ver);
+        fprintf(stderr,
+            "[CUDA] GPU init failed: cudaGetDeviceCount -> %s (devices=%d)\n"
+            "       CUDA driver supports up to %d.%d; runtime/toolkit is %d.%d.\n",
+            cudaGetErrorString(cnt_err), device_count,
+            driver_ver / 1000, (driver_ver % 1000) / 10,
+            runtime_ver / 1000, (runtime_ver % 1000) / 10);
+        if (driver_ver > 0 && driver_ver < runtime_ver)
+            fprintf(stderr,
+                "       Hint: the driver is older than the toolkit. Build with a CUDA toolkit\n"
+                "       no newer than the driver (e.g. -T cuda=\"...vXX.Y\"), or update the driver.\n");
+        else if (driver_ver > 0)
+            fprintf(stderr,
+                "       Hint: also ensure the build targets this GPU's compute capability via\n"
+                "       -DCMAKE_CUDA_ARCHITECTURES=<arch> (e.g. 61 for Pascal, 75 Turing, 86 Ampere).\n");
         return 0;
-    if (device_count <= 0)
-        return 0;
+    }
 
     g_cuda.device_id = 0;
     if (!cuda_check(cudaSetDevice(g_cuda.device_id), "cudaSetDevice"))
@@ -171,6 +204,11 @@ static void cuda_free_training_buffers(PNetwork pnet)
 
     g_cuda.training_buffers_ready = 0;
     g_cuda.training_batch_size = 0;
+
+    // Release cached on-device loss/delta buffers.
+    if (g_cuda.train_targets) { cudaFree(g_cuda.train_targets); g_cuda.train_targets = NULL; }
+    if (g_cuda.train_lossbuf) { cudaFree(g_cuda.train_lossbuf); g_cuda.train_lossbuf = NULL; }
+    g_cuda.train_loss_bytes = 0;
 }
 
 static void cuda_free_network(PNetwork pnet)
@@ -188,6 +226,11 @@ static void cuda_free_network(PNetwork pnet)
     // Training buffers belong to this network too; reset readiness so a
     // subsequent training run reallocates from scratch.
     cuda_free_training_buffers(pnet);
+
+    // Release cached inference scratch buffers (lazily reallocated on next predict).
+    if (g_cuda.infer_bufA) { cudaFree(g_cuda.infer_bufA); g_cuda.infer_bufA = NULL; }
+    if (g_cuda.infer_bufB) { cudaFree(g_cuda.infer_bufB); g_cuda.infer_bufB = NULL; }
+    g_cuda.infer_buf_bytes = 0;
 }
 
 static void cuda_sync_weights(PNetwork pnet)
@@ -294,7 +337,57 @@ static void cuda_launch_deriv(Activation_type act, float *dl_dz,
 //================================================================================================
 
 //-----------------------------------------------------------
-// Forward pass for inference using ping-pong device scratch buffers.
+// Ensure the cached inference ping-pong buffers hold at least `bytes` each,
+// growing (never shrinking) as needed.  Avoids cudaMalloc/cudaFree per predict call.
+//-----------------------------------------------------------
+static int cuda_ensure_infer_buffers(size_t bytes)
+{
+    if (bytes <= g_cuda.infer_buf_bytes && g_cuda.infer_bufA && g_cuda.infer_bufB)
+        return 1;
+
+    if (g_cuda.infer_bufA) { cudaFree(g_cuda.infer_bufA); g_cuda.infer_bufA = NULL; }
+    if (g_cuda.infer_bufB) { cudaFree(g_cuda.infer_bufB); g_cuda.infer_bufB = NULL; }
+    g_cuda.infer_buf_bytes = 0;
+
+    if (!cuda_check(cudaMalloc((void **)&g_cuda.infer_bufA, bytes), "cudaMalloc(infer A)"))
+        return 0;
+    if (!cuda_check(cudaMalloc((void **)&g_cuda.infer_bufB, bytes), "cudaMalloc(infer B)"))
+    {
+        cudaFree(g_cuda.infer_bufA);
+        g_cuda.infer_bufA = NULL;
+        return 0;
+    }
+    g_cuda.infer_buf_bytes = bytes;
+    return 1;
+}
+
+//-----------------------------------------------------------
+// Ensure the cached on-device training loss/delta buffers (device targets and
+// per-element loss) hold at least `bytes` each, growing as needed.
+//-----------------------------------------------------------
+static int cuda_ensure_loss_buffers(size_t bytes)
+{
+    if (bytes <= g_cuda.train_loss_bytes && g_cuda.train_targets && g_cuda.train_lossbuf)
+        return 1;
+
+    if (g_cuda.train_targets) { cudaFree(g_cuda.train_targets); g_cuda.train_targets = NULL; }
+    if (g_cuda.train_lossbuf) { cudaFree(g_cuda.train_lossbuf); g_cuda.train_lossbuf = NULL; }
+    g_cuda.train_loss_bytes = 0;
+
+    if (!cuda_check(cudaMalloc((void **)&g_cuda.train_targets, bytes), "cudaMalloc(train targets)"))
+        return 0;
+    if (!cuda_check(cudaMalloc((void **)&g_cuda.train_lossbuf, bytes), "cudaMalloc(train lossbuf)"))
+    {
+        cudaFree(g_cuda.train_targets);
+        g_cuda.train_targets = NULL;
+        return 0;
+    }
+    g_cuda.train_loss_bytes = bytes;
+    return 1;
+}
+
+//-----------------------------------------------------------
+// Forward pass for inference using cached ping-pong device scratch buffers.
 // Reads batch x input_nodes from host `inputs`, writes batch x output_nodes
 // to host `outputs`.  Weights/biases must already be uploaded.
 // Returns 1 on success, 0 on failure (caller falls back to CPU).
@@ -310,15 +403,10 @@ static int cuda_forward_infer(PNetwork pnet, const real *inputs, real *outputs, 
             max_nodes = pnet->layers[i].node_count;
 
     size_t buf_bytes = (size_t)batch * max_nodes * sizeof(float);
+    if (!cuda_ensure_infer_buffers(buf_bytes))
+        return 0;
 
-    float *bufA = NULL, *bufB = NULL;
-    if (!cuda_check(cudaMalloc((void **)&bufA, buf_bytes), "cudaMalloc(infer A)"))
-        return 0;
-    if (!cuda_check(cudaMalloc((void **)&bufB, buf_bytes), "cudaMalloc(infer B)"))
-    {
-        cudaFree(bufA);
-        return 0;
-    }
+    float *bufA = g_cuda.infer_bufA, *bufB = g_cuda.infer_bufB;
 
     int ok = 1;
     if (!cuda_check(cudaMemcpy(bufA, inputs, (size_t)batch * in_first * sizeof(float),
@@ -345,12 +433,13 @@ static int cuda_forward_infer(PNetwork pnet, const real *inputs, real *outputs, 
         float *tmp = cur; cur = nxt; nxt = tmp;
     }
 
+    if (ok && !CUDA_KERNEL_CHECK("infer kernels"))
+        ok = 0;
+
     if (ok && !cuda_check(cudaMemcpy(outputs, cur, (size_t)batch * out_final * sizeof(float),
                                      cudaMemcpyDeviceToHost), "cudaMemcpy infer out"))
         ok = 0;
 
-    cudaFree(bufA);
-    cudaFree(bufB);
     return ok;
 }
 
@@ -698,57 +787,47 @@ static int cuda_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size
     if (!cuda_forward_train(pnet, batch_size))
         return 0;
 
-    // --- Delta = T - Y and loss (round-trip through host; device mem isn't host-visible) ---
+    // --- Delta = T - Y and loss, computed on-device ---
+    // Upload targets once, then a single kernel writes delta into the output layer's
+    // dl_dz buffer and the per-element loss into a scratch buffer, which cuBLAS reduces.
     {
-        size_t obytes = (size_t)batch_size * output_nodes * sizeof(real);
-        real *Y     = (real *)malloc(obytes);
-        real *delta = (real *)malloc(obytes);
-        if (!Y || !delta)
-        {
-            free(Y); free(delta);
+        int n = batch_size * output_nodes;
+        size_t obytes = (size_t)n * sizeof(real);
+
+        if (!cuda_ensure_loss_buffers(obytes))
             return 0;
-        }
 
-        if (!cuda_check(cudaMemcpy(Y, pnet->layers[out_idx].t_batch_values->gpu_buf, obytes,
-                                   cudaMemcpyDeviceToHost), "cudaMemcpy Y d2h"))
-        {
-            free(Y); free(delta);
+        // Upload this batch's targets to the device.
+        if (!cuda_check(cudaMemcpy(g_cuda.train_targets, batch_targets->values, obytes,
+                                   cudaMemcpyHostToDevice), "cudaMemcpy targets h2d"))
             return 0;
-        }
 
-        real *T = batch_targets->values;
-        real total_loss = 0.0f;
-        for (int b = 0; b < batch_size; b++)
-        {
-            int offset = b * output_nodes;
-            for (int nn = 0; nn < output_nodes; nn++)
-            {
-                real y = Y[offset + nn];
-                real t = T[offset + nn];
-                delta[offset + nn] = t - y;
+        const float *Y     = (const float *)pnet->layers[out_idx].t_batch_values->gpu_buf;
+        float       *delta = (float *)pnet->layers[out_idx].t_batch_dl_dz->gpu_buf;
 
-                if (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY)
-                {
-                    if (y > 1e-7f) total_loss -= t * logf(y);
-                }
-                else
-                {
-                    real diff = y - t;
-                    total_loss += diff * diff;
-                }
-            }
-        }
-        if (pnet->loss_type == LOSS_MSE)
-            total_loss /= (real)(batch_size * output_nodes);
+        if (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY)
+            cuda_xent_delta_loss<<<cuda_blocks(n), CUDA_THREADS>>>(
+                Y, g_cuda.train_targets, delta, g_cuda.train_lossbuf, n);
         else
-            total_loss /= (real)batch_size;
+            cuda_mse_delta_loss<<<cuda_blocks(n), CUDA_THREADS>>>(
+                Y, g_cuda.train_targets, delta, g_cuda.train_lossbuf, n);
+
+        if (!CUDA_KERNEL_CHECK("delta/loss kernel"))
+            return 0;
+
+        // Reduce the per-element loss.  All loss terms are >= 0, so the sum of absolute
+        // values returned by cublasSasum equals the true sum.
+        float loss_sum = 0.0f;
+        if (!cublas_check(cublasSasum(g_cuda.cublas, n, g_cuda.train_lossbuf, 1, &loss_sum),
+                          "cublasSasum(loss)"))
+            return 0;
+
+        // Match the CPU normalization exactly.
+        real total_loss = (pnet->loss_type == LOSS_MSE)
+            ? (real)loss_sum / (real)(batch_size * output_nodes)
+            : (real)loss_sum / (real)batch_size;
 
         if (loss_out) *loss_out = total_loss;
-
-        int ok = cuda_check(cudaMemcpy(pnet->layers[out_idx].t_batch_dl_dz->gpu_buf, delta, obytes,
-                                       cudaMemcpyHostToDevice), "cudaMemcpy delta h2d");
-        free(Y); free(delta);
-        if (!ok) return 0;
     }
 
     // --- Backward pass ---

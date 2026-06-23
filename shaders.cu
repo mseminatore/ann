@@ -173,6 +173,13 @@ extern "C" __global__ void cuda_gradient_clip(float *grads, float max_norm, int 
     }
 }
 
+// Optimizer updates.
+//
+// IMPORTANT sign convention: libann's backprop stores the gradient as delta = (T - Y), i.e.
+// the *negative* of dL/dW (see back_propagate_output_batched / cuda_train_batch).  Therefore
+// every optimizer step ADDS the (scaled) gradient to the weights — `weights += ...` — to descend
+// the loss.  This matches the CPU optimizers in ann.c (e.g. optimize_adam uses `w += ...`).
+// Using `weights -= ...` here would ascend the loss and cause training to diverge.
 extern "C" __global__ void cuda_sgd_update(
     float *weights, const float *grads, float lr, int n)
 {
@@ -229,7 +236,7 @@ extern "C" __global__ void cuda_adam_update(
         v[i] = beta2 * v[i] + (1.0f - beta2) * g * g;
         float m_hat = m[i] * m_hat_scale;
         float v_hat = v[i] * v_hat_scale;
-        weights[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+        weights[i] += lr * m_hat / (sqrtf(v_hat) + eps);
     }
 }
 

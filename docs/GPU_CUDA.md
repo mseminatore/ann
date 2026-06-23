@@ -13,12 +13,32 @@ The CUDA backend implements GPU-accelerated **inference and training** through t
 ## Build
 
 ```bash
+git submodule update --init --recursive   # required: pulls the `testy` test framework
 mkdir build_cuda && cd build_cuda
 cmake -DUSE_CUDA=1 ..
 cmake --build . --config Release
 ```
 
 Requires the CUDA Toolkit (`cudart`, `cublas`) and an NVIDIA GPU.
+
+### GPU architecture selection
+
+The build sets `CMAKE_CUDA_ARCHITECTURES` to `75;86` (Turing + Ampere) by default, which compiles
+under both CUDA 12.x and 13.x toolkits. Override it for your GPU:
+
+```bash
+cmake -DUSE_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES=61 ..   # Pascal (e.g. Quadro P620, GTX 10xx)
+cmake -DUSE_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES=89 ..   # Ada (e.g. RTX 40xx)
+```
+
+> **CUDA 13.x dropped offline codegen for Maxwell/Pascal (sm_5x / sm_6x).** To target an older
+> GPU you must build with a **CUDA 12.x** toolkit *and* set the matching `CMAKE_CUDA_ARCHITECTURES`.
+> On Windows with the Visual Studio generator, select the toolkit with
+> `-T cuda="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9"`.
+
+> **Note on host compiler flags:** CPU SIMD flags (`/arch:AVX`, `-mavx2 -mfma`, `-mcpu=native`) are
+> scoped to C/C++ sources via a generator expression so they are never passed to `nvcc` (which
+> rejects them with `nvcc fatal : A single input file is required ...`).
 
 ## What runs on the GPU
 

@@ -17,6 +17,26 @@
 #include <time.h>
 #include "ann.h"
 
+#ifdef _WIN32
+// MSVC lacks POSIX clock_gettime/CLOCK_MONOTONIC. Provide a high-resolution shim
+// backed by QueryPerformanceCounter so the benchmark builds and times correctly on Windows.
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+static int clock_gettime(int clk_id, struct timespec *ts)
+{
+    (void)clk_id;
+    LARGE_INTEGER freq, count;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&count);
+    ts->tv_sec  = (time_t)(count.QuadPart / freq.QuadPart);
+    ts->tv_nsec = (long)(((count.QuadPart % freq.QuadPart) * 1000000000LL) / freq.QuadPart);
+    return 0;
+}
+#endif
+
 // Helper: milliseconds elapsed between two timespec values
 static long time_elapsed_ms(struct timespec start, struct timespec end)
 {

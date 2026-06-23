@@ -34,12 +34,16 @@ add_test(NAME test_hypertune COMMAND test_hypertune)
 include_directories(${PROJECT_SOURCE_DIR})
 
 # set compiler and arch specific optimizations
+# NOTE: these are host-CPU SIMD flags and must only be applied to C/CXX sources.
+# nvcc rejects bare flags like /arch:AVX ("A single input file is required..."), so they are
+# scoped to C/CXX via a generator expression and never reach the CUDA (nvcc) front-end.
 if ("${CMAKE_C_COMPILER_ID}" STREQUAL "MSVC")
-    add_compile_options(/arch:AVX)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/arch:AVX>)
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    add_compile_options(-mavx2 -mfma)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-mavx2>
+                        $<$<COMPILE_LANGUAGE:C,CXX>:-mfma>)
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
-    add_compile_options(-mcpu=native)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-mcpu=native>)
 endif()
 
 # link math lib for gcc/linux
@@ -69,13 +73,14 @@ if ( USE_BLAS OR USE_CBLAS OR USE_MKL)
         add_compile_options(-DUSE_CBLAS)
         set(BLAS_LIB "cblas")
         message("CBLAS library used")
-        # CBLAS requires C11 atomics
+        # CBLAS requires C11 atomics (host C/CXX only — these flags break nvcc)
         if ("${CMAKE_C_COMPILER_ID}" STREQUAL "MSVC")
-            add_compile_options(/std:c11 /experimental:c11atomics)
+            add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/std:c11>
+                                $<$<COMPILE_LANGUAGE:C,CXX>:/experimental:c11atomics>)
             include_directories("C:/opt/cblas/include")
             link_directories("C:/opt/cblas/lib")
         else()
-            add_compile_options(-std=c11)
+            add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-std=c11>)
             include_directories("/opt/cblas/include")
             link_directories("/opt/cblas/lib")
         endif()
@@ -114,6 +119,16 @@ if ( USE_CUDA )
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
     message("NVIDIA CUDA GPU build requested...")
+    # Select target GPU architecture(s). Override with -DCMAKE_CUDA_ARCHITECTURES=<list>,
+    # e.g. 61 for Pascal (Quadro P620), 75 for Turing, 86 for Ampere.
+    # Default targets Turing+Ampere (75;86) which compiles under both CUDA 12.x and 13.x.
+    # NOTE: CUDA 13.x dropped offline codegen for Maxwell/Pascal (sm_5x/sm_6x); to target an
+    # older GPU build with a CUDA 12.x toolkit AND set the matching arch, e.g.
+    #   cmake -DUSE_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES=61 ..
+    if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "75;86" CACHE STRING "CUDA architectures")
+    endif()
+    message("CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
     add_compile_options(-DUSE_CUDA)
     set(CUDA_SRC "tensor_cuda.cu" "shaders.cu")
     set(CUDA_LIBS CUDA::cudart CUDA::cublas)

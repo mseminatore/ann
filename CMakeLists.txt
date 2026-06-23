@@ -203,6 +203,12 @@ if ( USE_METAL )
     add_test(NAME test_metal COMMAND test_metal)
 endif()
 
+if ( USE_CUDA )
+    add_executable(test_cuda tests/test_cuda.c testy/test_main.c)
+    target_link_libraries(test_cuda libann ${BLAS_LIB} ${MATH_LIB} ${CUDA_LIBS})
+    add_test(NAME test_cuda COMMAND test_cuda)
+endif()
+
 if ( USE_METAL OR USE_CUDA )
     add_executable(bench_gpu_training examples/bench_gpu_training.c)
     target_link_libraries(bench_gpu_training libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB} ${CUDA_LIBS})

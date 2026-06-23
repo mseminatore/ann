@@ -26,6 +26,8 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+#include "shaders_cuda.h"
+
 extern "C" __global__ void cuda_bias_add(
     float *buf, const float *bias, int batch_size, int cols)
 {

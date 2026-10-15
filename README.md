@@ -420,6 +420,86 @@ int main() {
 }
 ```
 
+# GPU training and inference
+
+libann can run training and inference on the GPU. Two backends are supported:
+
+| Backend | CMake Flag | Platforms | Requirements |
+|---------|------------|-----------|--------------|
+| Apple Metal | `-DUSE_METAL=1` | macOS | Metal-capable GPU, Xcode Command Line Tools |
+| NVIDIA CUDA | `-DUSE_CUDA=1` | Windows, Linux | NVIDIA GPU, CUDA Toolkit (`cudart`, `cublas`) |
+
+When a GPU backend is active, `ann_train_network()` runs each mini-batch
+entirely on the GPU — forward pass, backpropagation, and the optimizer update
+(all five optimizers, with gradient clipping and L1/L2 regularization).
+CPU and GPU training converge to the same loss within float precision.
+
+## Building with GPU Support
+
+```bash
+# Apple Metal (macOS)
+cmake -DUSE_METAL=1 ..
+cmake --build . --config Release
+
+# NVIDIA CUDA
+cmake -DUSE_CUDA=1 ..
+cmake --build . --config Release
+```
+
+The CUDA build targets Turing and Ampere GPUs (`75;86`) by default. Override with
+`-DCMAKE_CUDA_ARCHITECTURES`, e.g. `61` for Pascal or `89` for Ada. Pascal and
+older GPUs require a CUDA 12.x toolkit.
+
+## Using the GPU in Your Code
+
+Initialize the GPU once, upload the network weights, train, then sync the
+trained weights back to the CPU before saving:
+
+```c
+#ifdef USE_GPU
+    if (!ann_gpu_init())
+        fprintf(stderr, "No GPU available, using CPU\n");
+#endif
+
+    PNetwork pnet = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+    // ... add layers ...
+
+#ifdef USE_GPU
+    ann_gpu_upload_network(pnet);   // training now runs on the GPU
+#endif
+
+    ann_train_network(pnet, x_train, y_train, x_train->rows);
+
+#ifdef USE_GPU
+    ann_gpu_sync_weights(pnet);     // copy trained weights back to the CPU
+#endif
+
+    ann_save_network(pnet, "model.nna");
+
+#ifdef USE_GPU
+    ann_gpu_free_network(pnet);     // release GPU buffers
+#endif
+    ann_free_network(pnet);
+```
+
+`USE_GPU` is defined automatically when either backend is enabled. If the
+network was never uploaded, every call falls back to the CPU path.
+
+Once uploaded, `ann_predict()` and `ann_predict_batch()` also run on the GPU.
+Use `ann_predict_batch()` to get the full benefit, since it spreads transfer
+overhead across many samples.
+
+> Note: GPU training pays off for networks with 128+ node hidden layers and
+> datasets of 1,000+ samples, where it is roughly 5–7× faster than the CPU on
+> Apple Silicon. For tiny networks the GPU setup cost dominates and the CPU is
+> faster. The online training API (`ann_train_step()`) always runs on the CPU.
+> The GPU backends support only the default `real = float` build.
+
+See [docs/GPU_INFERENCE.md](docs/GPU_INFERENCE.md) (Metal),
+[docs/GPU_CUDA.md](docs/GPU_CUDA.md) (CUDA), and
+[docs/GPU_TRAINING_PERFORMANCE.md](docs/GPU_TRAINING_PERFORMANCE.md) (benchmarks)
+for details. `examples/bench_gpu_training.c` compares CPU and GPU training speed.
+
 # Error Handling
 
 All public API functions return error codes to indicate success or failure. The library provides a callback mechanism for custom error logging and monitoring.
@@ -586,6 +666,18 @@ cmake --build . --config Release
 
 # OpenBLAS (macOS, Linux)
 cmake -DUSE_BLAS=1 ..
+cmake --build . --config Release
+```
+
+To build with GPU acceleration (see [GPU training and inference](#gpu-training-and-inference)):
+
+```bash
+# Apple Metal (macOS)
+cmake -DUSE_METAL=1 ..
+cmake --build . --config Release
+
+# NVIDIA CUDA (Windows, Linux)
+cmake -DUSE_CUDA=1 ..
 cmake --build . --config Release
 ```
 

@@ -5,6 +5,9 @@
 
 `libann` is a library for Artificial Neural Networks (ANN).
 
+> [!TIP]
+> **Try it live:** the [libann Workbench](https://mseminatore.github.io/ann/) web demo runs in your browser, with nothing to install.
+
 The goal of this library project is to provide a compact, light-weight, 
 portable library of primitives that can be used for training and evaluating
 Neural Networks. The code is written in ANSI C for portability. It is compiled

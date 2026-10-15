@@ -3236,6 +3236,10 @@ PNetwork ann_load_network_binary(const char *filename)
 	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
 
 	fclose(fptr);
+
+	// mark network weights as set
+	pnet->weights_set = 1;
+
 	return pnet;
 }
 
@@ -3367,6 +3371,10 @@ PNetwork ann_load_network(const char *filename)
 	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
 
 	fclose(fptr);
+
+	// mark network weights as set
+	pnet->weights_set = 1;
+
 	return pnet;
 }
 
@@ -3823,9 +3831,6 @@ PNetwork ann_import_onnx(const char *filename)
 	}
 	ann_add_layer(pnet, layer_sizes[num_weights], LAYER_OUTPUT, activations[num_weights]);
 
-	// Initialize weights structure
-	init_weights(pnet);
-
 	// Load weights and biases from initializers
 	for (size_t layer = 0; layer < num_weights; layer++)
 	{
@@ -3861,7 +3866,7 @@ PNetwork ann_import_onnx(const char *filename)
 				{
 					PTensor bias = pnet->layers[layer].t_bias;
 					size_t count = json_array_length(float_data);
-					for (size_t j = 0; j < count && j < (size_t)bias->rows; j++)
+					for (size_t j = 0; j < count && j < (size_t)bias->cols; j++)
 					{
 						double val;
 						json_number(json_at(float_data, j), &val);
@@ -3872,6 +3877,9 @@ PNetwork ann_import_onnx(const char *filename)
 		}
 	}
 
+	// Mark network weights as set
+	pnet->weights_set = 1;
+	
 	free(layer_sizes);
 	free(activations);
 	json_free(&root);

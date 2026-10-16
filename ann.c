@@ -385,19 +385,6 @@ static void softmax(PNetwork pnet)
 }
 
 //------------------------------
-// return rand num [min..max)
-//------------------------------
-static real get_rand(real min, real max)
-{
-	real r = (real)rand() / (real)RAND_MAX;
-	real scale = max - min;
-
-	r *= scale;
-	r += min;
-	return r;
-}
-
-//------------------------------
 // initialize the weights
 //------------------------------
 static void init_weights(PNetwork pnet)
@@ -851,46 +838,12 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 }
 
 //-------------------------------------------
-// back propagate output error to prev layer
-//-------------------------------------------
-// Backpropagation for output layer:
-// 1. Compute output error: dL/dy = y_predicted - y_true
-// 2. Update bias: b = b + learning_rate * dL/dy
-// 3. Compute gradient: gradient = dL/dy * x^T (outer product with input)
-// 4. Propagate to previous layer: dL/dz = W^T * dL/dy
-//-------------------------------------------
-static void back_propagate_output(PNetwork pnet, PLayer layer, PLayer prev_layer, PTensor outputs)
-{
-	//-------------------------------
-	// output layer back-propagation
-	//-------------------------------
-
-	// compute dL_dy = (r - y)
-	tensor_axpby(1.0, outputs, -1.0, layer->t_values);
-
-	// accumulate bias gradient: bias_grad += dL_dy
-	tensor_axpy((real)1.0, layer->t_values, prev_layer->t_bias_grad);
-
-	// gradient += dL_dy * z
-	tensor_outer((real)1.0, layer->t_values, prev_layer->t_values, prev_layer->t_gradients);
-
-	// dL_dz = weights.T * dL_dy
-// Sigmoid backpropagation:
-// Chain rule: dL/dz = dL/da * da/dz * dz/dw
-// For sigmoid: da/dz = a * (1 - a)
-// Steps:
-// 1. dL/dz = dL/dz * a(1-a) where a*a = a^2, (1-a) = 1-a^2
-// 2. Update bias and compute weight gradient
-// 3. Propagate to previous layer
-//-------------------------------------------
-	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_values, prev_layer->t_dl_dz);
-}
-
-//-------------------------------------------
 // propagate back for sigmoid layers
 //-------------------------------------------
 static void back_propagate_sigmoid(PNetwork pnet, PLayer layer, PLayer prev_layer)
 {
+	(void)pnet;
+
 	//
 	// gradient = dl_dz * z * (1 - z) * x = dl_dz_zomz * x 
 	//
@@ -931,6 +884,8 @@ static void back_propagate_sigmoid(PNetwork pnet, PLayer layer, PLayer prev_laye
 //-------------------------------------------
 static void back_propagate_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
 {
+	(void)pnet;
+
 	//
 	// gradient = dl_dz * d * x, where d is derivative of RELU(x) which is 0 or 1
 	//
@@ -958,6 +913,8 @@ static void back_propagate_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
 //-------------------------------------------
 static void back_propagate_leaky_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
 {
+	(void)pnet;
+
 	int size = layer->t_values->cols;
 	
 	// Compute leaky ReLU derivative: 1 if x > 0, else 0.01
@@ -984,6 +941,8 @@ static void back_propagate_leaky_relu(PNetwork pnet, PLayer layer, PLayer prev_l
 //-------------------------------------------
 static void back_propagate_tanh(PNetwork pnet, PLayer layer, PLayer prev_layer)
 {
+	(void)pnet;
+
 	int size = layer->t_values->cols;
 	
 	// Compute tanh derivative: 1 - y^2 where y = tanh(x) is stored in t_values
@@ -1011,6 +970,8 @@ static void back_propagate_tanh(PNetwork pnet, PLayer layer, PLayer prev_layer)
 //-------------------------------------------
 static void back_propagate_softsign(PNetwork pnet, PLayer layer, PLayer prev_layer)
 {
+	(void)pnet;
+
 	int size = layer->t_values->cols;
 	
 	// Compute softsign derivative: (1 - |y|)^2 where y = softsign(x)
@@ -1030,33 +991,6 @@ static void back_propagate_softsign(PNetwork pnet, PLayer layer, PLayer prev_lay
 
 	// Propagate gradient to previous layer: dl_dz_prev = W^T * dl_dz
 	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_dl_dz, prev_layer->t_dl_dz);
-}
-
-//-------------------------------------------
-// compute the gradients via back propagation
-//-------------------------------------------
-static void back_propagate(PNetwork pnet, PTensor outputs)
-{
-	// for each node in the output layer, excluding output layer bias node
-	int output_layer = pnet->layer_count - 1;
-
-	back_propagate_output(pnet, &pnet->layers[output_layer], &pnet->layers[output_layer - 1], outputs);
-// Single training iteration:
-// 1. Set input: copy input values to input layer
-// 2. Forward pass: eval_network() propagates through all layers
-// 3. Compute loss: measures difference between prediction and target
-// 4. Backward pass: back_propagate() computes weight gradients
-// Returns the loss for this example (used to track convergence)
-//-------------------------------------------------
-
-	//-------------------------------
-	// hidden layer back-propagation
-	// excluding the input layer
-	//-------------------------------
-	for (int layer = output_layer - 1; layer > 0; layer--)
-	{
-		pnet->layers[layer].back_prop_func(pnet, &pnet->layers[layer], &pnet->layers[layer - 1]);
-	}
 }
 
 //-------------------------------------------
@@ -1097,7 +1031,6 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 	PLayer prev_layer = &pnet->layers[output_layer - 1];
 	
 	int out_nodes = layer->node_count;
-	int in_nodes = prev_layer->node_count;
 	
 	PTensor Y = layer->t_batch_values;           // [batch × out] predictions
 	PTensor A_prev = prev_layer->t_batch_values; // [batch × in] previous activations
@@ -1427,37 +1360,6 @@ static real back_propagate_batched(PNetwork pnet, int batch_size, PTensor target
 	return loss;
 }
 
-//-------------------------------------------------
-// train the network over a single input/output set
-//-------------------------------------------------
-static real train_pass_network(PNetwork pnet, PTensor inputs, PTensor outputs)
-{
-	if (!pnet || !inputs || !outputs)
-		return 0.0;
-
-	if (pnet->layers[0].layer_type != LAYER_INPUT ||
-	    pnet->layers[pnet->layer_count - 1].layer_type != LAYER_OUTPUT)
-	{
-		invoke_error_callback(ERR_INVALID, "train_pass_network");
-		return 0.0;
-	}
-
-	// set the input values on the network using memcpy (faster than element loop)
-	memcpy(pnet->layers[0].t_values->values, inputs->values, 
-	       pnet->layers[0].node_count * sizeof(real));
-
-	// forward evaluate the network
-	eval_network(pnet);
-
-	// compute the Loss function
-	real loss = pnet->loss_func(pnet, outputs);
-
-	// back propagate error through network to compute gradients
-	back_propagate(pnet, outputs);
-
-	return loss;
-}
-
 //-----------------------------------------------
 // Allocate or reallocate batch tensors for all layers
 // Called when batch size changes during training
@@ -1531,16 +1433,6 @@ static void shuffle_indices(int *input_indices, int count)
 		input_indices[i] = input_indices[j];
 		input_indices[j] = val;
 	}
-}
-
-//-----------------------------------------------
-// null optimization (no-op)
-// Used when optimizer is set to OPTIM_NONE
-// Weights remain unchanged; useful for testing/debugging
-//-----------------------------------------------
-static void optimize_none(PNetwork pnet)
-{
-	// do nothing!
 }
 
 //--------------------------------------------------------

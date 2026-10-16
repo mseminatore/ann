@@ -237,7 +237,6 @@ void test_main(int argc, char *argv[]) {
     SUITE("Softmax Activation");
     COMMENT("Testing Softmax activation properties...");
 
-    real test_logits[] = {1.0f, 2.0f, 3.0f};
     real denom = expf(1.0f) + expf(2.0f) + expf(3.0f);
     real softmax_out1 = expf(1.0f) / denom;
     real softmax_out2 = expf(2.0f) / denom;

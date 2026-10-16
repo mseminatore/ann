@@ -105,9 +105,10 @@ if ( USE_METAL )
     add_compile_options(-DUSE_METAL)
     set(METAL_SRC "tensor_metal.m")
     set(METAL_LIB "-framework Metal" "-framework Foundation" "-framework MetalPerformanceShaders")
-    # Compile tensor_metal.m as Objective-C
+    # Compile tensor_metal.m as Objective-C with ARC; its __bridge casts rely on
+    # ARC to retain and release the MTLBuffers held in tensor gpu_buf pointers
     set_source_files_properties(tensor_metal.m PROPERTIES
-        COMPILE_FLAGS "-x objective-c"
+        COMPILE_FLAGS "-x objective-c -fobjc-arc"
         LANGUAGE C
     )
 endif()

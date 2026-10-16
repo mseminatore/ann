@@ -147,7 +147,7 @@ void test_main(int argc, char *argv[])
     TESTEX("XOR network created", (net2 != NULL));
 
     real xor_tests[][2] = {{0,0}, {0,1}, {1,0}, {1,1}};
-    real cpu_out[1], gpu_out[1];
+    real gpu_out[1];
 
     // Run CPU inference for all 4 XOR inputs
     real cpu_results[4];

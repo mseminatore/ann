@@ -147,7 +147,6 @@ void test_main(int argc, char* argv[])
         ann_train_begin(net);
 
         // Feed one sample at a time
-        real loss = 0;
         real samples[][2] = {{0,0}, {0,1}, {1,0}, {1,1}};
         real labels[] = {0, 0, 0, 1};  // AND gate
 
@@ -155,7 +154,7 @@ void test_main(int argc, char* argv[])
         {
             for (int i = 0; i < 4; i++)
             {
-                loss = ann_train_step(net, samples[i], &labels[i], 1);
+                ann_train_step(net, samples[i], &labels[i], 1);
             }
         }
 

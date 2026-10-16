@@ -114,7 +114,7 @@ void print_class_prediction(real * data)
 //--------------------------------------
 void print_ascii_art(real *data, int rows, int cols)
 {
-	char c;
+	int c;
 	char *pixels = " `. - ':_,^=;><+!rc*/z?sLTv)J7(|Fi{C}fI31tlu[neoZ5Yxjya]2ESwqkP6h9d4VpOGbUAKXHm8RD#$Bg0MNWQ%&@";
 
 	puts("\nInput image\n");
@@ -176,20 +176,6 @@ void class_histogram(PTensor outputs)
 //------------------------------
 int main(int argc, char *argv[])
 {
-	char *classes[] =
-	{
-		"T - shirt / top",
-		"Trouser",
-		"Pullover",
-		"Dress",
-		"Coat",
-		"Sandal",
-		"Shirt",
-		"Sneaker",
-		"Bag",
-		"Ankle boot"
-	};
-
 	int iFirstArg = getopt(argc, argv);
 
 #if defined(USE_BLAS) || defined(USE_CBLAS) || defined(CBLAS)

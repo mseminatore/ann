@@ -117,7 +117,7 @@ static void benchmark_mnist(int use_gpu, int epochs)
     srand(42);  // Fixed seed for reproducibility
     for (int i = 0; i < n_samples; i++) {
         for (int j = 0; j < n_inputs; j++)
-            inputs->values[i * n_inputs + j] = (real)rand() / RAND_MAX;
+            inputs->values[i * n_inputs + j] = (real)rand() / (real)RAND_MAX;
         
         // One-hot encoded labels
         int label = i % 10;
@@ -177,7 +177,7 @@ static void benchmark_large(int use_gpu, int epochs)
     srand(42);
     for (int i = 0; i < n_samples; i++) {
         for (int j = 0; j < n_inputs; j++)
-            inputs->values[i * n_inputs + j] = (real)rand() / RAND_MAX;
+            inputs->values[i * n_inputs + j] = (real)rand() / (real)RAND_MAX;
         
         int label = i % 10;
         for (int j = 0; j < n_outputs; j++)

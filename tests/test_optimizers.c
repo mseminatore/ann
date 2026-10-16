@@ -85,27 +85,6 @@ static real train_xor(PNetwork pnet) {
     return loss;
 }
 
-/**
- * @brief Test if network learned XOR correctly (within tolerance)
- */
-static int verify_xor_predictions(PNetwork pnet, real tolerance) {
-    real output[1];
-    int correct = 0;
-
-    // Test all 4 XOR cases
-    for (int i = 0; i < 4; i++) {
-        ann_predict(pnet, &xor_inputs[i * 2], output);
-        real expected = xor_outputs[i];
-        real prediction = output[0] > 0.5f ? 1.0f : 0.0f;
-        
-        if (fabs(prediction - expected) < tolerance) {
-            correct++;
-        }
-    }
-
-    return correct;
-}
-
 void test_main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;

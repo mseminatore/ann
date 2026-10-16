@@ -358,9 +358,8 @@ void tensor_metal_release_buffer(void *gpu_buf)
 {
     if (gpu_buf)
     {
-        // Release the Objective-C object via ARC bridge
-        id<MTLBuffer> buf = (__bridge_transfer id<MTLBuffer>)gpu_buf;
-        buf = nil;  // triggers dealloc
+        // Hand the retained reference back to ARC, which releases it
+        CFBridgingRelease(gpu_buf);
     }
 }
 
@@ -408,30 +407,6 @@ int tensor_metal_download(PTensor t)
     // For shared-mode MTLBuffers the GPU writes are visible after command completion;
     // just copy the contents back.
     memcpy(t->values, [buf contents], bytes);
-    return 1;
-}
-
-//-----------------------------------------------------------
-// Allocate an uninitialized GPU buffer for a tensor.
-// Used for intermediate (output) tensors during forward pass.
-// Returns 1 on success, 0 on failure.
-//-----------------------------------------------------------
-static int tensor_metal_alloc_gpu(PTensor t)
-{
-    if (!t || !g_metal.initialized)
-        return 0;
-
-    size_t bytes = (size_t)(t->rows * t->cols) * sizeof(real);
-
-    id<MTLBuffer> buf = [g_metal.device newBufferWithLength:bytes
-                                                    options:MTLResourceStorageModeShared];
-    if (!buf)
-        return 0;
-
-    if (t->gpu_buf)
-        tensor_metal_release_buffer(t->gpu_buf);
-
-    t->gpu_buf = (__bridge_retained void *)buf;
     return 1;
 }
 
@@ -1153,7 +1128,6 @@ static void gpu_optimizer_step(PNetwork pnet)
     float beta2   = 0.999f;
     float eps     = 1e-8f;
     float beta_m  = 0.9f;  // momentum beta
-    float one_minus_beta_m = 0.1f;
 
     // Adam bias correction scalars
     float bc1 = 0.0f, bc2 = 0.0f;
@@ -1529,15 +1503,62 @@ static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_siz
 // Metal backend vtable instance.
 // ann_gpu_init() (in ann.c) sets g_gpu_backend = &metal_backend.
 //-----------------------------------------------------------
+//-----------------------------------------------------------
+// Autorelease pool wrappers.
+// Command buffers, encoders and other temporaries are autoreleased. Callers
+// are plain C with no pool of their own, so each entry point that creates
+// Metal objects or touches existing ones drains a pool before returning;
+// otherwise autoreleased objects accumulate for the life of the thread.
+//-----------------------------------------------------------
+static int pooled_init(void)
+{
+    @autoreleasepool { return tensor_metal_init(); }
+}
+
+static int pooled_upload_network(PNetwork pnet)
+{
+    @autoreleasepool { return metal_upload_network(pnet); }
+}
+
+static void pooled_free_network(PNetwork pnet)
+{
+    @autoreleasepool { metal_free_network(pnet); }
+}
+
+static void pooled_sync_weights(PNetwork pnet)
+{
+    @autoreleasepool { metal_sync_weights(pnet); }
+}
+
+static void pooled_release_buffer(void *gpu_buf)
+{
+    @autoreleasepool { tensor_metal_release_buffer(gpu_buf); }
+}
+
+static int pooled_eval_single(PNetwork pnet)
+{
+    @autoreleasepool { return metal_eval_single(pnet); }
+}
+
+static int pooled_eval_batch(const PNetwork pnet, const real *inputs, real *outputs, int batch_size)
+{
+    @autoreleasepool { return metal_eval_batch(pnet, inputs, outputs, batch_size); }
+}
+
+static int pooled_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, real *loss_out)
+{
+    @autoreleasepool { return metal_train_batch(pnet, batch_targets, batch_size, loss_out); }
+}
+
 GpuBackend metal_backend = {
-    tensor_metal_init,       /* init           */
-    metal_upload_network,    /* upload_network */
-    metal_free_network,      /* free_network   */
-    metal_sync_weights,      /* sync_weights   */
-    tensor_metal_release_buffer, /* release_buffer */
-    metal_eval_single,       /* eval_single    */
-    metal_eval_batch,        /* eval_batch     */
-    metal_train_batch,       /* train_batch    */
+    pooled_init,             /* init           */
+    pooled_upload_network,   /* upload_network */
+    pooled_free_network,     /* free_network   */
+    pooled_sync_weights,     /* sync_weights   */
+    pooled_release_buffer,   /* release_buffer */
+    pooled_eval_single,      /* eval_single    */
+    pooled_eval_batch,       /* eval_batch     */
+    pooled_train_batch,      /* train_batch    */
 };
 
 #endif /* USE_METAL */

@@ -93,14 +93,6 @@ static void progress_callback(
 }
 
 //------------------------------
-// Silent print function - suppresses training output
-//------------------------------
-static void silent_print(const char *msg)
-{
-    (void)msg;
-}
-
-//------------------------------
 // Main program
 //------------------------------
 int main(int argc, char *argv[])

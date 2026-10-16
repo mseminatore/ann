@@ -484,6 +484,8 @@ void bayesian_options_init(BayesianOptions *opts);
 /**
  * Perform Bayesian optimization over hyperparameter space.
  * Optimizes learning rate and batch size using Gaussian Process surrogate.
+ * All other dimensions (optimizer, layer count/size, topology, activation)
+ * are sampled at random for each trial.
  *
  * @param space Hyperparameter search space
  * @param input_size Number of input features
@@ -539,7 +541,9 @@ ANN_API void tpe_options_init(TPEOptions *opts);
 /**
  * Perform TPE-based hyperparameter search.
  * Better than GP-BO for mixed categorical + continuous parameters.
- * Optimizes learning rate, batch size, optimizer, hidden layer count, and activations.
+ * Optimizes learning rate, batch size, optimizer, hidden layer count, hidden
+ * layer size, topology pattern, and activation (per layer when
+ * search_per_layer_activation is set).
  *
  * @param space Hyperparameter search space
  * @param input_size Number of input features

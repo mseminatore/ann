@@ -203,7 +203,9 @@ int trials = hypertune_bayesian_search(
 1. **Initial phase**: Randomly samples `n_initial` configurations
 2. **BO phase**: Uses Gaussian Process to predict performance, selects points 
    with highest Expected Improvement (EI)
-3. **Optimizes**: Learning rate (log-scale) and batch size
+3. **Optimizes**: Learning rate and batch size. The GP does not model the other
+   dimensions (optimizer, layer count/size, topology, activation); they are
+   sampled at random for every trial.
 
 **When to use GP-BO:**
 - Expensive evaluations (long training times)
@@ -241,6 +243,15 @@ space.hidden_layer_counts[1] = 2;
 space.hidden_layer_counts[2] = 3;
 space.hidden_layer_count_options = 3;
 
+space.hidden_layer_sizes[0] = 32;
+space.hidden_layer_sizes[1] = 64;
+space.hidden_layer_sizes[2] = 128;
+space.hidden_layer_size_count = 3;
+
+space.topology_patterns[0] = TOPOLOGY_CONSTANT;
+space.topology_patterns[1] = TOPOLOGY_PYRAMID;
+space.topology_pattern_count = 2;
+
 space.hidden_activations[0] = ACTIVATION_RELU;
 space.hidden_activations[1] = ACTIVATION_SIGMOID;
 space.hidden_activation_count = 2;
@@ -269,10 +280,16 @@ int trials = hypertune_tpe_search(
    - g(x): density of "bad" trials (remaining)
 3. **Acquisition**: Samples from l(x), selects points with highest l(x)/g(x) ratio
 
+TPE models every dimension of the search space: learning rate, batch size,
+optimizer, hidden layer count, hidden layer size, topology pattern, and
+activation. With `search_per_layer_activation` enabled, each hidden layer's
+activation is its own dimension, and it only counts for trials that have
+that layer (the "tree-structured" part of TPE).
+
 **When to use TPE:**
 - Mixed categorical + continuous parameters
 - Many hyperparameters (5+)
-- Optimizer type, activation functions, layer counts
+- Optimizer type, activation functions, layer counts and sizes, topology
 
 ## Custom Scoring Function
 
@@ -331,8 +348,10 @@ space.hidden_activation_count = 3;
 space.search_per_layer_activation = 1;  // enable per-layer search
 ```
 
-When `search_per_layer_activation` is enabled, random search will assign 
-different activations to each layer independently.
+When `search_per_layer_activation` is enabled, random search and TPE assign
+activations to each layer independently (TPE models each layer's activation
+separately). Grid search rotates through the activation list by layer instead
+of searching every combination, and GP-BO uses one activation for all layers.
 
 ## Search Strategy Comparison
 

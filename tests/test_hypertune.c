@@ -14,6 +14,28 @@
 #endif
 
 // ============================================================================
+// SCORING HELPERS FOR SEARCH-BEHAVIOR TESTS
+// ============================================================================
+
+// Scores 1 when the first hidden layer has *(int *)user_data nodes, else 0
+static real score_layer_size(PNetwork net, PTensor val_inputs, PTensor val_outputs, void *user_data)
+{
+    (void)val_inputs;
+    (void)val_outputs;
+    return (ann_get_layer_nodes(net, 1) == *(int *)user_data) ? 1.0f : 0.0f;
+}
+
+// Scores 0.5 for each of hidden layers 1 and 2 matching SIGMOID then RELU
+static real score_per_layer_activation(PNetwork net, PTensor val_inputs, PTensor val_outputs, void *user_data)
+{
+    (void)val_inputs;
+    (void)val_outputs;
+    (void)user_data;
+    return 0.5f * (ann_get_layer_activation(net, 1) == ACTIVATION_SIGMOID) +
+           0.5f * (ann_get_layer_activation(net, 2) == ACTIVATION_RELU);
+}
+
+// ============================================================================
 // INITIALIZATION TESTS
 // ============================================================================
 
@@ -474,6 +496,129 @@ void test_main(int argc, char *argv[]) {
     TESTEX("TPE results have valid optimizers", 
            (results[0].optimizer == OPT_SGD || results[0].optimizer == OPT_ADAM));
     
+    hypertune_free_split(&xor_split);
+    tensor_free(xor_in);
+    tensor_free(xor_out);
+
+    // ========================================================================
+    SUITE("TPE Search Dimensions");
+    COMMENT("Testing that TPE searches layer size, topology and per-layer activation...");
+
+    xor_in = tensor_create_from_array(8, 2, xor_inputs);
+    xor_out = tensor_create_from_array(8, 1, xor_outputs);
+    hypertune_split_data(xor_in, xor_out, 0.75f, 0, 0, &xor_split);
+
+    HyperparamSpace dim_space;
+    hypertune_space_init(&dim_space);
+    dim_space.learning_rate_min = 0.1f;
+    dim_space.learning_rate_max = 0.1f;
+    dim_space.batch_sizes[0] = 4;
+    dim_space.batch_size_count = 1;
+    dim_space.optimizers[0] = OPT_SGD;
+    dim_space.optimizer_count = 1;
+    dim_space.hidden_layer_counts[0] = 2;
+    dim_space.hidden_layer_count_options = 1;
+    dim_space.hidden_layer_sizes[0] = 8;
+    dim_space.hidden_layer_sizes[1] = 16;
+    dim_space.hidden_layer_sizes[2] = 32;
+    dim_space.hidden_layer_sizes[3] = 64;
+    dim_space.hidden_layer_size_count = 4;
+    dim_space.topology_patterns[0] = TOPOLOGY_CONSTANT;
+    dim_space.topology_patterns[1] = TOPOLOGY_PYRAMID;
+    dim_space.topology_pattern_count = 2;
+    dim_space.hidden_activations[0] = ACTIVATION_SIGMOID;
+    dim_space.hidden_activation_count = 1;
+    dim_space.epoch_limit = 5;
+
+    tpe_options_init(&tpe_opts);
+    tpe_opts.n_startup = 6;
+    tpe_opts.n_iterations = 10;
+
+    HypertuneOptions dim_opts;
+    hypertune_options_init(&dim_opts);
+    dim_opts.verbosity = 0;
+    dim_opts.seed = 42;
+    int target_size = 32;
+    dim_opts.score_func = score_layer_size;
+    dim_opts.user_data = &target_size;
+
+    HypertuneResult dim_results[16];
+    trials = hypertune_tpe_search(
+        &dim_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &dim_opts, &tpe_opts, dim_results, 16, &best);
+    TESTEX("TPE dimension search returns 16 trials", (trials == 16));
+
+    int seen_size_mask = 0, seen_topo_mask = 0, tpe_hits = 0;
+    for (int i = 0; i < trials; i++) {
+        for (int s = 0; s < dim_space.hidden_layer_size_count; s++)
+            if (dim_results[i].hidden_layer_sizes[0] == dim_space.hidden_layer_sizes[s])
+                seen_size_mask |= 1 << s;
+        seen_topo_mask |= 1 << dim_results[i].topology_pattern;
+        if (i >= tpe_opts.n_startup && dim_results[i].hidden_layer_sizes[0] == target_size)
+            tpe_hits++;
+    }
+    TESTEX("TPE samples more than one layer size", (seen_size_mask & (seen_size_mask - 1)) != 0);
+    TESTEX("TPE samples more than one topology", (seen_topo_mask & (seen_topo_mask - 1)) != 0);
+    TESTEX("TPE best result found the target layer size", (best.hidden_layer_sizes[0] == target_size));
+    TESTEX("TPE phase favors the target layer size", (tpe_hits >= tpe_opts.n_iterations / 2));
+
+    // Same seed must reproduce the same trial sequence
+    HypertuneResult rerun_results[16];
+    hypertune_tpe_search(
+        &dim_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &dim_opts, &tpe_opts, rerun_results, 16, &best);
+    int same_sequence = 1;
+    for (int i = 0; i < trials; i++) {
+        if (rerun_results[i].hidden_layer_sizes[0] != dim_results[i].hidden_layer_sizes[0] ||
+            rerun_results[i].topology_pattern != dim_results[i].topology_pattern)
+            same_sequence = 0;
+    }
+    TESTEX("TPE with a fixed seed is reproducible", same_sequence);
+
+    // Per-layer activation search: target SIGMOID then RELU
+    dim_space.hidden_layer_sizes[0] = 8;
+    dim_space.hidden_layer_size_count = 1;
+    dim_space.topology_pattern_count = 1;
+    dim_space.hidden_activations[0] = ACTIVATION_SIGMOID;
+    dim_space.hidden_activations[1] = ACTIVATION_RELU;
+    dim_space.hidden_activation_count = 2;
+    dim_space.search_per_layer_activation = 1;
+    dim_opts.score_func = score_per_layer_activation;
+    dim_opts.user_data = NULL;
+
+    trials = hypertune_tpe_search(
+        &dim_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &dim_opts, &tpe_opts, dim_results, 16, &best);
+    int mixed = 0;
+    for (int i = 0; i < trials; i++)
+        if (dim_results[i].hidden_activations[0] != dim_results[i].hidden_activations[1])
+            mixed = 1;
+    TESTEX("TPE samples differing per-layer activations", mixed);
+    TESTEX("TPE best result found the per-layer activation target",
+           (best.hidden_activations[0] == ACTIVATION_SIGMOID &&
+            best.hidden_activations[1] == ACTIVATION_RELU));
+
+    // Empty lists fall back to defaults instead of crashing
+    dim_space.search_per_layer_activation = 0;
+    dim_space.optimizer_count = 0;
+    dim_space.topology_pattern_count = 0;
+    dim_opts.score_func = hypertune_score_accuracy;
+    tpe_opts.n_startup = 3;
+    tpe_opts.n_iterations = 2;
+    trials = hypertune_tpe_search(
+        &dim_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &dim_opts, &tpe_opts, dim_results, 16, &best);
+    TESTEX("TPE with empty optimizer/topology lists runs", (trials == 5));
+    TESTEX("TPE empty optimizer list defaults to ADAM", (dim_results[4].optimizer == OPT_ADAM));
+    TESTEX("TPE empty topology list defaults to CONSTANT",
+           (dim_results[4].topology_pattern == TOPOLOGY_CONSTANT));
+
+    dim_opts.score_func = NULL;
+    trials = hypertune_tpe_search(
+        &dim_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &dim_opts, &tpe_opts, dim_results, 16, &best);
+    TESTEX("TPE with NULL score_func returns ERR_NULL_PTR", (trials == ERR_NULL_PTR));
+
     hypertune_free_split(&xor_split);
     tensor_free(xor_in);
     tensor_free(xor_out);

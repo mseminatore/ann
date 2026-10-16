@@ -412,17 +412,36 @@ ANN_API const char* hypertune_topology_name(TopologyPattern pattern);
 #define GP_MAX_OBSERVATIONS 100
 
 /**
+ * Maximum input dimensions for Gaussian Process.
+ * hypertune_bayesian_search uses 1 + 5 + HYPERTUNE_MAX_HIDDEN_LAYERS.
+ */
+#define GP_MAX_DIMS 16
+
+/**
+ * How the GP kernel measures distance along a dimension.
+ */
+typedef enum {
+    GP_DIM_CONTINUOUS,      // distance = a - b (values normalized to [0,1])
+    GP_DIM_CATEGORICAL      // distance = 0 if a == b, else 1
+} GpDimType;
+
+/**
  * Gaussian Process state for Bayesian optimization.
  * Maintains observed points and their scores for the surrogate model.
+ * The kernel is squared-exponential with a length scale per dimension of
+ * length_scale * ard_scales[d].
  */
 typedef struct {
     int n_observations;                      // Number of observations so far
-    int n_dims;                              // Number of dimensions (2 for lr+batch)
-    real X[GP_MAX_OBSERVATIONS][2];          // Observed points (normalized to [0,1])
+    int n_dims;                              // Number of dimensions (<= GP_MAX_DIMS)
+    real X[GP_MAX_OBSERVATIONS][GP_MAX_DIMS];// Observed points
     real y[GP_MAX_OBSERVATIONS];             // Observed scores
-    real length_scale;                       // RBF kernel length scale
+    real length_scale;                       // Base kernel length scale
     real noise_variance;                     // Observation noise variance
     real signal_variance;                    // Signal variance (amplitude)
+    real ard_scales[GP_MAX_DIMS];            // Per-dimension length scale multipliers (default 1)
+    int dim_types[GP_MAX_DIMS];              // GpDimType per dimension (default continuous)
+    int normalize_y;                         // 1 = standardize scores before fitting (default)
 } GaussianProcess;
 
 /**
@@ -433,35 +452,48 @@ typedef struct {
     int n_iterations;                        // BO iterations after initial (default: 20)
     int n_candidates;                        // Candidates to evaluate for EI (default: 100)
     real exploration_weight;                 // Exploration vs exploitation (default: 0.01)
+    int fit_hyperparams;                     // 1 = fit length scales/noise each iteration (default: 1)
 } BayesianOptions;
 
 /**
  * Initialize Gaussian Process state.
+ * All dimensions start continuous; set dim_types[] for categorical ones.
  *
  * @param gp GP state to initialize
- * @param n_dims Number of dimensions
+ * @param n_dims Number of dimensions (clamped to 1..GP_MAX_DIMS)
  */
-void gp_init(GaussianProcess *gp, int n_dims);
+ANN_API void gp_init(GaussianProcess *gp, int n_dims);
 
 /**
  * Add an observation to the GP.
  *
  * @param gp GP state
- * @param x Normalized point (array of n_dims values in [0,1])
+ * @param x Point (array of n_dims values)
  * @param y Observed score
- * @return ERR_OK on success, error code otherwise
+ * @return ERR_OK on success, ERR_INVALID when GP_MAX_OBSERVATIONS is reached
  */
-int gp_add_observation(GaussianProcess *gp, const real *x, real y);
+ANN_API int gp_add_observation(GaussianProcess *gp, const real *x, real y);
 
 /**
  * Predict mean and variance at a point using the GP.
  *
  * @param gp GP state
- * @param x Normalized point to predict
+ * @param x Point to predict
  * @param mean Output: predicted mean
  * @param variance Output: predicted variance
  */
-void gp_predict(const GaussianProcess *gp, const real *x, real *mean, real *variance);
+ANN_API void gp_predict(const GaussianProcess *gp, const real *x, real *mean, real *variance);
+
+/**
+ * Fit the per-dimension length scales (ard_scales) and noise variance by
+ * maximizing the log marginal likelihood of the observations. Dimensions that
+ * do not affect the score end up with long length scales. Does nothing with
+ * fewer than 3 observations.
+ *
+ * @param gp GP state
+ * @return ERR_OK on success, ERR_NULL_PTR or ERR_ALLOC on failure
+ */
+ANN_API int gp_fit_hyperparams(GaussianProcess *gp);
 
 /**
  * Compute Expected Improvement at a point.
@@ -472,20 +504,20 @@ void gp_predict(const GaussianProcess *gp, const real *x, real *mean, real *vari
  * @param xi Exploration parameter (typically 0.01)
  * @return Expected improvement value
  */
-real gp_expected_improvement(real mean, real variance, real best_y, real xi);
+ANN_API real gp_expected_improvement(real mean, real variance, real best_y, real xi);
 
 /**
  * Initialize Bayesian optimization options with defaults.
  *
  * @param opts Options to initialize
  */
-void bayesian_options_init(BayesianOptions *opts);
+ANN_API void bayesian_options_init(BayesianOptions *opts);
 
 /**
  * Perform Bayesian optimization over hyperparameter space.
- * Optimizes learning rate and batch size using Gaussian Process surrogate.
- * All other dimensions (optimizer, layer count/size, topology, activation)
- * are sampled at random for each trial.
+ * A Gaussian Process models every dimension: learning rate, batch size,
+ * optimizer, hidden layer count, hidden layer size, topology pattern, and
+ * activation (per layer when search_per_layer_activation is set).
  *
  * @param space Hyperparameter search space
  * @param input_size Number of input features

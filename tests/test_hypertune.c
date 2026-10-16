@@ -433,6 +433,164 @@ void test_main(int argc, char *argv[]) {
     tensor_free(xor_out);
 
     // ========================================================================
+    SUITE("Gaussian Process Fitting");
+    COMMENT("Testing EI values, categorical dimensions and length scale fitting...");
+
+    // EI(mean=1, var=1, best=0, xi=0) = Phi(1) + phi(1) = 0.8413 + 0.2420
+    TESTEX("EI matches closed form", (fabs(gp_expected_improvement(1.0f, 1.0f, 0.0f, 0.0f) - 1.0833f) < 0.001f));
+
+    // Score depends only on dimension 0; dimension 1 is noise
+    GaussianProcess ard_gp;
+    gp_init(&ard_gp, 2);
+    for (int i = 0; i < 20; i++) {
+        real px[2];
+        px[0] = (real)i / 19.0f;
+        px[1] = (real)((i * 7) % 20) / 19.0f;
+        gp_add_observation(&ard_gp, px, (real)sin(6.0 * px[0]));
+    }
+    TESTEX("gp_fit_hyperparams returns ERR_OK", (gp_fit_hyperparams(&ard_gp) == ERR_OK));
+    TESTEX("Irrelevant dimension gets a longer length scale",
+           (ard_gp.ard_scales[1] > ard_gp.ard_scales[0]));
+    TESTEX("gp_fit_hyperparams with NULL returns ERR_NULL_PTR", (gp_fit_hyperparams(NULL) == ERR_NULL_PTR));
+
+    // Categorical dimension: category 1 scores high, category 0 low
+    GaussianProcess cat_gp;
+    gp_init(&cat_gp, 1);
+    cat_gp.dim_types[0] = GP_DIM_CATEGORICAL;
+    real c0[1] = {0.0f}, c1[1] = {1.0f}, c2[1] = {2.0f};
+    gp_add_observation(&cat_gp, c0, 0.1f);
+    gp_add_observation(&cat_gp, c1, 0.9f);
+    real m1, v1, m2, v2;
+    gp_predict(&cat_gp, c1, &m1, &v1);
+    gp_predict(&cat_gp, c2, &m2, &v2);
+    TESTEX("Categorical GP: observed category predicts its score", (fabs(m1 - 0.9f) < 0.1f));
+    TESTEX("Categorical GP: unseen category is uncertain", (v2 > v1));
+
+    // ========================================================================
+    SUITE("Bayesian Search Dimensions");
+    COMMENT("Testing that GP-BO searches layer size, topology and per-layer activation...");
+
+    xor_in = tensor_create_from_array(8, 2, xor_inputs);
+    xor_out = tensor_create_from_array(8, 1, xor_outputs);
+    hypertune_split_data(xor_in, xor_out, 0.75f, 0, 0, &xor_split);
+
+    HyperparamSpace bo_dim_space;
+    hypertune_space_init(&bo_dim_space);
+    bo_dim_space.learning_rate_min = 0.1f;
+    bo_dim_space.learning_rate_max = 0.1f;
+    bo_dim_space.batch_sizes[0] = 4;
+    bo_dim_space.batch_size_count = 1;
+    bo_dim_space.optimizers[0] = OPT_SGD;
+    bo_dim_space.optimizer_count = 1;
+    bo_dim_space.hidden_layer_counts[0] = 2;
+    bo_dim_space.hidden_layer_count_options = 1;
+    bo_dim_space.hidden_layer_sizes[0] = 8;
+    bo_dim_space.hidden_layer_sizes[1] = 16;
+    bo_dim_space.hidden_layer_sizes[2] = 32;
+    bo_dim_space.hidden_layer_sizes[3] = 64;
+    bo_dim_space.hidden_layer_size_count = 4;
+    bo_dim_space.topology_patterns[0] = TOPOLOGY_CONSTANT;
+    bo_dim_space.topology_patterns[1] = TOPOLOGY_PYRAMID;
+    bo_dim_space.topology_pattern_count = 2;
+    bo_dim_space.hidden_activations[0] = ACTIVATION_SIGMOID;
+    bo_dim_space.hidden_activation_count = 1;
+    bo_dim_space.epoch_limit = 5;
+
+    bayesian_options_init(&bo_opts);
+    TESTEX("BO init: fit_hyperparams = 1", (bo_opts.fit_hyperparams == 1));
+    bo_opts.n_initial = 6;
+    bo_opts.n_iterations = 10;
+
+    HypertuneOptions bo_dim_opts;
+    hypertune_options_init(&bo_dim_opts);
+    bo_dim_opts.verbosity = 0;
+    bo_dim_opts.seed = 42;
+    int bo_target_size = 32;
+    bo_dim_opts.score_func = score_layer_size;
+    bo_dim_opts.user_data = &bo_target_size;
+
+    HypertuneResult bo_results[16];
+    trials = hypertune_bayesian_search(
+        &bo_dim_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &bo_dim_opts, &bo_opts, bo_results, 16, &best);
+    TESTEX("BO dimension search returns 16 trials", (trials == 16));
+
+    int bo_size_mask = 0, bo_topo_mask = 0, bo_hits = 0;
+    for (int i = 0; i < trials; i++) {
+        for (int s = 0; s < bo_dim_space.hidden_layer_size_count; s++)
+            if (bo_results[i].hidden_layer_sizes[0] == bo_dim_space.hidden_layer_sizes[s])
+                bo_size_mask |= 1 << s;
+        bo_topo_mask |= 1 << bo_results[i].topology_pattern;
+        if (i >= bo_opts.n_initial && bo_results[i].hidden_layer_sizes[0] == bo_target_size)
+            bo_hits++;
+    }
+    TESTEX("BO samples more than one layer size", (bo_size_mask & (bo_size_mask - 1)) != 0);
+    TESTEX("BO samples more than one topology", (bo_topo_mask & (bo_topo_mask - 1)) != 0);
+    TESTEX("BO best result found the target layer size", (best.hidden_layer_sizes[0] == bo_target_size));
+    // EI keeps exploring, so expect a looser majority than TPE
+    TESTEX("BO phase favors the target layer size", (bo_hits >= bo_opts.n_iterations / 3));
+
+    HypertuneResult bo_rerun[16];
+    hypertune_bayesian_search(
+        &bo_dim_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &bo_dim_opts, &bo_opts, bo_rerun, 16, &best);
+    int bo_same = 1;
+    for (int i = 0; i < trials; i++) {
+        if (bo_rerun[i].hidden_layer_sizes[0] != bo_results[i].hidden_layer_sizes[0] ||
+            bo_rerun[i].topology_pattern != bo_results[i].topology_pattern)
+            bo_same = 0;
+    }
+    TESTEX("BO with a fixed seed is reproducible", bo_same);
+
+    // Per-layer activation search: target SIGMOID then RELU
+    bo_dim_space.hidden_layer_sizes[0] = 8;
+    bo_dim_space.hidden_layer_size_count = 1;
+    bo_dim_space.topology_pattern_count = 1;
+    bo_dim_space.hidden_activations[0] = ACTIVATION_SIGMOID;
+    bo_dim_space.hidden_activations[1] = ACTIVATION_RELU;
+    bo_dim_space.hidden_activation_count = 2;
+    bo_dim_space.search_per_layer_activation = 1;
+    bo_dim_opts.score_func = score_per_layer_activation;
+    bo_dim_opts.user_data = NULL;
+
+    trials = hypertune_bayesian_search(
+        &bo_dim_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &bo_dim_opts, &bo_opts, bo_results, 16, &best);
+    int bo_mixed = 0;
+    for (int i = 0; i < trials; i++)
+        if (bo_results[i].hidden_activations[0] != bo_results[i].hidden_activations[1])
+            bo_mixed = 1;
+    TESTEX("BO samples differing per-layer activations", bo_mixed);
+    TESTEX("BO best result found the per-layer activation target",
+           (best.hidden_activations[0] == ACTIVATION_SIGMOID &&
+            best.hidden_activations[1] == ACTIVATION_RELU));
+
+    // Empty lists fall back to defaults instead of reading out of bounds
+    bo_dim_space.search_per_layer_activation = 0;
+    bo_dim_space.batch_size_count = 0;
+    bo_dim_space.optimizer_count = 0;
+    bo_dim_space.topology_pattern_count = 0;
+    bo_dim_opts.score_func = hypertune_score_accuracy;
+    bo_opts.n_initial = 3;
+    bo_opts.n_iterations = 2;
+    trials = hypertune_bayesian_search(
+        &bo_dim_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &bo_dim_opts, &bo_opts, bo_results, 16, &best);
+    TESTEX("BO with empty batch/optimizer/topology lists runs", (trials == 5));
+    TESTEX("BO empty batch list defaults to 32", (bo_results[4].batch_size == 32));
+    TESTEX("BO empty optimizer list defaults to ADAM", (bo_results[4].optimizer == OPT_ADAM));
+
+    bo_dim_opts.score_func = NULL;
+    trials = hypertune_bayesian_search(
+        &bo_dim_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &bo_dim_opts, &bo_opts, bo_results, 16, &best);
+    TESTEX("BO with NULL score_func returns ERR_NULL_PTR", (trials == ERR_NULL_PTR));
+
+    hypertune_free_split(&xor_split);
+    tensor_free(xor_in);
+    tensor_free(xor_out);
+
+    // ========================================================================
     SUITE("TPE Initialization");
     COMMENT("Testing TPE options initialization...");
 

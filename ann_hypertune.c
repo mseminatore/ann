@@ -476,6 +476,14 @@ static real rand_uniform(void)
     return (real)rand() / (real)RAND_MAX;
 }
 
+// Standard normal sample (Box-Muller transform)
+static real rand_normal(void)
+{
+    real u1 = ((real)rand() + 1.0f) / ((real)RAND_MAX + 2.0f);
+    real u2 = (real)rand() / (real)RAND_MAX;
+    return (real)sqrt(-2.0f * log(u1)) * (real)cos(2.0f * 3.14159265358979f * u2);
+}
+
 // Number of choices for a categorical dimension (always >= 1)
 static int dim_choices(const HyperparamSpace *space, int dim)
 {
@@ -823,7 +831,8 @@ int hypertune_random_search(
 // BAYESIAN OPTIMIZATION - GAUSSIAN PROCESS
 // ============================================================================
 
-// Standard normal CDF approximation (Abramowitz and Stegun)
+// Standard normal CDF: 0.5 * (1 + erf(x / sqrt(2))), with erf from
+// Abramowitz and Stegun 7.1.26
 static real standard_normal_cdf(real x)
 {
     const real a1 =  0.254829592f;
@@ -832,13 +841,13 @@ static real standard_normal_cdf(real x)
     const real a4 = -1.453152027f;
     const real a5 =  1.061405429f;
     const real p  =  0.3275911f;
-    
+
     int sign = (x < 0) ? -1 : 1;
-    x = (real)fabs(x);
-    
-    real t = 1.0f / (1.0f + p * x);
-    real y = 1.0f - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (real)exp(-x * x / 2.0f);
-    
+    real z = (real)fabs(x) * 0.7071067812f;  // x / sqrt(2)
+
+    real t = 1.0f / (1.0f + p * z);
+    real y = 1.0f - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (real)exp(-z * z);
+
     return 0.5f * (1.0f + sign * y);
 }
 
@@ -849,175 +858,340 @@ static real standard_normal_pdf(real x)
     return inv_sqrt_2pi * (real)exp(-0.5f * x * x);
 }
 
-// RBF (squared exponential) kernel
-static real rbf_kernel(const real *x1, const real *x2, int n_dims, real length_scale, real signal_var)
+// Squared-exponential kernel over per-dimension distances. Continuous
+// dimensions use a - b; categorical dimensions use 0 when equal, else 1.
+static real gp_kernel(const GaussianProcess *gp, const real *a, const real *b)
 {
-    real sq_dist = 0.0f;
-    for (int i = 0; i < n_dims; i++) {
-        real diff = x1[i] - x2[i];
-        sq_dist += diff * diff;
+    real sum = 0.0f;
+
+    for (int d = 0; d < gp->n_dims; d++) {
+        real diff;
+        if (gp->dim_types[d] == GP_DIM_CATEGORICAL)
+            diff = (a[d] == b[d]) ? 0.0f : 1.0f;
+        else
+            diff = a[d] - b[d];
+
+        real ls = gp->length_scale * gp->ard_scales[d];
+        sum += (diff * diff) / (ls * ls);
     }
-    return signal_var * (real)exp(-0.5f * sq_dist / (length_scale * length_scale));
+    return gp->signal_variance * (real)exp(-0.5f * sum);
 }
 
 void gp_init(GaussianProcess *gp, int n_dims)
 {
     if (!gp) return;
-    
+
     memset(gp, 0, sizeof(GaussianProcess));
+    if (n_dims < 1) n_dims = 1;
+    if (n_dims > GP_MAX_DIMS) n_dims = GP_MAX_DIMS;
+
     gp->n_dims = n_dims;
     gp->length_scale = 0.3f;      // Default length scale
     gp->noise_variance = 0.01f;   // Observation noise
     gp->signal_variance = 1.0f;   // Signal amplitude
+    gp->normalize_y = 1;          // Standardize scores before fitting
+
+    for (int d = 0; d < GP_MAX_DIMS; d++) {
+        gp->ard_scales[d] = 1.0f;
+        gp->dim_types[d] = GP_DIM_CONTINUOUS;
+    }
 }
 
 int gp_add_observation(GaussianProcess *gp, const real *x, real y)
 {
     if (!gp || !x)
         return ERR_NULL_PTR;
-    
+
     if (gp->n_observations >= GP_MAX_OBSERVATIONS)
         return ERR_INVALID;
-    
+
     int idx = gp->n_observations;
-    for (int i = 0; i < gp->n_dims && i < 2; i++) {
+    for (int i = 0; i < gp->n_dims; i++) {
         gp->X[idx][i] = x[i];
     }
     gp->y[idx] = y;
     gp->n_observations++;
-    
+
     return ERR_OK;
 }
 
-void gp_predict(const GaussianProcess *gp, const real *x, real *mean, real *variance)
+// Cholesky factor of the kernel matrix and the solved weights. Computed once
+// and reused for every prediction until the observations or hyperparameters change.
+typedef struct {
+    int n;
+    real y_mean;                                        // score normalization
+    real y_scale;
+    real L[GP_MAX_OBSERVATIONS * GP_MAX_OBSERVATIONS];  // lower-triangular factor, stride n
+    real alpha[GP_MAX_OBSERVATIONS];                    // K^-1 * y
+    real log_det_half;                                  // sum(log(L_ii))
+    real y_dot_alpha;                                   // y^T * K^-1 * y
+} GpFit;
+
+static void gp_fit(const GaussianProcess *gp, GpFit *fit)
 {
-    if (!gp || !x || !mean || !variance) return;
-    
     int n = gp->n_observations;
-    
+    real *L = fit->L;
+    real yn[GP_MAX_OBSERVATIONS];
+
+    fit->n = n;
+    fit->y_mean = 0.0f;
+    fit->y_scale = 1.0f;
+
+    if (gp->normalize_y && n > 0) {
+        real mean = 0.0f, var = 0.0f;
+        for (int i = 0; i < n; i++) mean += gp->y[i];
+        mean /= (real)n;
+        for (int i = 0; i < n; i++) var += (gp->y[i] - mean) * (gp->y[i] - mean);
+        var /= (real)n;
+
+        fit->y_mean = mean;
+        if (var > 1e-12f)
+            fit->y_scale = (real)sqrt(var);
+    }
+    for (int i = 0; i < n; i++)
+        yn[i] = (gp->y[i] - fit->y_mean) / fit->y_scale;
+
+    // Lower triangle of K with noise on the diagonal
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j <= i; j++) {
+            L[i * n + j] = gp_kernel(gp, gp->X[i], gp->X[j]);
+            if (i == j)
+                L[i * n + j] += gp->noise_variance;
+        }
+    }
+
+    // In-place Cholesky decomposition: K = L * L^T
+    fit->log_det_half = 0.0f;
+    for (int j = 0; j < n; j++) {
+        real sum = L[j * n + j];
+        for (int k = 0; k < j; k++)
+            sum -= L[j * n + k] * L[j * n + k];
+        L[j * n + j] = (real)sqrt(sum > 1e-10f ? sum : 1e-10f);
+        fit->log_det_half += (real)log(L[j * n + j]);
+
+        for (int i = j + 1; i < n; i++) {
+            real s = L[i * n + j];
+            for (int k = 0; k < j; k++)
+                s -= L[i * n + k] * L[j * n + k];
+            L[i * n + j] = s / L[j * n + j];
+        }
+    }
+
+    // Solve L * z = y (forward), then L^T * alpha = z (backward)
+    real z[GP_MAX_OBSERVATIONS];
+    for (int i = 0; i < n; i++) {
+        real sum = yn[i];
+        for (int j = 0; j < i; j++)
+            sum -= L[i * n + j] * z[j];
+        z[i] = sum / L[i * n + i];
+    }
+    for (int i = n - 1; i >= 0; i--) {
+        real sum = z[i];
+        for (int j = i + 1; j < n; j++)
+            sum -= L[j * n + i] * fit->alpha[j];
+        fit->alpha[i] = sum / L[i * n + i];
+    }
+
+    fit->y_dot_alpha = 0.0f;
+    for (int i = 0; i < n; i++)
+        fit->y_dot_alpha += yn[i] * fit->alpha[i];
+}
+
+static void gp_predict_fit(const GaussianProcess *gp, const GpFit *fit, const real *x,
+                           real *mean, real *variance)
+{
+    int n = fit->n;
+    const real *L = fit->L;
+
     if (n == 0) {
         *mean = 0.0f;
         *variance = gp->signal_variance;
         return;
     }
-    
-    // Allocate working memory on stack for small GP
-    // K = kernel matrix (n x n), k_star = kernel vector (n), alpha = K^-1 * y
-    real K[GP_MAX_OBSERVATIONS * GP_MAX_OBSERVATIONS];
-    real k_star[GP_MAX_OBSERVATIONS];
-    real alpha[GP_MAX_OBSERVATIONS];
-    real L[GP_MAX_OBSERVATIONS * GP_MAX_OBSERVATIONS];  // Cholesky factor
-    
-    // Build kernel matrix K with noise on diagonal
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            K[i * n + j] = rbf_kernel(gp->X[i], gp->X[j], gp->n_dims, 
-                                      gp->length_scale, gp->signal_variance);
-            if (i == j) {
-                K[i * n + j] += gp->noise_variance;
-            }
-        }
-    }
-    
-    // Build k_star vector (kernel between x and training points)
-    for (int i = 0; i < n; i++) {
-        k_star[i] = rbf_kernel(x, gp->X[i], gp->n_dims, 
-                               gp->length_scale, gp->signal_variance);
-    }
-    
-    // Cholesky decomposition: K = L * L^T
-    memset(L, 0, n * n * sizeof(real));
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j <= i; j++) {
-            real sum = K[i * n + j];
-            for (int k = 0; k < j; k++) {
-                sum -= L[i * n + k] * L[j * n + k];
-            }
-            if (i == j) {
-                L[i * n + j] = (real)sqrt(sum > 0 ? sum : 1e-10f);
-            } else {
-                L[i * n + j] = sum / (L[j * n + j] + 1e-10f);
-            }
-        }
-    }
-    
-    // Solve L * z = y for z (forward substitution)
-    real z[GP_MAX_OBSERVATIONS];
-    for (int i = 0; i < n; i++) {
-        real sum = gp->y[i];
-        for (int j = 0; j < i; j++) {
-            sum -= L[i * n + j] * z[j];
-        }
-        z[i] = sum / (L[i * n + i] + 1e-10f);
-    }
-    
-    // Solve L^T * alpha = z for alpha (backward substitution)
-    for (int i = n - 1; i >= 0; i--) {
-        real sum = z[i];
-        for (int j = i + 1; j < n; j++) {
-            sum -= L[j * n + i] * alpha[j];
-        }
-        alpha[i] = sum / (L[i * n + i] + 1e-10f);
-    }
-    
+
     // Predicted mean: k_star^T * alpha
-    *mean = 0.0f;
+    real k_star[GP_MAX_OBSERVATIONS];
+    real m = 0.0f;
     for (int i = 0; i < n; i++) {
-        *mean += k_star[i] * alpha[i];
+        k_star[i] = gp_kernel(gp, x, gp->X[i]);
+        m += k_star[i] * fit->alpha[i];
     }
-    
-    // Solve L * v = k_star for v
+
+    // Predicted variance: k(x,x) - v^T * v, where L * v = k_star
     real v[GP_MAX_OBSERVATIONS];
-    for (int i = 0; i < n; i++) {
-        real sum = k_star[i];
-        for (int j = 0; j < i; j++) {
-            sum -= L[i * n + j] * v[j];
-        }
-        v[i] = sum / (L[i * n + i] + 1e-10f);
-    }
-    
-    // Predicted variance: k(x,x) - v^T * v
-    real k_xx = rbf_kernel(x, x, gp->n_dims, gp->length_scale, gp->signal_variance);
     real v_dot_v = 0.0f;
     for (int i = 0; i < n; i++) {
+        real sum = k_star[i];
+        for (int j = 0; j < i; j++)
+            sum -= L[i * n + j] * v[j];
+        v[i] = sum / L[i * n + i];
         v_dot_v += v[i] * v[i];
     }
-    *variance = k_xx - v_dot_v;
-    if (*variance < 1e-10f) *variance = 1e-10f;
+
+    real var = gp_kernel(gp, x, x) - v_dot_v;
+    if (var < 1e-10f) var = 1e-10f;
+
+    *mean = fit->y_mean + fit->y_scale * m;
+    *variance = var * fit->y_scale * fit->y_scale;
+}
+
+// Log marginal likelihood of the (normalized) observations under a fit
+static real gp_log_marginal(const GpFit *fit)
+{
+    return -0.5f * fit->y_dot_alpha - fit->log_det_half - 0.9189385332f * (real)fit->n;
+}
+
+void gp_predict(const GaussianProcess *gp, const real *x, real *mean, real *variance)
+{
+    if (!gp || !x || !mean || !variance) return;
+
+    GpFit fit;
+    gp_fit(gp, &fit);
+    gp_predict_fit(gp, &fit, x, mean, variance);
+}
+
+// Coordinate search over per-dimension length scales and noise, keeping
+// whichever value most improves the log marginal likelihood
+static void gp_tune(GaussianProcess *gp, GpFit *scratch)
+{
+    static const real scales[] = {0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f};
+    static const real noises[] = {1e-4f, 1e-3f, 1e-2f, 1e-1f};
+    const int n_scales = (int)(sizeof(scales) / sizeof(scales[0]));
+    const int n_noises = (int)(sizeof(noises) / sizeof(noises[0]));
+
+    gp_fit(gp, scratch);
+    real best = gp_log_marginal(scratch);
+
+    for (int pass = 0; pass < 2; pass++) {
+        for (int d = 0; d < gp->n_dims; d++) {
+            real keep = gp->ard_scales[d];
+            for (int s = 0; s < n_scales; s++) {
+                if (scales[s] == keep) continue;
+                gp->ard_scales[d] = scales[s];
+                gp_fit(gp, scratch);
+                real lml = gp_log_marginal(scratch);
+                if (lml > best) {
+                    best = lml;
+                    keep = scales[s];
+                }
+            }
+            gp->ard_scales[d] = keep;
+        }
+
+        real keep = gp->noise_variance;
+        for (int s = 0; s < n_noises; s++) {
+            if (noises[s] == keep) continue;
+            gp->noise_variance = noises[s];
+            gp_fit(gp, scratch);
+            real lml = gp_log_marginal(scratch);
+            if (lml > best) {
+                best = lml;
+                keep = noises[s];
+            }
+        }
+        gp->noise_variance = keep;
+    }
+}
+
+int gp_fit_hyperparams(GaussianProcess *gp)
+{
+    if (!gp)
+        return ERR_NULL_PTR;
+
+    // Too few points to say anything about relevance
+    if (gp->n_observations < 3)
+        return ERR_OK;
+
+    GpFit *scratch = (GpFit *)malloc(sizeof(GpFit));
+    if (!scratch)
+        return ERR_ALLOC;
+
+    gp_tune(gp, scratch);
+    free(scratch);
+    return ERR_OK;
 }
 
 real gp_expected_improvement(real mean, real variance, real best_y, real xi)
 {
     if (variance <= 0.0f)
         return 0.0f;
-    
+
     real std = (real)sqrt(variance);
     real z = (mean - best_y - xi) / std;
-    
+
     return (mean - best_y - xi) * standard_normal_cdf(z) + std * standard_normal_pdf(z);
 }
 
 void bayesian_options_init(BayesianOptions *opts)
 {
     if (!opts) return;
-    
+
     opts->n_initial = 10;
     opts->n_iterations = 20;
     opts->n_candidates = 100;
     opts->exploration_weight = 0.01f;
+    opts->fit_hyperparams = 1;
 }
 
 // ============================================================================
 // BAYESIAN OPTIMIZATION SEARCH
 // ============================================================================
 
-// Map a GP coordinate in [0,1] to the nearest index in a list of count choices
-static int unit_to_index(real u, int count)
+// GP coordinates for a trial: learning rate, then one per TrialConfig dimension
+#define BO_DIMS (1 + DIM_COUNT)
+
+// Dimensions whose choices are ordered (modeled as continuous positions)
+static int dim_is_ordinal(int dim)
 {
-    int idx = (int)(u * (count - 1) + 0.5f);
-    if (idx < 0) idx = 0;
-    if (idx >= count) idx = count - 1;
-    return idx;
+    return dim == DIM_BATCH || dim == DIM_LAYER_COUNT || dim == DIM_LAYER_SIZE;
+}
+
+static void bo_setup_dims(GaussianProcess *gp)
+{
+    gp->dim_types[0] = GP_DIM_CONTINUOUS;
+    for (int d = 0; d < DIM_COUNT; d++)
+        gp->dim_types[1 + d] = dim_is_ordinal(d) ? GP_DIM_CONTINUOUS : GP_DIM_CATEGORICAL;
+}
+
+// Encode a trial as GP coordinates. The learning rate and ordinal dimensions map
+// to [0,1]; categorical dimensions keep their index. Dimensions that do not
+// apply to the trial (activations of absent layers) are encoded as -1.
+static void bo_encode(const HyperparamSpace *space, const TrialConfig *cfg, real *x)
+{
+    real lo, hi;
+    lr_search_bounds(space, &lo, &hi);
+    x[0] = (hi > lo) ? (cfg->lr - lo) / (hi - lo) : 0.0f;
+
+    for (int d = 0; d < DIM_COUNT; d++) {
+        int n_choices = dim_choices(space, d);
+        if (!dim_active(space, cfg, d))
+            x[1 + d] = -1.0f;
+        else if (dim_is_ordinal(d))
+            x[1 + d] = (n_choices > 1) ? (real)cfg->cat[d] / (real)(n_choices - 1) : 0.0f;
+        else
+            x[1 + d] = (real)cfg->cat[d];
+    }
+}
+
+// Local candidate: jitter the learning rate and resample one categorical dimension
+static void bo_mutate(const HyperparamSpace *space, TrialConfig *cfg)
+{
+    real lo, hi;
+    lr_search_bounds(space, &lo, &hi);
+    cfg->lr += 0.1f * (hi - lo) * rand_normal();
+    if (cfg->lr < lo) cfg->lr = lo;
+    if (cfg->lr > hi) cfg->lr = hi;
+
+    int eligible[DIM_COUNT];
+    int n_eligible = 0;
+    for (int d = 0; d < DIM_COUNT; d++) {
+        if (dim_choices(space, d) > 1 && dim_active(space, cfg, d))
+            eligible[n_eligible++] = d;
+    }
+    if (n_eligible > 0) {
+        int d = eligible[rand() % n_eligible];
+        cfg->cat[d] = rand() % dim_choices(space, d);
+    }
 }
 
 int hypertune_bayesian_search(
@@ -1043,51 +1217,61 @@ int hypertune_bayesian_search(
                bayes_options->n_initial, bayes_options->n_iterations);
     }
 
-    // Initialize GP
     GaussianProcess gp;
-    gp_init(&gp, 2);  // 2D: learning rate + batch size
+    gp_init(&gp, BO_DIMS);
+    bo_setup_dims(&gp);
+
+    GpFit *fit = (GpFit *)malloc(sizeof(GpFit));
+    if (!fit)
+        return ERR_ALLOC;
 
     HypertuneResult best;
     init_best(&best);
+    TrialConfig best_cfg;
+    memset(&best_cfg, 0, sizeof(best_cfg));
 
     unsigned seed = tune_options->seed ? tune_options->seed : (unsigned)time(NULL);
     srand(seed);
 
     for (int trial = 0; trial < total_trials; trial++) {
-        int initial = trial < bayes_options->n_initial;
-        real x[2] = {0.0f, 0.0f};  // normalized learning rate, batch size
+        int initial = (trial < bayes_options->n_initial || gp.n_observations == 0);
         real best_ei = -999999.0f;
+        TrialConfig cfg;
 
-        if (initial) {
-            // Phase 1: initial random sampling
-            x[0] = rand_uniform();
-            x[1] = rand_uniform();
-        } else {
-            // Phase 2: next point maximizes Expected Improvement
+        // Phase 1: initial random sampling (also the fallback with no candidates)
+        sample_random_config(space, &cfg);
+
+        if (!initial) {
+            // Phase 2: fit the GP once, then pick the candidate maximizing
+            // Expected Improvement. Half the candidates are random, half are
+            // local perturbations of the best trial so far.
+            if (bayes_options->fit_hyperparams && gp.n_observations >= 3)
+                gp_tune(&gp, fit);
+            gp_fit(&gp, fit);
+
             for (int c = 0; c < bayes_options->n_candidates; c++) {
-                real cand[2];
-                cand[0] = rand_uniform();
-                cand[1] = rand_uniform();
+                TrialConfig cand;
+                if (c % 2) {
+                    cand = best_cfg;
+                    bo_mutate(space, &cand);
+                } else {
+                    sample_random_config(space, &cand);
+                }
+
+                real x[BO_DIMS];
+                bo_encode(space, &cand, x);
 
                 real mean, variance;
-                gp_predict(&gp, cand, &mean, &variance);
+                gp_predict_fit(&gp, fit, x, &mean, &variance);
 
                 real ei = gp_expected_improvement(mean, variance, best.score,
                                                   bayes_options->exploration_weight);
                 if (ei > best_ei) {
                     best_ei = ei;
-                    x[0] = cand[0];
-                    x[1] = cand[1];
+                    cfg = cand;
                 }
             }
         }
-
-        // The GP models learning rate and batch size; the remaining
-        // dimensions are sampled at random for each trial
-        TrialConfig cfg;
-        sample_random_config(space, &cfg);
-        cfg.lr = lr_from_unit(space, x[0]);
-        cfg.cat[DIM_BATCH] = unit_to_index(x[1], dim_choices(space, DIM_BATCH));
 
         HypertuneResult current;
         hypertune_result_init(&current);
@@ -1096,7 +1280,13 @@ int hypertune_bayesian_search(
 
         evaluate_trial(space, input_size, output_size, output_activation, loss_type,
                        split, tune_options, &current);
+
+        real x[BO_DIMS];
+        bo_encode(space, &cfg, x);
         gp_add_observation(&gp, x, current.score);
+
+        if (trial == 0 || current.score > best.score)
+            best_cfg = cfg;
 
         char phase[48];
         if (initial)
@@ -1107,6 +1297,7 @@ int hypertune_bayesian_search(
                      results, max_results, &best);
     }
 
+    free(fit);
     finish_search(tune_options, &best, best_result);
     return total_trials;
 }
@@ -1155,12 +1346,7 @@ static real kde_sample_1d(const real *samples, int n_samples, real bandwidth)
     real center = samples[idx];
     
     // Add Gaussian noise with the bandwidth as std dev
-    // Box-Muller transform
-    real u1 = ((real)rand() + 1.0f) / ((real)RAND_MAX + 2.0f);
-    real u2 = (real)rand() / (real)RAND_MAX;
-    real z = (real)sqrt(-2.0f * log(u1)) * (real)cos(2.0f * 3.14159265358979f * u2);
-    
-    return center + z * bandwidth;
+    return center + rand_normal() * bandwidth;
 }
 
 // Evaluate categorical probability (count-based with Laplace smoothing)

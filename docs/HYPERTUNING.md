@@ -53,6 +53,7 @@ and **TPE** (Tree-structured Parzen Estimator) strategies.
 | gp_init | initialize Gaussian Process state |
 | gp_add_observation | add observation to GP |
 | gp_predict | predict mean and variance at a point |
+| gp_fit_hyperparams | fit per-dimension length scales and noise |
 | gp_expected_improvement | compute expected improvement |
 | bayesian_options_init | initialize GP-BO options |
 | tpe_options_init | initialize TPE options |
@@ -188,6 +189,7 @@ bayesian_options_init(&bo_opts);
 bo_opts.n_initial = 10;      // Random samples to initialize GP
 bo_opts.n_iterations = 20;   // BO iterations after initialization
 bo_opts.n_candidates = 100;  // Candidates to evaluate per iteration
+bo_opts.fit_hyperparams = 1; // Fit GP length scales/noise each iteration
 
 // Run Bayesian optimization
 HypertuneResult results[50], best;
@@ -203,19 +205,32 @@ int trials = hypertune_bayesian_search(
 1. **Initial phase**: Randomly samples `n_initial` configurations
 2. **BO phase**: Uses Gaussian Process to predict performance, selects points 
    with highest Expected Improvement (EI)
-3. **Optimizes**: Learning rate and batch size. The GP does not model the other
-   dimensions (optimizer, layer count/size, topology, activation); they are
-   sampled at random for every trial.
+3. **Optimizes**: Every dimension of the search space: learning rate, batch
+   size, optimizer, hidden layer count, hidden layer size, topology pattern,
+   and activation (per layer with `search_per_layer_activation`).
+
+**Model details:**
+- Learning rate and the ordered lists (batch size, layer count, layer size)
+  are continuous coordinates in [0,1]. Optimizer, topology and activation are
+  categorical: two trials are either the same or different on that dimension.
+- Each dimension has its own length scale (`GaussianProcess.ard_scales`).
+  With `fit_hyperparams` set, these and the noise level are refit every
+  iteration by maximizing the marginal likelihood, so dimensions that do not
+  affect the score stop influencing the model. `gp_fit_hyperparams()` does the
+  same for a GP you drive yourself.
+- Scores are standardized before fitting.
+- Half of the `n_candidates` are random configurations and half are small
+  changes to the best trial so far.
+- The GP holds at most `GP_MAX_OBSERVATIONS` (100) trials.
 
 **When to use GP-BO:**
 - Expensive evaluations (long training times)
-- Smooth objective function
-- 2-3 continuous hyperparameters
+- Small trial budgets, where sample efficiency matters most
 
 ## TPE (Tree-structured Parzen Estimator) Optimization
 
-TPE is an alternative Bayesian optimization method that handles mixed 
-categorical and continuous parameters better than GP-BO:
+TPE is an alternative Bayesian optimization method. It is cheaper per
+iteration than GP-BO and scales to many more trials:
 
 ```c
 #include "ann_hypertune.h"
@@ -348,10 +363,10 @@ space.hidden_activation_count = 3;
 space.search_per_layer_activation = 1;  // enable per-layer search
 ```
 
-When `search_per_layer_activation` is enabled, random search and TPE assign
-activations to each layer independently (TPE models each layer's activation
-separately). Grid search rotates through the activation list by layer instead
-of searching every combination, and GP-BO uses one activation for all layers.
+When `search_per_layer_activation` is enabled, random search, TPE and GP-BO
+assign activations to each layer independently (TPE and GP-BO model each
+layer's activation separately). Grid search rotates through the activation
+list by layer instead of searching every combination.
 
 ## Search Strategy Comparison
 
@@ -359,11 +374,11 @@ of searching every combination, and GP-BO uses one activation for all layers.
 |----------|----------|------|------|
 | **Grid** | Small search spaces | Exhaustive, reproducible | Exponential cost |
 | **Random** | Large spaces, many params | Efficient, parallelizable | May miss optimum |
-| **GP-BO** | Few continuous params | Sample-efficient | O(n³), struggles with categoricals |
-| **TPE** | Mixed param types | Handles categoricals, scales well | Slightly less sample-efficient |
+| **GP-BO** | Expensive trials, small budgets | Most sample-efficient | O(n³) per fit, capped at 100 trials |
+| **TPE** | Larger budgets, many params | Cheap per iteration, scales well | Less sample-efficient than GP-BO |
 
 **Rules of thumb:**
 - Grid search: ≤100 total combinations
 - Random search: 10-100 trials typically sufficient
-- GP-BO: 2-3 continuous hyperparameters, expensive trials
-- TPE: Mixed categorical + continuous, many parameters
+- GP-BO: up to 100 trials, expensive trials
+- TPE: hundreds of trials, or when per-iteration overhead matters

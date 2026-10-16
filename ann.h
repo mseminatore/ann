@@ -241,6 +241,7 @@ struct Network
 
 	real default_dropout;				// default dropout rate for hidden layers (0 = disabled)
 	int is_training;					// 1 = training mode (apply dropout), 0 = inference mode
+	int gpu_stale;						// 1 = CPU weights changed since the last GPU upload; GPU copy is not used
 
 	real l2_lambda;						// L2 regularization (weight decay) coefficient (0 = disabled)
 	real l1_lambda;						// L1 regularization (LASSO) coefficient (0 = disabled)
@@ -632,18 +633,13 @@ ANN_API int ann_predict_batch(const PNetwork pnet, const real *inputs, real *out
 /**
  * Download updated weights and biases from GPU back to CPU.
  *
- * After GPU-accelerated training (ann_train_network() with weights uploaded),
- * the weights live on the GPU. Call this function to synchronize them back
- * to the CPU-side tensor values so that ann_predict(), ann_save_network(),
- * and other CPU-path functions see the trained parameters.
+ * ann_train_network() already does this when it finishes, and the online
+ * API keeps both copies current, so explicit calls are only needed after
+ * driving the GPU some other way. Does nothing when the CPU weights are newer
+ * than the GPU copy (e.g. mid online-training session), so it never
+ * overwrites them with stale values.
  *
- * Safe to call even if no GPU training occurred (no-op in that case).
- *
- * Typical usage:
- *   ann_gpu_upload_network(net);
- *   ann_train_network(net, inputs, outputs, rows);
- *   ann_gpu_sync_weights(net);     // <-- download trained weights
- *   ann_predict(net, input, out);  // now uses updated weights
+ * Safe to call even if no GPU training occurred.
  *
  * @param pnet Network whose weights should be downloaded from GPU
  */

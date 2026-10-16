@@ -21,6 +21,8 @@
 
 #ifdef USE_CUDA
 
+#include "gpu_consistency.h"
+
 //-----------------------------------------------------------
 // Helper: build and train a tiny XOR network (2-4-1)
 //-----------------------------------------------------------
@@ -303,6 +305,8 @@ void test_main(int argc, char *argv[])
     tensor_free(sync_inputs);
     tensor_free(sync_targets);
     ann_free_network(sync_net);
+
+    run_gpu_consistency_tests();
 }
 
 #else  /* USE_CUDA not defined */

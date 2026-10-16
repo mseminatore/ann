@@ -135,11 +135,9 @@ Once weights are uploaded with `ann_gpu_upload_network()`, **training automatica
    // All batches train on GPU automatically
    ```
 
-3. **Download weights back to CPU** after training:
-   ```c
-   ann_gpu_sync_weights(pnet);
-   // Weights are now on CPU; can save network, run predictions, etc.
-   ```
+3. **Weights come back to the CPU automatically** when `ann_train_network()`
+   returns, so you can save the network right away. `ann_gpu_sync_weights()`
+   is still available and harmless to call.
 
 ### GPU Training Performance
 
@@ -170,7 +168,8 @@ All optimizers work with GPU training:
 - **GPU training is automatic**: Once `ann_gpu_upload_network()` has been called, `ann_train_network()` uses GPU for all batches.
 - **Unified memory**: On Apple Silicon, GPU and CPU share the same memory. Gradients are computed on GPU but directly accessible by CPU for inspection.
 - **Fallback**: If `ann_gpu_upload_network()` was never called, training uses the CPU path automatically.
-- **Weight sync**: Always call `ann_gpu_sync_weights()` after training to bring updated weights back to CPU for saving or further predictions.
+- **Weight sync**: `ann_train_network()` copies trained weights back to the CPU when it finishes. The online API (`ann_train_step()`) trains on the CPU and `ann_train_end()` re-uploads the weights.
+- **Dropout**: not implemented on the GPU; networks with dropout train on the CPU even when uploaded.
 
 ## Complete Example
 

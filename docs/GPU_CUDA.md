@@ -51,8 +51,15 @@ cmake -DUSE_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES=89 ..   # Ada (e.g. RTX 40xx)
   (saving pre-activations), backward pass (two cuBLAS GEMMs per layer for `dW` and delta
   propagation, plus activation-derivative and bias-gradient kernels), and the optimizer update
   (SGD / Momentum / AdaGrad / RMSProp / Adam, with optional gradient clipping and L1/L2
-  regularization). Call `ann_gpu_sync_weights()` afterward to copy trained weights back to the
-  CPU for `ann_predict()` / `ann_save_network()`.
+  regularization). When training finishes the weights are copied back to the CPU
+  automatically, so `ann_save_network()` sees the trained parameters without an explicit
+  `ann_gpu_sync_weights()`.
+- **Dropout** is not implemented on the GPU. A network with dropout enabled trains on the CPU
+  even when uploaded (a message is printed), and the GPU copy is refreshed afterwards.
+- **Online training** (`ann_train_begin()` / `ann_train_step()` / `ann_train_end()`) runs on the
+  CPU. During the session `ann_predict()` uses the CPU weights; `ann_train_end()` re-uploads them
+  so GPU inference resumes with the updated model.
+- If a GPU batch fails mid-training, training continues on the CPU from the GPU's latest weights.
 
 ## Implementation notes
 
@@ -61,9 +68,9 @@ cmake -DUSE_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES=89 ..   # Ada (e.g. RTX 40xx)
   the equivalent column-major (transposed) `cublasSgemm` — operands swapped, `m`/`n` swapped.
 - **Device memory is not host-visible.** Unlike Metal's unified (shared) memory, CUDA
   `cudaMalloc` buffers cannot be read directly by the CPU. The forward/backward/optimizer steps
-  stay entirely on the device. The one host-side step — computing `delta = T − Y` and the loss —
-  round-trips: the output activations are copied device→host, `delta`/loss are computed on the
-  CPU (identical math to the Metal backend), and `delta` is copied host→device for backprop.
+  stay entirely on the device, including `delta = T − Y` and the per-element loss
+  (`cuda_mse_delta_loss` / `cuda_xent_delta_loss`), which `cublasSasum` reduces. Per batch, only
+  the inputs and targets go host→device and the scalar loss comes back.
 - **float-only.** The kernels and `cublasSgemm` operate on `float`. libann's default
   `real = float`, so the default build is fully supported. A `double` build (changing `real` in
   `tensor.h`) is **not** supported by the GPU backends (Metal or CUDA) and will fall back to /

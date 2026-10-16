@@ -471,7 +471,7 @@ trained weights back to the CPU before saving:
     ann_train_network(pnet, x_train, y_train, x_train->rows);
 
 #ifdef USE_GPU
-    ann_gpu_sync_weights(pnet);     // copy trained weights back to the CPU
+    ann_gpu_sync_weights(pnet);     // optional: training already copied weights back
 #endif
 
     ann_save_network(pnet, "model.nna");
@@ -492,7 +492,8 @@ overhead across many samples.
 > Note: GPU training pays off for networks with 128+ node hidden layers and
 > datasets of 1,000+ samples, where it is roughly 5–7× faster than the CPU on
 > Apple Silicon. For tiny networks the GPU setup cost dominates and the CPU is
-> faster. The online training API (`ann_train_step()`) always runs on the CPU.
+> faster. The online training API (`ann_train_step()`) always runs on the CPU,
+> and so does training with dropout enabled.
 > The GPU backends support only the default `real = float` build.
 
 See [docs/GPU_INFERENCE.md](docs/GPU_INFERENCE.md) (Metal),

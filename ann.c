@@ -62,18 +62,58 @@ ANN_API int ann_gpu_init(void)
 
 ANN_API int ann_gpu_upload_network(PNetwork pnet)
 {
-    return g_gpu_backend ? g_gpu_backend->upload_network(pnet) : ERR_FAIL;
+    if (!g_gpu_backend)
+        return ERR_FAIL;
+
+    int err = g_gpu_backend->upload_network(pnet);
+    if (err == ERR_OK)
+        pnet->gpu_stale = 0;
+    return err;
 }
 
 ANN_API void ann_gpu_free_network(PNetwork pnet)
 {
     if (g_gpu_backend) g_gpu_backend->free_network(pnet);
+    if (pnet) pnet->gpu_stale = 0;
 }
 
 ANN_API void ann_gpu_sync_weights(PNetwork pnet)
 {
-    if (g_gpu_backend) g_gpu_backend->sync_weights(pnet);
+    // A stale GPU copy is older than the CPU weights; never copy it back
+    if (g_gpu_backend && pnet && !pnet->gpu_stale)
+        g_gpu_backend->sync_weights(pnet);
 }
+
+#ifdef USE_GPU
+// Weights are on the GPU (dispatch checks layer 0, which every backend uploads)
+static int gpu_uploaded(const PNetwork pnet)
+{
+    return g_gpu_backend && pnet->layer_count > 0 &&
+           pnet->layers[0].t_weights && pnet->layers[0].t_weights->gpu_buf;
+}
+
+// The GPU copy may be used for inference: uploaded and as new as the CPU weights
+static int gpu_ready(const PNetwork pnet)
+{
+    return gpu_uploaded(pnet) && !pnet->gpu_stale;
+}
+
+// Re-upload after CPU-side weight changes so the GPU copy is current again
+static void gpu_refresh(PNetwork pnet)
+{
+    if (gpu_uploaded(pnet))
+        pnet->gpu_stale = (g_gpu_backend->upload_network(pnet) != ERR_OK);
+}
+
+// The GPU backends do not implement dropout
+static int uses_dropout(const PNetwork pnet)
+{
+    for (int i = 0; i < pnet->layer_count; i++)
+        if (pnet->layers[i].dropout_rate > (real)0.0)
+            return 1;
+    return 0;
+}
+#endif
 
 //================================================================================================
 // NEURAL NETWORK IMPLEMENTATION - Architecture and Design Overview
@@ -609,8 +649,8 @@ static void eval_network(PNetwork pnet)
 		return;
 
 #ifdef USE_GPU
-	// Dispatch to GPU if a backend is active and weights are uploaded
-	if (g_gpu_backend && pnet->layers[0].t_weights && pnet->layers[0].t_weights->gpu_buf)
+	// Dispatch to GPU if a backend is active and the uploaded weights are current
+	if (gpu_ready(pnet))
 	{
 		if (g_gpu_backend->eval_single(pnet))
 			return;
@@ -2114,6 +2154,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->base_learning_rate = (real)0.0;		// set when training starts
 	pnet->default_dropout	= (real)0.0;		// dropout disabled by default
 	pnet->is_training		= 0;				// inference mode by default
+	pnet->gpu_stale			= 0;
 	pnet->l2_lambda			= (real)0.0;		// L2 regularization disabled
 	pnet->l1_lambda			= (real)0.0;		// L1 regularization disabled
 	
@@ -2233,13 +2274,18 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 
 #ifdef USE_GPU
 	// Check if GPU training is available (backend active + weights uploaded to GPU)
-	int use_gpu_training = (g_gpu_backend != NULL &&
-	                        pnet->layers[0].t_weights != NULL &&
-	                        pnet->layers[0].t_weights->gpu_buf != NULL);
+	int use_gpu_training = gpu_uploaded(pnet);
+	if (use_gpu_training && uses_dropout(pnet))
+	{
+		ann_printf(pnet, "Dropout is not supported on the GPU; training on the CPU\n");
+		use_gpu_training = 0;
+	}
 	// init_weights() may have just randomized CPU weights; re-upload once so GPU
 	// training always starts from the same initialized parameters as CPU training.
 	if (use_gpu_training && g_gpu_backend->upload_network(pnet) != ERR_OK)
 		use_gpu_training = 0;
+	// Training on the CPU while uploaded leaves the GPU copy behind until the end
+	pnet->gpu_stale = gpu_uploaded(pnet) && !use_gpu_training;
 #endif
 	while (!converged)
 	{
@@ -2292,11 +2338,20 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 
 		// Batched forward + backward + optimize (CPU or GPU path)
 #ifdef USE_GPU
-			if (use_gpu_training && g_gpu_backend->train_batch(pnet, batch_targets, actual_batch_size, &loss))
+			// GPU handles forward + backward + optimizer + train_iteration++
+			int gpu_done = 0;
+			if (use_gpu_training)
 			{
-				// GPU handled this batch (forward + backward + optimizer + train_iteration++)
+				gpu_done = g_gpu_backend->train_batch(pnet, batch_targets, actual_batch_size, &loss);
+				if (!gpu_done)
+				{
+					// GPU failed: finish on the CPU, starting from the GPU's latest weights
+					g_gpu_backend->sync_weights(pnet);
+					use_gpu_training = 0;
+					pnet->gpu_stale = 1;
+				}
 			}
-			else
+			if (!gpu_done)
 #endif
 			{
 				// CPU path: forward pass
@@ -2346,6 +2401,14 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 
 	// free up batch tensors
 	tensor_free(batch_targets);
+
+#ifdef USE_GPU
+	// Leave the CPU and GPU copies of the weights identical
+	if (use_gpu_training)
+		g_gpu_backend->sync_weights(pnet);
+	else if (pnet->gpu_stale)
+		gpu_refresh(pnet);
+#endif
 	
 	// Disable training mode (for dropout)
 	pnet->is_training = 0;
@@ -2389,6 +2452,13 @@ int ann_train_begin(PNetwork pnet)
 		invoke_error_callback(ERR_ALLOC, "ann_train_begin");
 		return ERR_ALLOC;
 	}
+
+#ifdef USE_GPU
+	// Online steps run on the CPU; predictions use the CPU until ann_train_end()
+	// re-uploads the weights
+	if (gpu_uploaded(pnet))
+		pnet->gpu_stale = 1;
+#endif
 
 	return ERR_OK;
 }
@@ -2453,6 +2523,11 @@ real ann_train_step(PNetwork pnet, const real *inputs, const real *targets, int 
 	// Update weights
 	pnet->optimize_func(pnet);
 
+#ifdef USE_GPU
+	if (gpu_uploaded(pnet))
+		pnet->gpu_stale = 1;
+#endif
+
 	tensor_free(batch_targets);
 
 	return loss;
@@ -2468,6 +2543,11 @@ void ann_train_end(PNetwork pnet)
 
 	// Disable training mode (for dropout)
 	pnet->is_training = 0;
+
+#ifdef USE_GPU
+	if (pnet->gpu_stale)
+		gpu_refresh(pnet);
+#endif
 }
 
 //------------------------------
@@ -3078,8 +3158,8 @@ int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, in
 	}
 
 #ifdef USE_GPU
-	// Use GPU batch inference when a backend is active and weights are uploaded
-	if (g_gpu_backend && pnet->layers[0].t_weights && pnet->layers[0].t_weights->gpu_buf)
+	// Use GPU batch inference when a backend is active and the uploaded weights are current
+	if (gpu_ready(pnet))
 		return g_gpu_backend->eval_batch(pnet, inputs, outputs, batch_size);
 #endif
 

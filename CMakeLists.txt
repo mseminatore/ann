@@ -33,6 +33,12 @@ add_test(NAME test_hypertune COMMAND test_hypertune)
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
 
+# compiler warnings for C/CXX sources (nvcc has its own flag syntax)
+if (NOT MSVC)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wall>
+                        $<$<COMPILE_LANGUAGE:C,CXX>:-Wextra>)
+endif()
+
 # set compiler and arch specific optimizations
 # NOTE: these are host-CPU SIMD flags and must only be applied to C/CXX sources.
 # nvcc rejects bare flags like /arch:AVX ("A single input file is required..."), so they are

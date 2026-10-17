@@ -165,7 +165,6 @@ typedef real(*Loss_func) (PNetwork pnet, PTensor outputs);
 typedef void(*Output_func) (const char *);
 typedef void(*Optimization_func) (PNetwork pnet);
 typedef real(*Activation_func) (real);
-typedef void(*BackPropagate_func)(PNetwork pnet, PLayer layer, PLayer prev_layer);
 
 /**
  * Learning rate scheduler callback.
@@ -188,7 +187,6 @@ struct Layer
 	Layer_type layer_type;				// type of this layer
 	Activation_type activation;			// type of activation, none, sigmoid, Relu
 	Activation_func activation_func;	// node activation function
-	BackPropagate_func back_prop_func;	// back propagation function for this layer
 
 	real dropout_rate;					// dropout rate for this layer (0.0 = disabled)
 	PTensor t_dropout_mask;				// dropout mask tensor (for batched training)

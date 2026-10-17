@@ -130,7 +130,7 @@ static int uses_dropout(const PNetwork pnet)
 //   1. Forward Propagation (eval_network):
 //      Input → Conv to Matrix → Layer1 compute → Layer2 compute → ... → Output
 //
-//   2. Backpropagation (back_propagate):
+//   2. Backpropagation (back_propagate_batched):
 //      Computes gradients layer-by-layer from output back to input
 //      Using chain rule: ∂L/∂W = (∂L/∂a) * (∂a/∂z) * (∂z/∂W)
 //      Where z = W*a + b, a = activation(z)
@@ -838,162 +838,6 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 }
 
 //-------------------------------------------
-// propagate back for sigmoid layers
-//-------------------------------------------
-static void back_propagate_sigmoid(PNetwork pnet, PLayer layer, PLayer prev_layer)
-{
-	(void)pnet;
-
-	//
-	// gradient = dl_dz * z * (1 - z) * x = dl_dz_zomz * x 
-	//
-
-	// dl_dz = dl_dz * z
-	tensor_mul(layer->t_dl_dz, layer->t_values);
-
-	// z = z ^2
-	tensor_square(layer->t_values);
-
-	// z = z * dl_dz
-	tensor_mul(layer->t_values, layer->t_dl_dz);
-
-	// dl_dz = dl_dz - dl_dz * z^2
-	tensor_sub(layer->t_dl_dz, layer->t_values);
-
-	// accumulate bias gradient: bias_grad += dL_dz
-	tensor_axpy((real)1.0, layer->t_dl_dz, prev_layer->t_bias_grad);
-
-	// gradient += dl_dz * x
-	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
-// ReLU backpropagation:
-// For ReLU: f(x) = max(0,x), so df/dx = 1 if x>0 else 0
-// The heaviside step function approximates this: h(x) = (x>0) ? 1 : 0
-// Steps:
-// 1. Apply ReLU derivative mask to incoming gradient
-// 2. Update bias and compute weight gradient with masked values
-// 3. Propagate masked gradient to previous layer
-//-------------------------------------------
-
-	// dL_dz = weights.T * dL_dy
-	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_dl_dz, prev_layer->t_dl_dz);
-}
-
-//-------------------------------------------
-// propagate back for RELU layers
-// ReLU derivative: f'(x) = 1 if x > 0, else 0
-//-------------------------------------------
-static void back_propagate_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
-{
-	(void)pnet;
-
-	//
-	// gradient = dl_dz * d * x, where d is derivative of RELU(x) which is 0 or 1
-	//
-	
-	// Apply ReLU derivative mask (heaviside): 1 if values > 0, else 0
-	tensor_heaviside(layer->t_values);
-
-	// dl_dz = dl_dz * derivative_mask
-	tensor_mul(layer->t_dl_dz, layer->t_values);
-
-	// accumulate bias gradient: bias_grad += dl_dz
-	tensor_axpy((real)1.0, layer->t_dl_dz, prev_layer->t_bias_grad);
-
-	// gradient += dl_dz * x (outer product with previous layer values)
-	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
-
-	// Propagate gradient to previous layer: dl_dz_prev = W^T * dl_dz
-	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_dl_dz, prev_layer->t_dl_dz);
-}
-
-//-------------------------------------------
-// propagate back for Leaky RELU layers
-// LeakyReLU: f(x) = max(0.01*x, x)
-// Derivative: f'(x) = 1 if x > 0, else 0.01
-//-------------------------------------------
-static void back_propagate_leaky_relu(PNetwork pnet, PLayer layer, PLayer prev_layer)
-{
-	(void)pnet;
-
-	int size = layer->t_values->cols;
-	
-	// Compute leaky ReLU derivative: 1 if x > 0, else 0.01
-	for (int i = 0; i < size; i++)
-	{
-		real deriv = layer->t_values->values[i] > (real)0.0 ? (real)1.0 : (real)0.01;
-		layer->t_dl_dz->values[i] *= deriv;
-	}
-
-	// accumulate bias gradient: bias_grad += dl_dz
-	tensor_axpy((real)1.0, layer->t_dl_dz, prev_layer->t_bias_grad);
-
-	// gradient += dl_dz * x (outer product with previous layer values)
-	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
-
-	// Propagate gradient to previous layer: dl_dz_prev = W^T * dl_dz
-	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_dl_dz, prev_layer->t_dl_dz);
-}
-
-//-------------------------------------------
-// propagate back for Tanh layers
-// tanh: f(x) = tanh(x)
-// Derivative: f'(x) = 1 - tanh(x)^2 = 1 - y^2
-//-------------------------------------------
-static void back_propagate_tanh(PNetwork pnet, PLayer layer, PLayer prev_layer)
-{
-	(void)pnet;
-
-	int size = layer->t_values->cols;
-	
-	// Compute tanh derivative: 1 - y^2 where y = tanh(x) is stored in t_values
-	for (int i = 0; i < size; i++)
-	{
-		real y = layer->t_values->values[i];
-		real deriv = (real)1.0 - y * y;
-		layer->t_dl_dz->values[i] *= deriv;
-	}
-
-	// accumulate bias gradient: bias_grad += dl_dz
-	tensor_axpy((real)1.0, layer->t_dl_dz, prev_layer->t_bias_grad);
-
-	// gradient += dl_dz * x (outer product with previous layer values)
-	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
-
-	// Propagate gradient to previous layer: dl_dz_prev = W^T * dl_dz
-	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_dl_dz, prev_layer->t_dl_dz);
-}
-
-//-------------------------------------------
-// propagate back for Softsign layers
-// softsign: f(x) = x / (1 + |x|)
-// Derivative: f'(x) = 1 / (1 + |x|)^2 = (1 - |y|)^2
-//-------------------------------------------
-static void back_propagate_softsign(PNetwork pnet, PLayer layer, PLayer prev_layer)
-{
-	(void)pnet;
-
-	int size = layer->t_values->cols;
-	
-	// Compute softsign derivative: (1 - |y|)^2 where y = softsign(x)
-	for (int i = 0; i < size; i++)
-	{
-		real y = layer->t_values->values[i];
-		real one_minus_abs_y = (real)1.0 - (real)fabs(y);
-		real deriv = one_minus_abs_y * one_minus_abs_y;
-		layer->t_dl_dz->values[i] *= deriv;
-	}
-
-	// accumulate bias gradient: bias_grad += dl_dz
-	tensor_axpy((real)1.0, layer->t_dl_dz, prev_layer->t_bias_grad);
-
-	// gradient += dl_dz * x (outer product with previous layer values)
-	tensor_outer((real)1.0, layer->t_dl_dz, prev_layer->t_values, prev_layer->t_gradients);
-
-	// Propagate gradient to previous layer: dl_dz_prev = W^T * dl_dz
-	tensor_matvec(Tensor_Transpose, (real)1.0, prev_layer->t_weights, (real)0.0, layer->t_dl_dz, prev_layer->t_dl_dz);
-}
-
-//-------------------------------------------
 // Accumulate column sums from a [batch × cols] matrix into a [1 × cols] vector.
 // bias_grad[n] += sum over batch rows of src[b * cols + n]
 //-------------------------------------------
@@ -1426,7 +1270,7 @@ static int ensure_batch_tensors(PNetwork pnet, unsigned batch_size)
 static void shuffle_indices(int *input_indices, int count)
 {
 	// Knuth's algorithm to shuffle an array a of n elements (indices 0..n-1):
-	for (int i = 0; i < count - 2; i++)
+	for (int i = 0; i < count - 1; i++)
 	{
 		int j = i + (rand() % (count - i));
 		int val = input_indices[i];
@@ -1787,33 +1631,27 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	int cur_layer = pnet->layer_count - 1;
 	pnet->layers[cur_layer].layer_type = layer_type;
 	pnet->layers[cur_layer].activation = activation_type;
-	pnet->layers[cur_layer].back_prop_func = NULL;
 
 	switch (activation_type)
 	{
 	case ACTIVATION_SIGMOID:
 		pnet->layers[cur_layer].activation_func = sigmoid;
-		pnet->layers[cur_layer].back_prop_func	= back_propagate_sigmoid;
 		break;
 
 	case ACTIVATION_RELU:
 		pnet->layers[cur_layer].activation_func = relu;
-		pnet->layers[cur_layer].back_prop_func	= back_propagate_relu;
 		break;
 
 	case ACTIVATION_LEAKY_RELU:
 		pnet->layers[cur_layer].activation_func = leaky_relu;
-		pnet->layers[cur_layer].back_prop_func	= back_propagate_leaky_relu;
 		break;
 
 	case ACTIVATION_TANH:
 		pnet->layers[cur_layer].activation_func = ann_tanh;
-		pnet->layers[cur_layer].back_prop_func	= back_propagate_tanh;
 		break;
 
 	case ACTIVATION_SOFTSIGN:
 		pnet->layers[cur_layer].activation_func = softsign;
-		pnet->layers[cur_layer].back_prop_func	= back_propagate_softsign;
 		break;
 
 	case ACTIVATION_NULL:

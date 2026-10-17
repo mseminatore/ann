@@ -308,3 +308,25 @@ kernel void l1_regularize(
     float w = weights[gid];
     weights[gid] -= l1_scale * (w > 0.0f ? 1.0f : (w < 0.0f ? -1.0f : 0.0f));
 }
+
+// Dropout forward: a *= mask (mask holds 0 or 1/(1-rate), drawn on the CPU)
+kernel void dropout_forward(
+    device float *a           [[buffer(0)]],
+    device const float *mask  [[buffer(1)]],
+    uint gid                  [[thread_position_in_grid]])
+{
+    a[gid] *= mask[gid];
+}
+
+// Dropout backward: mask the gradient and restore kept activations to their
+// pre-dropout values so the activation derivative is evaluated correctly
+kernel void dropout_backward(
+    device float *dl_dz       [[buffer(0)]],
+    device float *a           [[buffer(1)]],
+    device const float *mask  [[buffer(2)]],
+    uint gid                  [[thread_position_in_grid]])
+{
+    float m = mask[gid];
+    dl_dz[gid] *= m;
+    if (m != 0.0f) a[gid] /= m;
+}

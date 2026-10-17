@@ -51,11 +51,15 @@ cmake -DUSE_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES=89 ..   # Ada (e.g. RTX 40xx)
   (saving pre-activations), backward pass (two cuBLAS GEMMs per layer for `dW` and delta
   propagation, plus activation-derivative and bias-gradient kernels), and the optimizer update
   (SGD / Momentum / AdaGrad / RMSProp / Adam, with optional gradient clipping and L1/L2
-  regularization). When training finishes the weights are copied back to the CPU
-  automatically, so `ann_save_network()` sees the trained parameters without an explicit
-  `ann_gpu_sync_weights()`.
-- **Dropout** is not implemented on the GPU. A network with dropout enabled trains on the CPU
-  even when uploaded (a message is printed), and the GPU copy is refreshed afterwards.
+  regularization). When training finishes the weights and the optimizer state (momentum /
+  Adam moments) are copied back to the CPU automatically, so `ann_save_network()` and later
+  online training see the trained state without an explicit `ann_gpu_sync_weights()`. The next
+  `ann_train_network()` copies the CPU's optimizer state back to the GPU, so training resumes
+  where it left off on either side.
+- **Dropout** runs on the GPU. The masks are drawn on the host with the same random sequence as
+  CPU training and copied to the device each batch; `cuda_dropout_forward` applies them after
+  the activation and `cuda_dropout_backward` masks the gradient and restores the pre-dropout
+  activations before the activation derivative.
 - **Online training** (`ann_train_begin()` / `ann_train_step()` / `ann_train_end()`) runs on the
   CPU. During the session `ann_predict()` uses the CPU weights; `ann_train_end()` re-uploads them
   so GPU inference resumes with the updated model.

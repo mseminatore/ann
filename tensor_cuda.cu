@@ -158,6 +158,10 @@ static int cuda_upload_network(PNetwork pnet)
         if (l->t_bias && !cuda_upload_tensor(l->t_bias)) return ERR_FAIL;
     }
 
+    // Rebuild training buffers on the next batch so they pick up the current
+    // CPU optimizer state (see cuda_alloc_training_buffers)
+    g_cuda.training_buffers_ready = 0;
+
     return ERR_OK;
 }
 
@@ -250,6 +254,16 @@ static void cuda_sync_weights(PNetwork pnet)
         {
             size_t bytes = (size_t)l->t_bias->cols * sizeof(real);
             cudaMemcpy(l->t_bias->values, l->t_bias->gpu_buf, bytes, cudaMemcpyDeviceToHost);
+        }
+
+        // Optimizer state, so CPU (online) training continues where the GPU stopped
+        PTensor state[4] = { l->t_m, l->t_v, l->t_bias_m, l->t_bias_v };
+        for (int i = 0; i < 4; i++)
+        {
+            if (state[i] && state[i]->gpu_buf)
+                cudaMemcpy(state[i]->values, state[i]->gpu_buf,
+                           (size_t)(state[i]->rows * state[i]->cols) * sizeof(real),
+                           cudaMemcpyDeviceToHost);
         }
     }
 }
@@ -523,10 +537,11 @@ static int cuda_alloc_training_buffers(PNetwork pnet, int batch_size)
             if (!l->t_gradients || !cuda_ensure_buf(l->t_gradients)) return 0;
             if (!l->t_bias_grad || !cuda_ensure_buf(l->t_bias_grad)) return 0;
             // Optimizer state is NULL for optimizers that don't use it (e.g. SGD).
-            if (l->t_m      && !cuda_ensure_buf(l->t_m))      return 0;
-            if (l->t_v      && !cuda_ensure_buf(l->t_v))      return 0;
-            if (l->t_bias_m && !cuda_ensure_buf(l->t_bias_m)) return 0;
-            if (l->t_bias_v && !cuda_ensure_buf(l->t_bias_v)) return 0;
+            // It is copied from the CPU so training continues where it left off.
+            if (l->t_m      && !cuda_upload_tensor(l->t_m))      return 0;
+            if (l->t_v      && !cuda_upload_tensor(l->t_v))      return 0;
+            if (l->t_bias_m && !cuda_upload_tensor(l->t_bias_m)) return 0;
+            if (l->t_bias_v && !cuda_upload_tensor(l->t_bias_v)) return 0;
         }
     }
 
@@ -540,6 +555,24 @@ static int cuda_alloc_training_buffers(PNetwork pnet, int batch_size)
 // t_batch_values buffers and saves pre-activation Z for backprop.
 // On entry layer[0].t_batch_values->gpu_buf holds the batch inputs.
 //-----------------------------------------------------------
+// The dropout mask for a hidden layer in this batch, on the device. ann.c draws
+// the masks on the host before each batch; the forward pass uploads them and the
+// backward pass reuses the device copy. Returns NULL when the layer has no dropout.
+static float *cuda_dropout_mask(PNetwork pnet, PLayer l, int batch, int upload)
+{
+    PTensor m = l->t_dropout_mask;
+    if (!pnet->is_training || l->dropout_rate <= 0.0f || !m ||
+        m->rows != batch || m->cols != l->node_count)
+        return NULL;
+    if (!cuda_ensure_buf(m))
+        return NULL;
+    if (upload && !cuda_check(cudaMemcpy(m->gpu_buf, m->values,
+                                         (size_t)batch * l->node_count * sizeof(real),
+                                         cudaMemcpyHostToDevice), "cudaMemcpy dropout mask"))
+        return NULL;
+    return (float *)m->gpu_buf;
+}
+
 static int cuda_forward_train(PNetwork pnet, int batch)
 {
     for (int layer = 0; layer < pnet->layer_count - 1; layer++)
@@ -567,6 +600,15 @@ static int cuda_forward_train(PNetwork pnet, int batch)
             return 0;
 
         cuda_launch_activation(dst->activation, Y, batch, out_nodes);
+
+        // Dropout (hidden layers only)
+        if (layer + 1 < pnet->layer_count - 1)
+        {
+            float *mask = cuda_dropout_mask(pnet, dst, batch, 1);
+            if (mask)
+                cuda_dropout_forward<<<cuda_blocks(batch * out_nodes), CUDA_THREADS>>>(
+                    Y, mask, batch * out_nodes);
+        }
     }
     return 1;
 }
@@ -600,7 +642,13 @@ static int cuda_backward_pass(PNetwork pnet, int batch)
         // Activation derivative.  The output layer uses raw delta = T - Y for all
         // loss types (matching the CPU path), so skip its derivative.
         if (li != layer_count - 1)
+        {
+            // Undo dropout: mask the gradient and restore pre-dropout activations
+            float *mask = cuda_dropout_mask(pnet, layer, batch, 0);
+            if (mask)
+                cuda_dropout_backward<<<cuda_blocks(n), CUDA_THREADS>>>(dl_dz, A, mask, n);
             cuda_launch_deriv(layer->activation, dl_dz, A, Z, n);
+        }
 
         // dW += dl_dz^T * A_prev   (accumulate)
         if (!cuda_gemm_rowmajor(1, 0, nodes, prev_nodes, batch, 1.0f, dl_dz, A_prev, 1.0f, dW))

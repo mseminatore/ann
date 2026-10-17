@@ -105,14 +105,6 @@ static void gpu_refresh(PNetwork pnet)
         pnet->gpu_stale = (g_gpu_backend->upload_network(pnet) != ERR_OK);
 }
 
-// The GPU backends do not implement dropout
-static int uses_dropout(const PNetwork pnet)
-{
-    for (int i = 0; i < pnet->layer_count; i++)
-        if (pnet->layers[i].dropout_rate > (real)0.0)
-            return 1;
-    return 0;
-}
 #endif
 
 //================================================================================================
@@ -701,21 +693,20 @@ static void softmax_batched(PNetwork pnet, int batch_size)
 }
 
 //---------------------------------------------
-// Apply dropout to a layer's activations (inverted dropout)
-// Randomly zeros out neurons and scales survivors by 1/(1-rate)
-// Only applied during training; mask is stored for backprop
+// Draw a hidden layer's dropout mask for this batch (inverted dropout):
+// 0 for dropped neurons, 1/(1-rate) for kept ones. The mask is kept in
+// t_dropout_mask for backprop. Returns NULL when dropout is off for the layer.
 //---------------------------------------------
-static void apply_dropout_batched(PNetwork pnet, int layer_idx, int batch_size)
+static PTensor make_dropout_mask(PNetwork pnet, int layer_idx, int batch_size)
 {
 	PLayer layer = &pnet->layers[layer_idx];
 	real rate = layer->dropout_rate;
 	
 	// Skip if dropout disabled or not training
 	if (rate <= (real)0.0 || !pnet->is_training)
-		return;
+		return NULL;
 	
 	int nodes = layer->node_count;
-	PTensor Y = layer->t_batch_values;
 	
 	// Allocate or reallocate dropout mask if needed
 	if (!layer->t_dropout_mask || 
@@ -726,34 +717,48 @@ static void apply_dropout_batched(PNetwork pnet, int layer_idx, int batch_size)
 		layer->t_dropout_mask = tensor_create(batch_size, nodes);
 	}
 	
-	if (!layer->t_dropout_mask)
+	PTensor mask = layer->t_dropout_mask;
+	if (!mask)
+		return NULL;
+	
+	real scale = (real)1.0 / ((real)1.0 - rate);
+	int total = batch_size * nodes;
+	for (int i = 0; i < total; i++)
+	{
+		real r = (real)rand() / (real)RAND_MAX;
+		mask->values[i] = (r < rate) ? (real)0.0 : scale;
+	}
+	return mask;
+}
+
+//---------------------------------------------
+// Apply dropout to a layer's activations: draw the mask and multiply
+// Only applied during training; mask is stored for backprop
+//---------------------------------------------
+static void apply_dropout_batched(PNetwork pnet, int layer_idx, int batch_size)
+{
+	PTensor mask = make_dropout_mask(pnet, layer_idx, batch_size);
+	if (!mask)
 		return;
 	
-	PTensor mask = layer->t_dropout_mask;
-	real scale = (real)1.0 / ((real)1.0 - rate);
-	
-	// Generate dropout mask and apply inverted dropout
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			real r = (real)rand() / (real)RAND_MAX;
-			if (r < rate)
-			{
-				// Drop this neuron
-				mask->values[offset + n] = (real)0.0;
-				Y->values[offset + n] = (real)0.0;
-			}
-			else
-			{
-				// Keep and scale
-				mask->values[offset + n] = scale;
-				Y->values[offset + n] *= scale;
-			}
-		}
-	}
+	PTensor Y = pnet->layers[layer_idx].t_batch_values;
+	int total = batch_size * pnet->layers[layer_idx].node_count;
+	for (int i = 0; i < total; i++)
+		Y->values[i] *= mask->values[i];
 }
+
+#ifdef USE_GPU
+//---------------------------------------------
+// Draw every hidden layer's dropout mask for a GPU batch. The GPU applies
+// them, but drawing them here, in layer order, uses the same random sequence
+// as CPU training, so both paths drop the same neurons.
+//---------------------------------------------
+static void make_dropout_masks(PNetwork pnet, int batch_size)
+{
+	for (int layer = 1; layer < pnet->layer_count - 1; layer++)
+		make_dropout_mask(pnet, layer, batch_size);
+}
+#endif
 
 //---------------------------------------------
 // Batched forward propagation
@@ -935,27 +940,28 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 }
 
 //-------------------------------------------
-// Apply dropout mask to gradients during backprop
-// Uses the same mask that was applied during forward pass
+// Undo dropout before a hidden layer's activation derivative:
+// - mask the gradient (dropped neurons get none, kept ones are scaled)
+// - restore kept activations to their pre-dropout values, A / scale, so the
+//   sigmoid/tanh/softsign derivatives are evaluated at the right point
+// Safe because this layer's dropped-out A was already used, as A_prev, by the
+// layer above it, and nothing reads it after the derivative.
 //-------------------------------------------
 static void apply_dropout_mask_to_gradient(PLayer layer, int batch_size)
 {
 	if (!layer->t_dropout_mask || layer->dropout_rate <= (real)0.0)
 		return;
 	
-	PTensor dl_dz = layer->t_batch_dl_dz;
-	PTensor mask = layer->t_dropout_mask;
-	int nodes = layer->node_count;
+	real *dl_dz = layer->t_batch_dl_dz->values;
+	real *A = layer->t_batch_values->values;
+	const real *mask = layer->t_dropout_mask->values;
+	int total = batch_size * layer->node_count;
 	
-	// Element-wise multiply gradient by dropout mask
-	// (mask contains 0 for dropped neurons, scale for kept neurons)
-	for (int b = 0; b < batch_size; b++)
+	for (int i = 0; i < total; i++)
 	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			dl_dz->values[offset + n] *= mask->values[offset + n];
-		}
+		dl_dz[i] *= mask[i];
+		if (mask[i] != (real)0.0)
+			A[i] /= mask[i];
 	}
 }
 
@@ -1507,9 +1513,8 @@ static void optimize_adam(PNetwork pnet)
 	real beta2 = (real)0.999;
 	real epsilon = (real)1e-8;
 
-	pnet->train_iteration++;
-
-	// Bias correction factors
+	// Bias correction factors (train_iteration is advanced by the caller,
+	// once per batch, before the optimizer runs)
 	real bias_correction1 = (real)1.0 / ((real)1.0 - (real)pow(beta1, pnet->train_iteration));
 	real bias_correction2 = (real)1.0 / ((real)1.0 - (real)pow(beta2, pnet->train_iteration));
 
@@ -2005,11 +2010,6 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 #ifdef USE_GPU
 	// Check if GPU training is available (backend active + weights uploaded to GPU)
 	int use_gpu_training = gpu_uploaded(pnet);
-	if (use_gpu_training && uses_dropout(pnet))
-	{
-		ann_printf(pnet, "Dropout is not supported on the GPU; training on the CPU\n");
-		use_gpu_training = 0;
-	}
 	// init_weights() may have just randomized CPU weights; re-upload once so GPU
 	// training always starts from the same initialized parameters as CPU training.
 	if (use_gpu_training && g_gpu_backend->upload_network(pnet) != ERR_OK)
@@ -2072,6 +2072,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 			int gpu_done = 0;
 			if (use_gpu_training)
 			{
+				make_dropout_masks(pnet, actual_batch_size);
 				gpu_done = g_gpu_backend->train_batch(pnet, batch_targets, actual_batch_size, &loss);
 				if (!gpu_done)
 				{

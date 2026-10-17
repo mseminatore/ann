@@ -169,7 +169,8 @@ All optimizers work with GPU training:
 - **Unified memory**: On Apple Silicon, GPU and CPU share the same memory. Gradients are computed on GPU but directly accessible by CPU for inspection.
 - **Fallback**: If `ann_gpu_upload_network()` was never called, training uses the CPU path automatically.
 - **Weight sync**: `ann_train_network()` copies trained weights back to the CPU when it finishes. The online API (`ann_train_step()`) trains on the CPU and `ann_train_end()` re-uploads the weights.
-- **Dropout**: not implemented on the GPU; networks with dropout train on the CPU even when uploaded.
+- **Dropout**: runs on the GPU. Masks are drawn on the CPU with the same random sequence as CPU training, so GPU and CPU training drop the same neurons.
+- **Optimizer state**: momentum and Adam moments move between CPU and GPU with the weights, so online fine-tuning after GPU training (and GPU training after online training) continues where the other left off.
 
 ## Complete Example
 

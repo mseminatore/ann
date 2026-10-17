@@ -84,6 +84,9 @@ typedef struct {
     // Training: regularization
     id<MTLComputePipelineState> pso_l2_regularize;
     id<MTLComputePipelineState> pso_l1_regularize;
+    // Training: dropout
+    id<MTLComputePipelineState> pso_dropout_forward;
+    id<MTLComputePipelineState> pso_dropout_backward;
     int initialized;
     int training_buffers_ready;   // 1 once gpu_alloc_training_buffers() succeeds
     int training_batch_size;      // batch size for which training buffers are allocated
@@ -296,7 +299,23 @@ int tensor_metal_init(void)
         "    uint gid [[thread_position_in_grid]]) {\n"
         "    float wi = w[gid];\n"
         "    if (wi > 0.0f) w[gid] -= delta;\n"
-        "    else if (wi < 0.0f) w[gid] += delta; }\n";
+        "    else if (wi < 0.0f) w[gid] += delta; }\n"
+        // ----------------------------------------------------------------
+        // Dropout kernels (mask holds 0 or 1/(1-rate), drawn on the CPU)
+        // ----------------------------------------------------------------
+        "kernel void dropout_forward(\n"
+        "    device float *a [[buffer(0)]],\n"
+        "    device const float *mask [[buffer(1)]],\n"
+        "    uint gid [[thread_position_in_grid]]) {\n"
+        "    a[gid] *= mask[gid]; }\n"
+        "kernel void dropout_backward(\n"
+        "    device float *dl_dz [[buffer(0)]],\n"
+        "    device float *a [[buffer(1)]],\n"
+        "    device const float *mask [[buffer(2)]],\n"
+        "    uint gid [[thread_position_in_grid]]) {\n"
+        "    float m = mask[gid];\n"
+        "    dl_dz[gid] *= m;\n"
+        "    if (m != 0.0f) a[gid] /= m; }\n";
 
     NSError *err = nil;
     NSString *src = [NSString stringWithUTF8String:kShaderSource];
@@ -336,6 +355,8 @@ int tensor_metal_init(void)
     g_metal.pso_adam_update      = make_pso(g_metal.library, "adam_update");
     g_metal.pso_l2_regularize    = make_pso(g_metal.library, "l2_regularize");
     g_metal.pso_l1_regularize    = make_pso(g_metal.library, "l1_regularize");
+    g_metal.pso_dropout_forward  = make_pso(g_metal.library, "dropout_forward");
+    g_metal.pso_dropout_backward = make_pso(g_metal.library, "dropout_backward");
 
     if (!g_metal.pso_deriv_sigmoid || !g_metal.pso_deriv_relu   ||
         !g_metal.pso_deriv_leaky_relu || !g_metal.pso_deriv_tanh ||
@@ -343,7 +364,8 @@ int tensor_metal_init(void)
         !g_metal.pso_gradient_clip  || !g_metal.pso_sgd_update   ||
         !g_metal.pso_momentum_update || !g_metal.pso_adagrad_update ||
         !g_metal.pso_rmsprop_update || !g_metal.pso_adam_update  ||
-        !g_metal.pso_l2_regularize  || !g_metal.pso_l1_regularize)
+        !g_metal.pso_l2_regularize  || !g_metal.pso_l1_regularize ||
+        !g_metal.pso_dropout_forward || !g_metal.pso_dropout_backward)
         return 0;
 
     g_metal.initialized = 1;
@@ -777,6 +799,32 @@ static int gpu_ensure_shared_buf(PTensor t)
 }
 
 //-----------------------------------------------------------
+// Ensure a shared GPU buffer and fill it with the tensor's CPU values.
+//-----------------------------------------------------------
+static int gpu_upload_shared_buf(PTensor t)
+{
+    if (!gpu_ensure_shared_buf(t)) return 0;
+    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)t->gpu_buf;
+    memcpy([buf contents], t->values, (size_t)(t->rows * t->cols) * sizeof(real));
+    return 1;
+}
+
+//-----------------------------------------------------------
+// The dropout mask for a hidden layer in this batch, copied to the GPU.
+// ann.c draws the masks before each batch. Returns nil when the layer
+// does not use dropout.
+//-----------------------------------------------------------
+static id<MTLBuffer> gpu_dropout_mask(PNetwork pnet, PLayer l, int batch_size)
+{
+    PTensor m = l->t_dropout_mask;
+    if (!pnet->is_training || l->dropout_rate <= 0.0f || !m ||
+        m->rows != batch_size || m->cols != l->node_count)
+        return nil;
+    if (!gpu_upload_shared_buf(m)) return nil;
+    return (__bridge id<MTLBuffer>)m->gpu_buf;
+}
+
+//-----------------------------------------------------------
 // Allocate GPU buffers for all training tensors.
 // Weights/biases already have gpu_buf from ann_gpu_upload_network().
 // This function adds gpu_buf to all training-time tensors.
@@ -800,11 +848,12 @@ static int gpu_alloc_training_buffers(PNetwork pnet, int batch_size)
             // Weight-carrying layers: gradients, optimizer state
             if (!l->t_gradients || !gpu_ensure_shared_buf(l->t_gradients)) return 0;
             if (!l->t_bias_grad  || !gpu_ensure_shared_buf(l->t_bias_grad))  return 0;
-            // Optimizer state (may be NULL for SGD which doesn't use them)
-            if (l->t_m     && !gpu_ensure_shared_buf(l->t_m))     return 0;
-            if (l->t_v     && !gpu_ensure_shared_buf(l->t_v))     return 0;
-            if (l->t_bias_m && !gpu_ensure_shared_buf(l->t_bias_m)) return 0;
-            if (l->t_bias_v && !gpu_ensure_shared_buf(l->t_bias_v)) return 0;
+            // Optimizer state (may be NULL for SGD which doesn't use them),
+            // carried over from the CPU so training continues where it left off
+            if (l->t_m     && !gpu_upload_shared_buf(l->t_m))     return 0;
+            if (l->t_v     && !gpu_upload_shared_buf(l->t_v))     return 0;
+            if (l->t_bias_m && !gpu_upload_shared_buf(l->t_bias_m)) return 0;
+            if (l->t_bias_v && !gpu_upload_shared_buf(l->t_bias_v)) return 0;
         }
     }
 
@@ -928,6 +977,14 @@ static int gpu_forward_training(PNetwork pnet, int batch_size)
                 dispatch_activation(cmd, pso, Y_buf, (NSUInteger)(batch_size * out_nodes));
         }
 
+        // --- Dropout (hidden layers only) ---
+        if (layer + 1 < pnet->layer_count - 1) {
+            id<MTLBuffer> mask_buf = gpu_dropout_mask(pnet, dst, batch_size);
+            if (mask_buf)
+                dispatch_binary_elementwise(cmd, g_metal.pso_dropout_forward, Y_buf, mask_buf,
+                                            (NSUInteger)(batch_size * out_nodes));
+        }
+
         [cmd commit];
         [cmd waitUntilCompleted];
     }
@@ -974,13 +1031,30 @@ static int gpu_backward_pass(PNetwork pnet, int batch_size)
         int skip_output_derivative = is_output_layer;
         if (!skip_output_derivative) {
             id<MTLComputePipelineState> pso_d = pso_for_deriv(layer->activation);
-            if (pso_d) {
-                // Use Z (pre-activation) for ReLU/LeakyReLU, A (post-activation) for others
-                id<MTLBuffer> src_buf = (layer->activation == ACTIVATION_RELU ||
-                                         layer->activation == ACTIVATION_LEAKY_RELU)
-                                        ? Z_buf : A_buf;
+            id<MTLBuffer> mask_buf = gpu_dropout_mask(pnet, layer, batch_size);
+            if (pso_d || mask_buf) {
                 id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-                dispatch_binary_elementwise(cmd, pso_d, dl_dz_buf, src_buf, elem_count);
+
+                // Undo dropout: mask the gradient and restore pre-dropout activations
+                if (mask_buf) {
+                    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                    [enc setComputePipelineState:g_metal.pso_dropout_backward];
+                    [enc setBuffer:dl_dz_buf offset:0 atIndex:0];
+                    [enc setBuffer:A_buf     offset:0 atIndex:1];
+                    [enc setBuffer:mask_buf  offset:0 atIndex:2];
+                    NSUInteger tg = MIN(g_metal.pso_dropout_backward.maxTotalThreadsPerThreadgroup, elem_count);
+                    [enc dispatchThreads:MTLSizeMake(elem_count, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+                    [enc endEncoding];
+                }
+
+                if (pso_d) {
+                    // Use Z (pre-activation) for ReLU/LeakyReLU, A (post-activation) for others
+                    id<MTLBuffer> src_buf = (layer->activation == ACTIVATION_RELU ||
+                                             layer->activation == ACTIVATION_LEAKY_RELU)
+                                            ? Z_buf : A_buf;
+                    dispatch_binary_elementwise(cmd, pso_d, dl_dz_buf, src_buf, elem_count);
+                }
                 [cmd commit];
                 [cmd waitUntilCompleted];
             }
@@ -1380,6 +1454,16 @@ static void metal_sync_weights(PNetwork pnet)
             id<MTLBuffer> buf = (__bridge id<MTLBuffer>)l->t_bias->gpu_buf;
             size_t bytes = (size_t)(l->t_bias->cols) * sizeof(real);
             memcpy(l->t_bias->values, [buf contents], bytes);
+        }
+
+        // Optimizer state, so CPU (online) training continues where the GPU stopped
+        PTensor state[4] = { l->t_m, l->t_v, l->t_bias_m, l->t_bias_v };
+        for (int i = 0; i < 4; i++) {
+            if (state[i] && state[i]->gpu_buf) {
+                id<MTLBuffer> buf = (__bridge id<MTLBuffer>)state[i]->gpu_buf;
+                memcpy(state[i]->values, [buf contents],
+                       (size_t)(state[i]->rows * state[i]->cols) * sizeof(real));
+            }
         }
     }
 }

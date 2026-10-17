@@ -89,6 +89,10 @@ __global__ void cuda_l1_regularize(float *weights, float l1_scale, int n);
 __global__ void cuda_xent_delta_loss(const float *Y, const float *T, float *delta, float *loss, int n);
 __global__ void cuda_mse_delta_loss(const float *Y, const float *T, float *delta, float *loss, int n);
 
+// Dropout (one thread per element). mask holds 0 or 1/(1-rate).
+__global__ void cuda_dropout_forward(float *a, const float *mask, int n);
+__global__ void cuda_dropout_backward(float *dl_dz, float *a, const float *mask, int n);
+
 #ifdef __cplusplus
 }
 #endif

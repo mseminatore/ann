@@ -67,6 +67,62 @@ static int gc_gpu_matches_cpu(PNetwork net)
     return 1;
 }
 
+// Network with dropout on two hidden layers: sigmoid (derivative uses the
+// activation) and ReLU (derivative uses the pre-activation)
+static PNetwork gc_make_dropout_net(void)
+{
+    PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+    if (!net) return NULL;
+
+    ann_add_layer(net, 2, LAYER_INPUT,  ACTIVATION_NULL);
+    ann_add_layer(net, 8, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+    ann_add_layer(net, 6, LAYER_HIDDEN, ACTIVATION_RELU);
+    ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+    ann_set_learning_rate(net, 0.05f);
+    ann_set_convergence(net, 1e-6f);  // run every epoch
+    ann_set_epoch_limit(net, 20);
+    ann_set_dropout(net, 0.3f);
+    return net;
+}
+
+static int gc_tensors_close(PTensor a, PTensor b, real tol)
+{
+    if (!a || !b) return a == b;
+    int n = a->rows * a->cols;
+    for (int i = 0; i < n; i++) {
+        real d = a->values[i] - b->values[i];
+        if (d < 0) d = -d;
+        if (d > tol) return 0;
+    }
+    return 1;
+}
+
+// Compare weights and biases, plus Adam state when with_state is set
+static int gc_nets_close(PNetwork a, PNetwork b, real tol, int with_state)
+{
+    for (int l = 0; l < a->layer_count - 1; l++) {
+        PLayer la = &a->layers[l], lb = &b->layers[l];
+        if (!gc_tensors_close(la->t_weights, lb->t_weights, tol) ||
+            !gc_tensors_close(la->t_bias, lb->t_bias, tol))
+            return 0;
+        if (with_state &&
+            (!gc_tensors_close(la->t_m, lb->t_m, tol) || !gc_tensors_close(la->t_v, lb->t_v, tol) ||
+             !gc_tensors_close(la->t_bias_m, lb->t_bias_m, tol) ||
+             !gc_tensors_close(la->t_bias_v, lb->t_bias_v, tol)))
+            return 0;
+    }
+    return 1;
+}
+
+static void gc_online_steps(PNetwork net)
+{
+    srand(99);
+    ann_train_begin(net);
+    for (int step = 0; step < 20; step++)
+        ann_train_step(net, &gc_xor_in[(step % 4) * 2], &gc_xor_out[step % 4], 1);
+    ann_train_end(net);
+}
+
 static void run_gpu_consistency_tests(void)
 {
     // ========================================================================
@@ -81,17 +137,48 @@ static void run_gpu_consistency_tests(void)
     ann_free_network(net);
 
     // ========================================================================
-    SUITE("GPU/CPU Weight Consistency - Dropout");
+    SUITE("GPU Dropout and Optimizer State");
     // ========================================================================
 
-    net = gc_make_net(0.5f);
-    ann_gpu_upload_network(net);
-    gc_train(net);
-    TESTEX("Dropout network trains on the CPU path (dropout mask allocated)",
-           (net->layers[1].t_dropout_mask != NULL));
-    TESTEX("After CPU dropout training, the GPU copy matches the CPU weights",
-           gc_gpu_matches_cpu(net));
-    ann_free_network(net);
+    // Same seed, same network: one trained on the CPU, one on the GPU
+    PNetwork cpu_net = gc_make_dropout_net();
+    PNetwork gpu_net = gc_make_dropout_net();
+    ann_gpu_upload_network(gpu_net);
+
+    srand(1234);
+    gc_train(cpu_net);
+    srand(1234);
+    gc_train(gpu_net);
+
+    TESTEX("Dropout network trains on the GPU (mask uploaded)",
+           (gpu_net->layers[1].t_dropout_mask && gpu_net->layers[1].t_dropout_mask->gpu_buf));
+    TESTEX("GPU dropout training matches CPU dropout training",
+           gc_nets_close(cpu_net, gpu_net, 1e-3f, 0));
+
+    int moments_nonzero = 0;
+    for (int i = 0; i < gpu_net->layers[0].t_m->rows * gpu_net->layers[0].t_m->cols; i++)
+        if (gpu_net->layers[0].t_m->values[i] != 0.0f) moments_nonzero = 1;
+    TESTEX("Adam moments come back from the GPU after training", moments_nonzero);
+    TESTEX("GPU Adam moments match CPU training", gc_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+    TESTEX("After GPU dropout training, the GPU copy matches the CPU weights",
+           gc_gpu_matches_cpu(gpu_net));
+
+    // Online fine-tuning continues from the GPU's optimizer state
+    gc_online_steps(cpu_net);
+    gc_online_steps(gpu_net);
+    TESTEX("Online training after GPU training matches the CPU-only network",
+           gc_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+
+    // A second ann_train_network() starts from the CPU's (online-updated) state
+    srand(4321);
+    gc_train(cpu_net);
+    srand(4321);
+    gc_train(gpu_net);
+    TESTEX("GPU training after online training matches the CPU-only network",
+           gc_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+
+    ann_free_network(cpu_net);
+    ann_free_network(gpu_net);
 
     // ========================================================================
     SUITE("GPU/CPU Weight Consistency - Online Training");

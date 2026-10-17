@@ -287,4 +287,26 @@ extern "C" __global__ void cuda_mse_delta_loss(
     }
 }
 
+// Dropout forward: a *= mask (mask holds 0 or 1/(1-rate), drawn on the host)
+extern "C" __global__ void cuda_dropout_forward(float *a, const float *mask, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+        a[i] *= mask[i];
+}
+
+// Dropout backward: mask the gradient and restore kept activations to their
+// pre-dropout values so the activation derivative is evaluated correctly
+extern "C" __global__ void cuda_dropout_backward(float *dl_dz, float *a, const float *mask, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        float m = mask[i];
+        dl_dz[i] *= m;
+        if (m != 0.0f)
+            a[i] /= m;
+    }
+}
+
 #endif /* USE_CUDA */

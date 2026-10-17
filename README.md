@@ -492,8 +492,7 @@ overhead across many samples.
 > Note: GPU training pays off for networks with 128+ node hidden layers and
 > datasets of 1,000+ samples, where it is roughly 5–7× faster than the CPU on
 > Apple Silicon. For tiny networks the GPU setup cost dominates and the CPU is
-> faster. The online training API (`ann_train_step()`) always runs on the CPU,
-> and so does training with dropout enabled.
+> faster. The online training API (`ann_train_step()`) always runs on the CPU.
 > The GPU backends support only the default `real = float` build.
 
 See [docs/GPU_INFERENCE.md](docs/GPU_INFERENCE.md) (Metal),

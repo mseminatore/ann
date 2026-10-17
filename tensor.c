@@ -75,7 +75,7 @@
 //
 // 5. I/O (Persistence and debugging):
 //    - tensor_print: Console output with formatting
-//    - tensor_save_to_file: Binary format
+//    - tensor_save_to_file: comma-separated text, one row per line
 //    - tensor_load_from_file: Binary restore with validation
 //    - tensor_sum_squared: Compute ||x||^2 (used in loss calculations)
 //
@@ -708,7 +708,7 @@ PTensor tensor_div(const PTensor a, const PTensor b)
 		return NULL;
 	}
 
-	if (a->cols != b->cols || b->rows != 1)
+	if (a->rows != b->rows || a->cols != b->cols)
 	{
 		return NULL;
 	}
@@ -731,9 +731,18 @@ PTensor tensor_max(const PTensor t)
 	if (!t)
 		return NULL;
 
-	PTensor r = tensor_zeros(1, t->cols);
+	if (t->rows < 1)
+		return NULL;
 
-	for (int row = 0; row < t->rows; row++)
+	PTensor r = tensor_create(1, t->cols);
+	if (!r)
+		return NULL;
+
+	// start from the first row so all-negative columns are handled
+	for (int col = 0; col < t->cols; col++)
+		r->values[col] = t->values[col];
+
+	for (int row = 1; row < t->rows; row++)
 	{
 		for (int col = 0; col < t->cols; col++)
 		{

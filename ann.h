@@ -161,7 +161,6 @@ typedef struct Layer *PLayer;
 //-----------------------------------------------
 // function pointers for Network
 //-----------------------------------------------
-typedef real(*Loss_func) (PNetwork pnet, PTensor outputs);
 typedef void(*Output_func) (const char *);
 typedef void(*Optimization_func) (PNetwork pnet);
 typedef real(*Activation_func) (real);
@@ -244,7 +243,6 @@ struct Network
 	real l2_lambda;						// L2 regularization (weight decay) coefficient (0 = disabled)
 	real l1_lambda;						// L1 regularization (LASSO) coefficient (0 = disabled)
 
-	Loss_func loss_func;				// the error function
 	Output_func print_func;				// print output function
 	Optimization_func optimize_func;	// learning rate/weight optimizer
 

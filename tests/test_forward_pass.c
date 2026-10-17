@@ -1,8 +1,109 @@
+//-----------------------------------------------------------
+// Forward pass correctness.
+//
+// Networks get fixed weights and their outputs are compared with a forward
+// pass computed independently here, in double precision, for every
+// activation. Also checks ann_predict_batch() against ann_predict().
+//-----------------------------------------------------------
+
 #include <stdio.h>
 #include <math.h>
 #include "ann.h"
 #include "tensor.h"
 #include "testy/test.h"
+
+#define FP_TOL 1e-5
+
+static double fp_activate(Activation_type act, double z)
+{
+    switch (act) {
+        case ACTIVATION_SIGMOID:    return 1.0 / (1.0 + exp(-z));
+        case ACTIVATION_RELU:       return z > 0.0 ? z : 0.0;
+        case ACTIVATION_LEAKY_RELU: return z > 0.0 ? z : 0.01 * z;
+        case ACTIVATION_TANH:       return tanh(z);
+        case ACTIVATION_SOFTSIGN:   return z / (1.0 + fabs(z));
+        default:                    return z;
+    }
+}
+
+// 3 -> 4 (hidden_act) -> 2 (output_act) with fixed weights. Untrained
+// networks have no initialized weights, so they are set explicitly.
+static PNetwork fp_make_net(Activation_type hidden_act, Activation_type output_act)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    if (!net) return NULL;
+
+    ann_add_layer(net, 3, LAYER_INPUT,  ACTIVATION_NULL);
+    ann_add_layer(net, 4, LAYER_HIDDEN, hidden_act);
+    ann_add_layer(net, 2, LAYER_OUTPUT, output_act);
+
+    for (int l = 0; l < net->layer_count - 1; l++) {
+        PTensor w = net->layers[l].t_weights, b = net->layers[l].t_bias;
+        for (int i = 0; i < w->rows * w->cols; i++)
+            w->values[i] = 0.8f * (real)sin(1.3 * i + l);
+        for (int i = 0; i < b->cols; i++)
+            b->values[i] = 0.2f * (real)cos(0.7 * i + l);
+    }
+    return net;
+}
+
+// Reference forward pass: y = act(W x + b) per layer, softmax on the output
+static void fp_reference(PNetwork net, const real *x, double *out)
+{
+    double a[8], next[8];
+    int n = net->layers[0].node_count;
+    for (int i = 0; i < n; i++) a[i] = x[i];
+
+    for (int l = 0; l < net->layer_count - 1; l++) {
+        PTensor w = net->layers[l].t_weights, b = net->layers[l].t_bias;
+        Activation_type act = net->layers[l + 1].activation;
+        int m = net->layers[l + 1].node_count;
+
+        for (int r = 0; r < m; r++) {
+            double z = b->values[r];
+            for (int c = 0; c < n; c++)
+                z += (double)w->values[r * n + c] * a[c];
+            next[r] = z;
+        }
+        if (act == ACTIVATION_SOFTMAX) {
+            double mx = next[0], sum = 0.0;
+            for (int r = 1; r < m; r++) if (next[r] > mx) mx = next[r];
+            for (int r = 0; r < m; r++) sum += exp(next[r] - mx);
+            for (int r = 0; r < m; r++) next[r] = exp(next[r] - mx) / sum;
+        } else {
+            for (int r = 0; r < m; r++) next[r] = fp_activate(act, next[r]);
+        }
+        for (int r = 0; r < m; r++) a[r] = next[r];
+        n = m;
+    }
+    for (int i = 0; i < n; i++) out[i] = a[i];
+}
+
+static const real fp_inputs[4][3] = {
+    { 0.5f, -0.3f,  0.8f},
+    {-1.2f,  0.4f,  0.0f},
+    { 2.0f,  1.5f, -0.7f},
+    { 0.0f,  0.0f,  0.0f},
+};
+
+// Does ann_predict match the reference for every test input?
+static int fp_matches(Activation_type hidden_act, Activation_type output_act)
+{
+    PNetwork net = fp_make_net(hidden_act, output_act);
+    if (!net) return 0;
+
+    int ok = 1;
+    for (int s = 0; s < 4; s++) {
+        real y[2];
+        double expect[2];
+        if (ann_predict(net, fp_inputs[s], y) != ERR_OK) ok = 0;
+        fp_reference(net, fp_inputs[s], expect);
+        for (int i = 0; i < 2; i++)
+            if (fabs(y[i] - expect[i]) > FP_TOL) ok = 0;
+    }
+    ann_free_network(net);
+    return ok;
+}
 
 void test_main(int argc, char* argv[])
 {
@@ -11,113 +112,58 @@ void test_main(int argc, char* argv[])
 
     MODULE("Forward Pass Correctness");
 
-    SUITE("Single Input");
+    SUITE("ann_predict() Matches Reference Forward Pass");
+    TESTEX("Sigmoid hidden layer",    fp_matches(ACTIVATION_SIGMOID,    ACTIVATION_NULL));
+    TESTEX("ReLU hidden layer",       fp_matches(ACTIVATION_RELU,       ACTIVATION_NULL));
+    TESTEX("Leaky ReLU hidden layer", fp_matches(ACTIVATION_LEAKY_RELU, ACTIVATION_NULL));
+    TESTEX("Tanh hidden layer",       fp_matches(ACTIVATION_TANH,       ACTIVATION_NULL));
+    TESTEX("Softsign hidden layer",   fp_matches(ACTIVATION_SOFTSIGN,   ACTIVATION_NULL));
+    TESTEX("Sigmoid output layer",    fp_matches(ACTIVATION_RELU,       ACTIVATION_SIGMOID));
+    TESTEX("Softmax output layer",    fp_matches(ACTIVATION_TANH,       ACTIVATION_SOFTMAX));
+
+    SUITE("Softmax Output Properties");
     {
-        PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
-        ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
-        
-        real input[2] = {0.5f, -0.3f};
-        real output[1];
-        
-        int err = ann_predict(net, input, output);
-        TESTEX("Prediction succeeds", err == 0);
-        TESTEX("Output in sigmoid range", output[0] >= 0.0f && output[0] <= 1.0f);
-        TESTEX("Output not NaN", !isnan(output[0]));
-        
+        PNetwork net = fp_make_net(ACTIVATION_RELU, ACTIVATION_SOFTMAX);
+        real y[2];
+        ann_predict(net, fp_inputs[2], y);
+        TESTEX("Softmax outputs sum to 1", fabs(y[0] + y[1] - 1.0) < FP_TOL);
+        TESTEX("Softmax outputs are probabilities",
+               (y[0] > 0.0f && y[0] < 1.0f && y[1] > 0.0f && y[1] < 1.0f));
         ann_free_network(net);
     }
 
-    SUITE("Multi-Layer Forward Pass");
+    SUITE("ann_predict_batch() (CPU) Matches ann_predict()");
     {
-        PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
-        ann_add_layer(net, 3, LAYER_HIDDEN, ACTIVATION_SIGMOID);
-        ann_add_layer(net, 2, LAYER_HIDDEN, ACTIVATION_RELU);
-        ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
-        
-        TESTEX("Network has 3 layers", net->layer_count == 3);
-        
-        real input[] = {0.5f, -0.2f};
-        real output[1];
-        int err = ann_predict(net, input, output);
-        TESTEX("Multi-layer prediction succeeds", err == 0);
-        TESTEX("Output valid", output[0] >= 0.0f && output[0] <= 1.0f);
-        
-        ann_free_network(net);
-    }
+        PNetwork net = fp_make_net(ACTIVATION_TANH, ACTIVATION_SOFTMAX);
+        real batch_in[4 * 3], batch_out[4 * 2];
+        for (int s = 0; s < 4; s++)
+            for (int i = 0; i < 3; i++)
+                batch_in[s * 3 + i] = fp_inputs[s][i];
 
-    SUITE("Activation Functions");
-    {
-        // Sigmoid
-        PNetwork net_sig = ann_make_network(OPT_SGD, LOSS_MSE);
-        ann_add_layer(net_sig, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
-        real input1[] = {1.0f};
-        real out_sig[1];
-        ann_predict(net_sig, input1, out_sig);
-        TESTEX("Sigmoid in range", out_sig[0] > 0.0f && out_sig[0] < 1.0f);
-        ann_free_network(net_sig);
-        
-        // ReLU
-        PNetwork net_relu = ann_make_network(OPT_SGD, LOSS_MSE);
-        ann_add_layer(net_relu, 1, LAYER_OUTPUT, ACTIVATION_RELU);
-        real out_relu[1];
-        ann_predict(net_relu, input1, out_relu);
-        TESTEX("ReLU non-negative", out_relu[0] >= 0.0f);
-        ann_free_network(net_relu);
-        
-        // Leaky ReLU
-        PNetwork net_lrelu = ann_make_network(OPT_SGD, LOSS_MSE);
-        ann_add_layer(net_lrelu, 1, LAYER_OUTPUT, ACTIVATION_LEAKY_RELU);
-        real out_lrelu[1];
-        ann_predict(net_lrelu, input1, out_lrelu);
-        TESTEX("Leaky ReLU output valid", !isnan(out_lrelu[0]) && !isinf(out_lrelu[0]));
-        ann_free_network(net_lrelu);
-    }
+        TESTEX("ann_predict_batch() returns ERR_OK",
+               (ann_predict_batch(net, batch_in, batch_out, 4) == ERR_OK));
 
-    SUITE("Forward Pass Consistency");
-    {
-        PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
-        ann_add_layer(net, 2, LAYER_HIDDEN, ACTIVATION_SIGMOID);
-        ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
-        
-        real input[] = {0.3f, 0.7f};
-        real out1[1], out2[1], out3[1];
-        
-        ann_predict(net, input, out1);
-        ann_predict(net, input, out2);
-        ann_predict(net, input, out3);
-        
-        real diff12 = fabs(out1[0] - out2[0]);
-        real diff23 = fabs(out2[0] - out3[0]);
-        TESTEX("Consistent predictions", diff12 < 1e-5f && diff23 < 1e-5f);
-        
+        int same = 1;
+        for (int s = 0; s < 4; s++) {
+            real y[2];
+            ann_predict(net, fp_inputs[s], y);
+            if (fabs(y[0] - batch_out[s * 2]) > FP_TOL ||
+                fabs(y[1] - batch_out[s * 2 + 1]) > FP_TOL)
+                same = 0;
+        }
+        TESTEX("Batch outputs match single-sample outputs", same);
         ann_free_network(net);
     }
 
     SUITE("Boundary Conditions");
     {
-        PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
-        ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
-        
-        // Zero input
-        real zero_in[] = {0.0f};
-        real zero_out[1];
-        ann_predict(net, zero_in, zero_out);
-        TESTEX("Zero input handled", !isnan(zero_out[0]));
-        
-        // Large positive
-        real large_in[] = {50.0f};
-        real large_out[1];
-        ann_predict(net, large_in, large_out);
-        TESTEX("Large positive handled", large_out[0] > 0.5f);
-        
-        // Large negative
-        real neg_in[] = {-50.0f};
-        real neg_out[1];
-        ann_predict(net, neg_in, neg_out);
-        TESTEX("Large negative handled", neg_out[0] < 0.5f);
-        
+        PNetwork net = fp_make_net(ACTIVATION_SIGMOID, ACTIVATION_SOFTMAX);
+        real big[3] = {80.0f, -80.0f, 80.0f}, y[2];
+        ann_predict(net, big, y);
+        TESTEX("Large inputs give finite outputs",
+               (!isnan(y[0]) && !isinf(y[0]) && !isnan(y[1]) && !isinf(y[1])));
+        TESTEX("ann_predict(NULL net) returns ERR_NULL_PTR",
+               (ann_predict(NULL, big, y) == ERR_NULL_PTR));
         ann_free_network(net);
     }
-
-    TESTEX("Forward pass tests completed", 1);
 }

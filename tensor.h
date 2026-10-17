@@ -370,11 +370,11 @@ ANN_API real tensor_get_element(const PTensor t, int row, int col);
 ANN_API void tensor_set_element(PTensor t, int row, int col, real val);
 
 /**
- * Create new tensor from specified rows (bottom rows of input).
- * Returns rows from index 'rows' to end of tensor.
- * @param t Input tensor
- * @param rows Number of rows to remove from top
- * @return New tensor containing rows [rows..t->rows)
+ * Split a tensor by rows: returns a new tensor holding rows [rows..t->rows),
+ * and shrinks t in place so it keeps only rows [0..rows).
+ * @param t Input tensor (truncated in place)
+ * @param rows Index of the first row moved to the new tensor
+ * @return New tensor containing rows [rows..t->rows), or NULL on error
  */
 ANN_API PTensor tensor_slice_rows(const PTensor t, int rows);
 

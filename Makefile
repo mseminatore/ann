@@ -28,7 +28,7 @@ LFLAGS += -L/opt/OpenBLAS/lib/ -lopenblas
 #-DMKL_ILP64  -m64  -I"${MKLROOT}/include"
 #LFLAGS = ${MKLROOT}/lib/libmkl_intel_ilp64.a ${MKLROOT}/lib/libmkl_tbb_thread.a ${MKLROOT}/lib/libmkl_core.a -L${TBBROOT}/lib -ltbb -lc++ -lpthread -lm -ldl
 
-all: $(LIBANN) mnist mnist_hypertune logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json
+all: $(LIBANN) mnist mnist_hypertune logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json test_gradients test_comprehensive_callbacks
 
 # build the static library
 $(LIBANN): $(LIB_OBJS)
@@ -102,6 +102,12 @@ test_hypertune: $(LIBANN) tests/test_hypertune.o testy/test_main.o
 test_json: $(LIBANN) tests/test_json.o testy/test_main.o
 	$(CC) -o $@ tests/test_json.o testy/test_main.o $(LIBANN) $(LFLAGS)
 
+test_gradients: $(LIBANN) tests/test_gradients.o testy/test_main.o
+	$(CC) -o $@ tests/test_gradients.o testy/test_main.o $(LIBANN) $(LFLAGS)
+
+test_comprehensive_callbacks: $(LIBANN) tests/test_comprehensive_callbacks.o testy/test_main.o
+	$(CC) -o $@ tests/test_comprehensive_callbacks.o testy/test_main.o $(LIBANN) $(LFLAGS)
+
 # implicit rules
 %.o: %.c $(DEPS)
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) $< -o $@
@@ -113,5 +119,5 @@ examples/%.o: examples/%.c $(DEPS)
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) -I. $< -o $@
 
 clean:
-	rm -f $(LIBANN) $(LIBANN_SO) $(LIB_OBJS) $(SHARED_OBJS) $(TARGET) logic digit5x7 mnist_hypertune save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json testy/test_main.o
+	rm -f $(LIBANN) $(LIBANN_SO) $(LIB_OBJS) $(SHARED_OBJS) $(TARGET) logic digit5x7 mnist_hypertune save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json test_gradients test_comprehensive_callbacks testy/test_main.o
 	rm -f tests/*.o examples/*.o

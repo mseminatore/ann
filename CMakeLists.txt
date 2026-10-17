@@ -28,7 +28,9 @@ add_test(NAME test_loss_functions COMMAND test_loss_functions)
 add_test(NAME test_save_load COMMAND test_save_load)
 add_test(NAME test_optimizers COMMAND test_optimizers)
 add_test(NAME test_hypertune COMMAND test_hypertune)
-#add_test(NAME test_forward_pass COMMAND test_forward_pass)
+add_test(NAME test_forward_pass COMMAND test_forward_pass)
+add_test(NAME test_gradients COMMAND test_gradients)
+add_test(NAME test_comprehensive_callbacks COMMAND test_comprehensive_callbacks)
 
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
@@ -236,5 +238,11 @@ if ( USE_METAL OR USE_CUDA )
     target_link_libraries(bench_gpu_training libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB} ${CUDA_LIBS})
 endif()
 
-#add_executable(test_forward_pass tests/test_forward_pass.c testy/test_main.c)
-#target_link_libraries(test_forward_pass ann ${BLAS_LIB} ${MATH_LIB})
+add_executable(test_forward_pass tests/test_forward_pass.c testy/test_main.c)
+target_link_libraries(test_forward_pass libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_gradients tests/test_gradients.c testy/test_main.c)
+target_link_libraries(test_gradients libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_comprehensive_callbacks tests/test_comprehensive_callbacks.c testy/test_main.c)
+target_link_libraries(test_comprehensive_callbacks libann ${BLAS_LIB} ${MATH_LIB})

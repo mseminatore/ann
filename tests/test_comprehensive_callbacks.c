@@ -1,87 +1,95 @@
+//-----------------------------------------------------------
+// Error callback coverage.
+//
+// Each public entry point below is called with bad arguments and must both
+// return an error code and invoke the installed error log callback exactly
+// once, reporting the same code.
+//-----------------------------------------------------------
+
 #include <stdio.h>
 #include <stdlib.h>
 #include "ann.h"
+#include "testy/test.h"
 
-// Global counters
 static int callback_count = 0;
 static int last_error_code = 0;
 static const char *last_function = NULL;
 
-void test_callback(int error_code, const char *error_message, const char *function_name) {
+static void test_callback(int error_code, const char *error_message, const char *function_name)
+{
+    (void)error_message;
     callback_count++;
     last_error_code = error_code;
     last_function = function_name;
-    printf("Callback #%d: %s() returned %s\n", 
-           callback_count, 
-           function_name, 
-           error_message);
 }
 
-int main(void) {
-    printf("=== Testing Comprehensive Error Callback Coverage ===\n\n");
-    
-    // Set up callback
+// Number of callbacks since the previous call
+static int callbacks_since(int *mark)
+{
+    int n = callback_count - *mark;
+    *mark = callback_count;
+    return n;
+}
+
+void test_main(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    MODULE("Error Callback Coverage");
+
     ann_set_error_log_callback(test_callback);
-    
-    // Test 1: ann_predict with NULL network
-    printf("Test 1: ann_predict with NULL network\n");
+    int mark = 0;
+
     real outputs[10];
-    real inputs[5] = {0.1, 0.2, 0.3, 0.4, 0.5};
-    ann_predict(NULL, inputs, outputs);
-    if (callback_count != 1) printf("  FAIL: Expected 1 callback, got %d\n", callback_count);
-    else printf("  PASS\n\n");
-    
-    // Test 2: ann_predict with NULL inputs
-    printf("Test 2: ann_predict with NULL inputs\n");
+    real inputs[5] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f};
     PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
     ann_add_layer(net, 5, LAYER_INPUT, ACTIVATION_NULL);
     ann_add_layer(net, 3, LAYER_HIDDEN, ACTIVATION_RELU);
-    ann_predict(net, NULL, outputs);
-    if (callback_count != 2) printf("  FAIL: Expected 2 callbacks, got %d\n", callback_count);
-    else printf("  PASS\n\n");
-    
-    // Test 3: ann_predict with invalid network (empty)
-    printf("Test 3: ann_predict with invalid network (layer_count = 0)\n");
-    PNetwork badnet = ann_make_network(OPT_SGD, LOSS_MSE);
-    ann_predict(badnet, inputs, outputs);
-    if (callback_count != 3) printf("  FAIL: Expected 3 callbacks, got %d\n", callback_count);
-    else printf("  PASS\n\n");
-    
-    // Test 4: ann_load_csv with NULL filename
-    printf("Test 4: ann_load_csv with NULL filename\n");
-    real *data;
-    int rows, stride;
-    ann_load_csv(NULL, 0, &data, &rows, &stride);
-    if (callback_count != 4) printf("  FAIL: Expected 4 callbacks, got %d\n", callback_count);
-    else printf("  PASS\n\n");
-    
-    // Test 5: ann_load_csv with non-existent file
-    printf("Test 5: ann_load_csv with non-existent file\n");
-    ann_load_csv("/nonexistent/file.csv", 0, &data, &rows, &stride);
-    if (callback_count != 5) printf("  FAIL: Expected 5 callbacks, got %d\n", callback_count);
-    else printf("  PASS\n\n");
-    
-    // Test 6: ann_save_network with NULL network
-    printf("Test 6: ann_save_network with NULL network\n");
-    ann_save_network(NULL, "/tmp/test.txt");
-    if (callback_count != 6) printf("  FAIL: Expected 6 callbacks, got %d\n", callback_count);
-    else printf("  PASS\n\n");
-    
-    // Test 7: ann_save_network_binary with NULL filename
-    printf("Test 7: ann_save_network_binary with NULL filename\n");
-    ann_save_network_binary(net, NULL);
-    if (callback_count != 7) printf("  FAIL: Expected 7 callbacks, got %d\n", callback_count);
-    else printf("  PASS\n\n");
-    
-    printf("=== Summary ===\n");
-    printf("Total callbacks invoked: %d\n", callback_count);
-    printf("All error points have callbacks: %s\n", 
-           callback_count >= 7 ? "YES" : "NO");
-    
-    // Cleanup
-    ann_free_network(net);
-    ann_free_network(badnet);
+    PNetwork empty_net = ann_make_network(OPT_SGD, LOSS_MSE);
+
+    SUITE("ann_predict()");
+    int rc = ann_predict(NULL, inputs, outputs);
+    TESTEX("NULL network returns ERR_NULL_PTR", (rc == ERR_NULL_PTR));
+    TESTEX("NULL network invokes the callback once", (callbacks_since(&mark) == 1));
+    TESTEX("Callback reports ERR_NULL_PTR", (last_error_code == ERR_NULL_PTR));
+    TESTEX("Callback names the function", (last_function != NULL));
+
+    rc = ann_predict(net, NULL, outputs);
+    TESTEX("NULL inputs returns ERR_NULL_PTR", (rc == ERR_NULL_PTR));
+    TESTEX("NULL inputs invokes the callback once", (callbacks_since(&mark) == 1));
+
+    rc = ann_predict(empty_net, inputs, outputs);
+    TESTEX("Network with no layers returns ERR_INVALID", (rc == ERR_INVALID));
+    TESTEX("Network with no layers invokes the callback once", (callbacks_since(&mark) == 1));
+    TESTEX("Callback reports ERR_INVALID", (last_error_code == ERR_INVALID));
+
+    SUITE("ann_load_csv()");
+    real *data = NULL;
+    int rows = 0, stride = 0;
+    rc = ann_load_csv(NULL, 0, &data, &rows, &stride);
+    TESTEX("NULL filename returns ERR_NULL_PTR", (rc == ERR_NULL_PTR));
+    TESTEX("NULL filename invokes the callback once", (callbacks_since(&mark) == 1));
+
+    rc = ann_load_csv("/nonexistent/file.csv", 0, &data, &rows, &stride);
+    TESTEX("Missing file returns ERR_IO", (rc == ERR_IO));
+    TESTEX("Missing file invokes the callback once", (callbacks_since(&mark) == 1));
+    TESTEX("Callback reports ERR_IO", (last_error_code == ERR_IO));
+
+    SUITE("ann_save_network() / ann_save_network_binary()");
+    rc = ann_save_network(NULL, "unused.nna");
+    TESTEX("NULL network returns ERR_NULL_PTR", (rc == ERR_NULL_PTR));
+    TESTEX("NULL network invokes the callback once", (callbacks_since(&mark) == 1));
+
+    rc = ann_save_network_binary(net, NULL);
+    TESTEX("NULL filename returns ERR_NULL_PTR", (rc == ERR_NULL_PTR));
+    TESTEX("NULL filename invokes the callback once", (callbacks_since(&mark) == 1));
+
+    SUITE("Callback Removal");
     ann_clear_error_log_callback();
-    
-    return callback_count >= 7 ? 0 : 1;
+    ann_predict(NULL, inputs, outputs);
+    TESTEX("No callback after ann_clear_error_log_callback()", (callbacks_since(&mark) == 0));
+
+    ann_free_network(net);
+    ann_free_network(empty_net);
 }

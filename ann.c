@@ -556,62 +556,6 @@ static void invoke_error_callback(int error_code, const char *function_name)
 	}
 }
 
-//--------------------------------
-// compute the mean squared error
-// MSE = (1/n) * sum((y_true - y_pred)^2)
-// Good for: Regression, continuous outputs
-// Sensitive to outliers due to squaring
-//--------------------------------
-static real compute_ms_error(PNetwork pnet, PTensor outputs)
-{
-	// get the output layer
-	PLayer poutput_layer = &pnet->layers[pnet->layer_count - 1];
-
-	if (poutput_layer->layer_type != LAYER_OUTPUT)
-	{
-		invoke_error_callback(ERR_INVALID, "compute_ms_error");
-		return (real)0.0;
-	}
-
-	real mse = (real)0.0, diff;
-
-	for (int i = 0; i < poutput_layer->node_count; i++)
-	{
-		diff = outputs->values[i] - poutput_layer->t_values->values[i];
-		mse += diff * diff;
-	}
-
-	return mse;
-}
-
-//---------------------------------------------
-// compute the categorical cross entropy error
-// CE = -sum(y_true * log(y_pred))
-// Good for: Multi-class classification
-// Works best with softmax activation and probability outputs
-// Penalizes confident wrong predictions heavily
-//---------------------------------------------
-static real compute_cross_entropy(PNetwork pnet, PTensor outputs)
-{
-	// get the output layer
-	PLayer poutput_layer = &pnet->layers[pnet->layer_count - 1];
-
-	if (poutput_layer->layer_type != LAYER_OUTPUT)
-	{
-		invoke_error_callback(ERR_INVALID, "compute_cross_entropy");
-		return (real)0.0;
-	}
-
-	real xe = (real)0.0;
-
-	for (int i = 0; i < poutput_layer->node_count; i++)
-	{
-		xe += (real)(outputs->values[i] * log(fmax(poutput_layer->t_values->values[i], (real)1e-7)));
-	}
-
-	return -xe;
-}
-
 //---------------------------------------------
 // forward evaluate the network
 //---------------------------------------------
@@ -2658,18 +2602,7 @@ void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
 	if (!pnet)
 		return;
 
-	switch (loss_type)
-	{
-	case LOSS_CATEGORICAL_CROSS_ENTROPY:
-		pnet->loss_func = compute_cross_entropy;
-		break;
-
-	default:
-	case LOSS_MSE:
-		pnet->loss_func = compute_ms_error;
-		break;
-	}
-
+	// The loss is computed during batched backprop, which reads loss_type
 	pnet->loss_type = loss_type;
 }
 

@@ -402,6 +402,159 @@ void test_main(int argc, char *argv[]) {
     }
 
     // ========================================================================
+    SUITE("Element-wise and Scalar Operations");
+    COMMENT("Testing add_scalar, sub, mul, div, heaviside...");
+    {
+        // Six elements exercise both the 4-way unrolled loop and its tail
+        real av[] = {1, 2, 3, 4, 5, 6};
+        real bv[] = {2, 4, 1, 8, 5, 3};
+
+        PTensor A = tensor_create_from_array(2, 3, av);
+        tensor_add_scalar(A, 0.5f);
+        real e_add[] = {1.5f, 2.5f, 3.5f, 4.5f, 5.5f, 6.5f};
+        PTensor E = tensor_create_from_array(2, 3, e_add);
+        TESTEX("tensor_add_scalar adds to every element", tensors_equal(A, E, 1e-6f));
+        tensor_free(A); tensor_free(E);
+
+        PTensor B = tensor_create_from_array(2, 3, bv);
+        A = tensor_create_from_array(2, 3, av);
+        real e_sub[] = {-1, -2, 2, -4, 0, 3};
+        E = tensor_create_from_array(2, 3, e_sub);
+        TESTEX("tensor_sub returns a", (tensor_sub(A, B) == A));
+        TESTEX("tensor_sub subtracts element-wise", tensors_equal(A, E, 1e-6f));
+        tensor_free(A); tensor_free(E);
+
+        A = tensor_create_from_array(2, 3, av);
+        real e_mul[] = {2, 8, 3, 32, 25, 18};
+        E = tensor_create_from_array(2, 3, e_mul);
+        TESTEX("tensor_mul returns a", (tensor_mul(A, B) == A));
+        TESTEX("tensor_mul multiplies element-wise", tensors_equal(A, E, 1e-6f));
+        tensor_free(A); tensor_free(E);
+
+        A = tensor_create_from_array(2, 3, av);
+        real e_div[] = {0.5f, 0.5f, 3, 0.5f, 1, 2};
+        E = tensor_create_from_array(2, 3, e_div);
+        TESTEX("tensor_div returns a for matching shapes", (tensor_div(A, B) == A));
+        TESTEX("tensor_div divides element-wise across all rows", tensors_equal(A, E, 1e-6f));
+        tensor_free(A); tensor_free(E);
+
+        PTensor R = tensor_create_from_array(1, 3, bv);
+        A = tensor_create_from_array(2, 3, av);
+        TESTEX("tensor_sub rejects mismatched shapes", (tensor_sub(A, R) == NULL));
+        TESTEX("tensor_mul rejects mismatched shapes", (tensor_mul(A, R) == NULL));
+        TESTEX("tensor_div rejects mismatched shapes", (tensor_div(A, R) == NULL));
+        tensor_free(A); tensor_free(R); tensor_free(B);
+
+        real hv[] = {-1.0f, 0.0f, 2.0f, 0.001f};
+        real e_h[] = {0, 0, 1, 1};
+        A = tensor_create_from_array(1, 4, hv);
+        E = tensor_create_from_array(1, 4, e_h);
+        tensor_heaviside(A);
+        TESTEX("tensor_heaviside is 1 for positive, 0 otherwise", tensors_equal(A, E, 0.0f));
+        tensor_free(A); tensor_free(E);
+    }
+
+    // ========================================================================
+    SUITE("Reductions");
+    COMMENT("Testing tensor_max and tensor_argmax...");
+    {
+        // Columns: mixed, all negative, max in the last row
+        real mv[] = { 1, -5,  0,
+                      7, -2,  3,
+                     -4, -9,  8};
+        PTensor M = tensor_create_from_array(3, 3, mv);
+
+        PTensor mx = tensor_max(M);
+        real e_max[] = {7, -2, 8};
+        PTensor E = tensor_create_from_array(1, 3, e_max);
+        TESTEX("tensor_max returns column maxima", (mx && tensors_equal(mx, E, 0.0f)));
+        TESTEX("tensor_max handles an all-negative column", (mx && mx->values[1] == -2.0f));
+        tensor_free(mx); tensor_free(E);
+
+        PTensor am = tensor_argmax(M);
+        real e_arg[] = {1, 1, 2};
+        E = tensor_create_from_array(1, 3, e_arg);
+        TESTEX("tensor_argmax returns the row of each column maximum",
+               (am && tensors_equal(am, E, 0.0f)));
+        tensor_free(am); tensor_free(E);
+        tensor_free(M);
+    }
+
+    // ========================================================================
+    SUITE("Outer Product");
+    COMMENT("Testing tensor_outer accumulation...");
+    {
+        real av[] = {1, 2};
+        real bv[] = {3, 4, 5, 6, 7};
+        PTensor a = tensor_create_from_array(1, 2, av);
+        PTensor b = tensor_create_from_array(1, 5, bv);
+        PTensor D = tensor_zeros(2, 5);
+
+        tensor_outer(1.0f, a, b, D);
+        real e1[] = {3, 4, 5, 6, 7,
+                     6, 8, 10, 12, 14};
+        PTensor E = tensor_create_from_array(2, 5, e1);
+        TESTEX("tensor_outer computes a * b^T", tensors_equal(D, E, 1e-6f));
+        tensor_free(E);
+
+        // alpha != 1 path, accumulating into the existing values
+        tensor_outer(0.5f, a, b, D);
+        real e2[] = {4.5f, 6, 7.5f, 9, 10.5f,
+                     9, 12, 15, 18, 21};
+        E = tensor_create_from_array(2, 5, e2);
+        TESTEX("tensor_outer accumulates alpha * a * b^T", tensors_equal(D, E, 1e-5f));
+        tensor_free(E);
+
+        PTensor bad = tensor_zeros(3, 5);
+        TESTEX("tensor_outer rejects a mismatched destination", (tensor_outer(1.0f, a, b, bad) == NULL));
+        tensor_free(bad);
+        tensor_free(a); tensor_free(b); tensor_free(D);
+    }
+
+    // ========================================================================
+    SUITE("Slicing, Random Fill and File Output");
+    COMMENT("Testing slice_rows, random_uniform and save_to_file...");
+    {
+        real sv[] = {1, 2, 3, 4, 5, 6, 7, 8};
+        PTensor T = tensor_create_from_array(4, 2, sv);
+        PTensor bottom = tensor_slice_rows(T, 1);
+        real e_bottom[] = {3, 4, 5, 6, 7, 8};
+        PTensor E = tensor_create_from_array(3, 2, e_bottom);
+        TESTEX("tensor_slice_rows returns the rows from the split point", (bottom && tensors_equal(bottom, E, 0.0f)));
+        TESTEX("tensor_slice_rows leaves the top rows in the input",
+               (T->rows == 1 && T->values[0] == 1.0f && T->values[1] == 2.0f));
+        tensor_free(E); tensor_free(bottom); tensor_free(T);
+
+        srand(7);
+        PTensor U = tensor_create_random_uniform(10, 10, -2.0f, 3.0f);
+        int in_range = (U != NULL && U->rows == 10 && U->cols == 10);
+        real lo = 1e9f, hi = -1e9f;
+        for (int i = 0; in_range && i < 100; i++) {
+            real v = U->values[i];
+            if (v < -2.0f || v > 3.0f) in_range = 0;
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        TESTEX("tensor_create_random_uniform fills [min, max]", in_range);
+        TESTEX("tensor_create_random_uniform spreads values across the range", (hi - lo > 2.5f));
+        tensor_free(U);
+
+        real fv[] = {1.5f, -2, 0.25f, 4};
+        PTensor F = tensor_create_from_array(2, 2, fv);
+        const char *path = "test_tensor_save.csv";
+        TESTEX("tensor_save_to_file returns 0", (tensor_save_to_file(F, path) == 0));
+        FILE *fp = fopen(path, "rt");
+        float r[4] = {0};
+        int read = fp ? fscanf(fp, "%f, %f %f, %f", &r[0], &r[1], &r[2], &r[3]) : 0;
+        if (fp) fclose(fp);
+        remove(path);
+        TESTEX("tensor_save_to_file writes comma-separated rows",
+               (read == 4 && r[0] == 1.5f && r[1] == -2.0f && r[2] == 0.25f && r[3] == 4.0f));
+        TESTEX("tensor_save_to_file rejects a NULL filename", (tensor_save_to_file(F, NULL) != 0));
+        tensor_free(F);
+    }
+
+    // ========================================================================
     // ERROR HANDLING TESTS
     // ========================================================================
     SUITE("Error Handling");

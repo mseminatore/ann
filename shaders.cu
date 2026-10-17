@@ -287,6 +287,23 @@ extern "C" __global__ void cuda_mse_delta_loss(
     }
 }
 
+// Softmax output with MSE: apply the softmax Jacobian to delta = T - Y, one
+// thread per row: delta_j = y_j * (delta_j - sum_i delta_i * y_i)
+extern "C" __global__ void cuda_softmax_mse_delta(float *delta, const float *Y, int batch, int cols)
+{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < batch)
+    {
+        float *d = delta + row * cols;
+        const float *y = Y + row * cols;
+        float dot = 0.0f;
+        for (int j = 0; j < cols; j++)
+            dot += d[j] * y[j];
+        for (int j = 0; j < cols; j++)
+            d[j] = y[j] * (d[j] - dot);
+    }
+}
+
 // Dropout forward: a *= mask (mask holds 0 or 1/(1-rate), drawn on the host)
 extern "C" __global__ void cuda_dropout_forward(float *a, const float *mask, int n)
 {

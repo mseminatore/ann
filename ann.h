@@ -864,8 +864,9 @@ typedef struct {
 } LRCosineParams;
 
 /**
- * Step decay scheduler: halves LR every step_size epochs.
- * new_lr = base_lr * (gamma ^ (epoch / step_size))
+ * Step decay scheduler: multiplies LR by gamma every step_size epochs.
+ * new_lr = base_lr * (gamma ^ ((epoch - 1) / step_size)), so the first
+ * step_size epochs run at base_lr. A step_size of 0 disables decay.
  * 
  * @param epoch Current epoch (1-based)
  * @param base_lr Initial learning rate
@@ -876,7 +877,7 @@ ANN_API real ann_lr_scheduler_step(unsigned epoch, real base_lr, void *user_data
 
 /**
  * Exponential decay scheduler: multiplies LR by gamma each epoch.
- * new_lr = base_lr * (gamma ^ epoch)
+ * new_lr = base_lr * (gamma ^ (epoch - 1)), so epoch 1 runs at base_lr.
  * 
  * @param epoch Current epoch (1-based)
  * @param base_lr Initial learning rate
@@ -888,6 +889,7 @@ ANN_API real ann_lr_scheduler_exponential(unsigned epoch, real base_lr, void *us
 /**
  * Cosine annealing scheduler: smooth decay to min_lr.
  * new_lr = min_lr + (base_lr - min_lr) * (1 + cos(pi * epoch / T_max)) / 2
+ * Epochs past T_max stay at min_lr. A T_max of 0 disables decay.
  * 
  * @param epoch Current epoch (1-based)
  * @param base_lr Initial learning rate

@@ -31,6 +31,7 @@ add_test(NAME test_hypertune COMMAND test_hypertune)
 add_test(NAME test_forward_pass COMMAND test_forward_pass)
 add_test(NAME test_gradients COMMAND test_gradients)
 add_test(NAME test_comprehensive_callbacks COMMAND test_comprehensive_callbacks)
+add_test(NAME test_training_options COMMAND test_training_options)
 
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
@@ -246,3 +247,6 @@ target_link_libraries(test_gradients libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_comprehensive_callbacks tests/test_comprehensive_callbacks.c testy/test_main.c)
 target_link_libraries(test_comprehensive_callbacks libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_training_options tests/test_training_options.c testy/test_main.c)
+target_link_libraries(test_training_options libann ${BLAS_LIB} ${MATH_LIB})

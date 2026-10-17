@@ -1,13 +1,14 @@
 //-----------------------------------------------------------
 // Gradient checks for backpropagation.
 //
-// For every hidden-layer activation, the gradient computed by backprop is
-// compared with a central finite difference of the loss. The network is
-// 3 -> 4 (act) -> 3 (act) -> 2 (linear), so the check covers the activation
-// derivative, propagation through two hidden layers, and all weights and
-// biases. The output layer is linear because backprop starts from
-// delta = T - Y, which is the exact gradient of L = 1/2 * sum((t - y)^2)
-// only for a linear output.
+// The gradient computed by backprop is compared with a central finite
+// difference of the loss, for every hidden-layer activation and every output
+// activation. The network is 3 -> 4 (hidden) -> 3 (hidden) -> 2 (output), so
+// the check covers the activation derivatives, propagation through two hidden
+// layers, and all weights and biases.
+//
+// Losses: MSE is L = 1/2 * sum((t - y)^2); cross-entropy is L = -sum(t * log(y))
+// with a softmax output and targets that sum to 1.
 //
 // The analytic gradient is read from one SGD step: W += lr * g, so
 // g = (W_after - W_before) / lr, and g should equal -dL/dW.
@@ -25,25 +26,27 @@
 #define GC_REL   2e-2f   // relative tolerance
 
 static const real gc_x[3] = {0.3f, -0.7f, 0.9f};
-static const real gc_t[2] = {0.2f, -0.4f};
+static const real gc_t[2] = {0.2f, 0.8f};   // sums to 1 for cross-entropy
 
 static real gc_loss(PNetwork net)
 {
     real y[2];
     ann_predict(net, gc_x, y);
+    if (net->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY)
+        return -(gc_t[0] * (real)log(y[0]) + gc_t[1] * (real)log(y[1]));
     real d0 = gc_t[0] - y[0], d1 = gc_t[1] - y[1];
     return 0.5f * (d0 * d0 + d1 * d1);
 }
 
-static PNetwork gc_make_net(Activation_type act)
+static PNetwork gc_make_net(Activation_type act, Activation_type out_act, Loss_type loss)
 {
-    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    PNetwork net = ann_make_network(OPT_SGD, loss);
     if (!net) return NULL;
 
     ann_add_layer(net, 3, LAYER_INPUT,  ACTIVATION_NULL);
     ann_add_layer(net, 4, LAYER_HIDDEN, act);
     ann_add_layer(net, 3, LAYER_HIDDEN, act);
-    ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_NULL);
+    ann_add_layer(net, 2, LAYER_OUTPUT, out_act);
     ann_set_learning_rate(net, GC_LR);
     ann_set_batch_size(net, 1);
 
@@ -62,9 +65,9 @@ static PNetwork gc_make_net(Activation_type act)
 
 // Largest scaled error between analytic and numeric gradients over every
 // weight and bias. Returns a value <= 1 when all are within tolerance.
-static real gc_check(Activation_type act)
+static real gc_check_net(Activation_type act, Activation_type out_act, Loss_type loss)
 {
-    PNetwork net = gc_make_net(act);
+    PNetwork net = gc_make_net(act, out_act, loss);
     if (!net) return 1e9f;
 
     // Numeric gradients: -dL/dp by central difference, for every parameter
@@ -116,6 +119,18 @@ static real gc_check(Activation_type act)
     return worst;
 }
 
+// Hidden-layer check: MSE with a linear output
+static real gc_check(Activation_type act)
+{
+    return gc_check_net(act, ACTIVATION_NULL, LOSS_MSE);
+}
+
+// Output-layer check: tanh hidden layers, the given output and loss
+static real gc_check_output(Activation_type out_act, Loss_type loss)
+{
+    return gc_check_net(ACTIVATION_TANH, out_act, loss);
+}
+
 void test_main(int argc, char *argv[])
 {
     (void)argc;
@@ -129,4 +144,14 @@ void test_main(int argc, char *argv[])
     TESTEX("Leaky ReLU hidden layers", (gc_check(ACTIVATION_LEAKY_RELU) <= 1.0f));
     TESTEX("Tanh hidden layers",       (gc_check(ACTIVATION_TANH)       <= 1.0f));
     TESTEX("Softsign hidden layers",   (gc_check(ACTIVATION_SOFTSIGN)   <= 1.0f));
+
+    SUITE("Output Layer Gradients");
+    TESTEX("MSE with sigmoid output",    (gc_check_output(ACTIVATION_SIGMOID,    LOSS_MSE) <= 1.0f));
+    TESTEX("MSE with tanh output",       (gc_check_output(ACTIVATION_TANH,       LOSS_MSE) <= 1.0f));
+    TESTEX("MSE with softsign output",   (gc_check_output(ACTIVATION_SOFTSIGN,   LOSS_MSE) <= 1.0f));
+    TESTEX("MSE with ReLU output",       (gc_check_output(ACTIVATION_RELU,       LOSS_MSE) <= 1.0f));
+    TESTEX("MSE with leaky ReLU output", (gc_check_output(ACTIVATION_LEAKY_RELU, LOSS_MSE) <= 1.0f));
+    TESTEX("MSE with softmax output",    (gc_check_output(ACTIVATION_SOFTMAX,    LOSS_MSE) <= 1.0f));
+    TESTEX("Cross-entropy with softmax output",
+           (gc_check_output(ACTIVATION_SOFTMAX, LOSS_CATEGORICAL_CROSS_ENTROPY) <= 1.0f));
 }

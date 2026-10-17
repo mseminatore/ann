@@ -89,6 +89,9 @@ __global__ void cuda_l1_regularize(float *weights, float l1_scale, int n);
 __global__ void cuda_xent_delta_loss(const float *Y, const float *T, float *delta, float *loss, int n);
 __global__ void cuda_mse_delta_loss(const float *Y, const float *T, float *delta, float *loss, int n);
 
+// Softmax output with MSE: softmax Jacobian applied to delta (one thread per row).
+__global__ void cuda_softmax_mse_delta(float *delta, const float *Y, int batch, int cols);
+
 // Dropout (one thread per element). mask holds 0 or 1/(1-rate).
 __global__ void cuda_dropout_forward(float *a, const float *mask, int n);
 __global__ void cuda_dropout_backward(float *dl_dz, float *a, const float *mask, int n);

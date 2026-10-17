@@ -639,8 +639,9 @@ static int cuda_backward_pass(PNetwork pnet, int batch)
 
         int n = batch * nodes;
 
-        // Activation derivative.  The output layer uses raw delta = T - Y for all
-        // loss types (matching the CPU path), so skip its derivative.
+        // Activation derivative for hidden layers. The output layer's derivative is
+        // already in its delta (applied after the loss for MSE; cross-entropy with
+        // softmax needs none), matching the CPU path.
         if (li != layer_count - 1)
         {
             // Undo dropout: mask the gradient and restore pre-dropout activations
@@ -876,6 +877,21 @@ static int cuda_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size
             : (real)loss_sum / (real)batch_size;
 
         if (loss_out) *loss_out = total_loss;
+
+        // MSE needs the output activation's derivative (matches
+        // ann_mse_output_delta on the CPU); cross-entropy with softmax does not
+        if (pnet->loss_type == LOSS_MSE)
+        {
+            Activation_type out_act = pnet->layers[out_idx].activation;
+            if (out_act == ACTIVATION_SOFTMAX)
+                cuda_softmax_mse_delta<<<cuda_blocks(batch_size), CUDA_THREADS>>>(
+                    delta, Y, batch_size, output_nodes);
+            else
+                cuda_launch_deriv(out_act, delta, Y,
+                                  (const float *)pnet->layers[out_idx].t_batch_z->gpu_buf, n);
+            if (!CUDA_KERNEL_CHECK("output derivative kernel"))
+                return 0;
+        }
     }
 
     // --- Backward pass ---

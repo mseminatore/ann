@@ -885,7 +885,7 @@ static void dispatch_binary_elementwise(id<MTLCommandBuffer> cmd,
 // Select the derivative PSO for a given activation.
 // Returns nil for activations that don't need a kernel
 // (ACTIVATION_NULL handled via memset delta, ACTIVATION_SOFTMAX
-//  uses delta = T - Y directly — no extra derivative needed).
+//  output layers get their derivative from ann_mse_output_delta()).
 //-----------------------------------------------------------
 static id<MTLComputePipelineState> pso_for_deriv(Activation_type act)
 {
@@ -1024,9 +1024,9 @@ static int gpu_backward_pass(PNetwork pnet, int batch_size)
         NSUInteger elem_count = (NSUInteger)(batch_size * nodes);
 
         // --- Apply activation derivative ---
-        // The CPU path never applies an activation derivative on the output layer:
-        // back_propagate_output_batched() uses raw delta = T - Y for all loss types.
-        // Only hidden layers get the activation derivative applied.
+        // The output layer's derivative is already in its delta (applied by
+        // ann_mse_output_delta() for MSE; cross-entropy with softmax needs none).
+        // Only hidden layers get the activation derivative applied here.
         int is_output_layer = (li == layer_count - 1);
         int skip_output_derivative = is_output_layer;
         if (!skip_output_derivative) {
@@ -1567,6 +1567,14 @@ static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_siz
             total_loss /= (real)(batch_size * output_nodes);
         else
             total_loss /= (real)batch_size;
+
+        // MSE needs the output activation's derivative (same code as the CPU path)
+        if (pnet->loss_type == LOSS_MSE) {
+            id<MTLBuffer> Z_buf = (__bridge id<MTLBuffer>)
+                pnet->layers[output_layer_idx].t_batch_z->gpu_buf;
+            ann_mse_output_delta(pnet->layers[output_layer_idx].activation, delta, Y,
+                                 (const float *)[Z_buf contents], batch_size, output_nodes);
+        }
 
         if (loss_out) *loss_out = total_loss;
     }

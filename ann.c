@@ -811,6 +811,71 @@ static void accumulate_bias_gradient(PTensor bias_grad, const PTensor src, int b
 }
 
 //-------------------------------------------
+// Turn the MSE output error delta = T - Y into the gradient with respect to
+// the output pre-activations, -dL/dz, by applying the output activation's
+// derivative. Needed for MSE with a nonlinear output; cross-entropy with
+// softmax already has -dL/dz = T - Y. Softmax uses its full Jacobian per row:
+// delta_j = y_j * (d_j - sum_i d_i * y_i).
+// Shared with the GPU backends (declared in ann_gpu_backend.h) so every path
+// computes the same output gradient.
+//-------------------------------------------
+void ann_mse_output_delta(Activation_type act, real *delta, const real *Y, const real *Z,
+                          int batch_size, int nodes)
+{
+	int total = batch_size * nodes;
+
+	switch (act)
+	{
+	case ACTIVATION_SIGMOID:
+		for (int i = 0; i < total; i++)
+			delta[i] *= Y[i] * ((real)1.0 - Y[i]);
+		break;
+
+	case ACTIVATION_TANH:
+		for (int i = 0; i < total; i++)
+			delta[i] *= (real)1.0 - Y[i] * Y[i];
+		break;
+
+	case ACTIVATION_SOFTSIGN:
+		for (int i = 0; i < total; i++)
+		{
+			real d = (real)1.0 - (real)fabs(Y[i]);
+			delta[i] *= d * d;
+		}
+		break;
+
+	case ACTIVATION_RELU:
+		for (int i = 0; i < total; i++)
+			if (Z[i] <= (real)0.0)
+				delta[i] = (real)0.0;
+		break;
+
+	case ACTIVATION_LEAKY_RELU:
+		for (int i = 0; i < total; i++)
+			if (Z[i] <= (real)0.0)
+				delta[i] *= (real)0.01;
+		break;
+
+	case ACTIVATION_SOFTMAX:
+		for (int b = 0; b < batch_size; b++)
+		{
+			real *d = delta + b * nodes;
+			const real *y = Y + b * nodes;
+			real dot = (real)0.0;
+			for (int n = 0; n < nodes; n++)
+				dot += d[n] * y[n];
+			for (int n = 0; n < nodes; n++)
+				d[n] = y[n] * (d[n] - dot);
+		}
+		break;
+
+	default:
+		// linear output: delta is already -dL/dz
+		break;
+	}
+}
+
+//-------------------------------------------
 // Batched output layer backpropagation
 // Computes: delta = predicted - target for full batch
 // Gradient: dW = delta^T * A_prev (using gemm)
@@ -866,8 +931,14 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 		total_loss /= (real)(batch_size * out_nodes);
 	else
 		total_loss /= (real)batch_size;
+
+	// MSE needs the output activation's derivative; cross-entropy (with
+	// softmax) does not
+	if (pnet->loss_type == LOSS_MSE)
+		ann_mse_output_delta(layer->activation, delta->values, Y->values,
+		                     layer->t_batch_z->values, batch_size, out_nodes);
 	
-	// Gradient: dW = delta^T * A_prev / batch_size
+	// Gradient: dW += delta^T * A_prev
 	// delta is [batch × out], A_prev is [batch × in]
 	// delta^T is [out × batch], result is [out × in]
 	tensor_gemm_transA((real)1.0, delta, A_prev, (real)1.0, prev_layer->t_gradients);
@@ -2320,7 +2391,7 @@ real ann_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs,
 //------------------------------------
 void ann_print_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs)
 {
-	int tp, fp, tn, fn;
+	int tp = 0, fp = 0, tn = 0, fn = 0;
 	real mcc = ann_confusion_matrix(pnet, inputs, outputs, &tp, &fp, &tn, &fn);
 	
 	ann_printf(pnet, "\n%sConfusion Matrix%s\n", COLOR(ANSI_BOLD_CYAN), RESET());
@@ -2464,6 +2535,8 @@ real ann_lr_scheduler_step(unsigned epoch, real base_lr, void *user_data)
 		return base_lr;
 
 	LRStepParams *params = (LRStepParams *)user_data;
+	if (params->step_size == 0)
+		return base_lr;
 	unsigned steps = (epoch - 1) / params->step_size;
 	real multiplier = (real)1.0;
 
@@ -2496,6 +2569,8 @@ real ann_lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data)
 		return base_lr;
 
 	LRCosineParams *params = (LRCosineParams *)user_data;
+	if (params->T_max == 0)
+		return base_lr;
 	
 	// Clamp epoch to T_max
 	unsigned t = (epoch > params->T_max) ? params->T_max : epoch;

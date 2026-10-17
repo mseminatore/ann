@@ -110,6 +110,19 @@ typedef struct {
 } GpuBackend;
 
 /**
+ * Apply the output activation's derivative to an MSE output error, in place.
+ * On entry delta = T - Y; on exit delta = -dL/dz for L = 1/2 * sum((t - y)^2).
+ * Implemented in ann.c and shared by the CPU path and GPU backends.
+ *
+ * @param act        Output layer activation
+ * @param delta      Row-major [batch_size x nodes], modified in place
+ * @param Y          Output activations [batch_size x nodes]
+ * @param Z          Output pre-activations [batch_size x nodes] (ReLU variants)
+ */
+void ann_mse_output_delta(Activation_type act, real *delta, const real *Y, const real *Z,
+                          int batch_size, int nodes);
+
+/**
  * Active GPU backend.  NULL means no GPU is available or initialized.
  * Set by ann_gpu_init(); read by ann.c dispatch logic and ann_gpu_* public API.
  */

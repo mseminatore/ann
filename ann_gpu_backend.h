@@ -123,6 +123,13 @@ void ann_mse_output_delta(Activation_type act, real *delta, const real *Y, const
                           int batch_size, int nodes);
 
 /**
+ * One output's cross-entropy loss term: -t*log(y) for softmax outputs, binary
+ * cross-entropy for sigmoid outputs, with y clamped away from 0 and 1.
+ * Implemented in ann.c and shared by the CPU path and GPU backends.
+ */
+real ann_cross_entropy_term(Activation_type output_act, real t, real y);
+
+/**
  * Active GPU backend.  NULL means no GPU is available or initialized.
  * Set by ann_gpu_init(); read by ann.c dispatch logic and ann_gpu_* public API.
  */

@@ -856,7 +856,8 @@ static int cuda_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size
 
         if (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY)
             cuda_xent_delta_loss<<<cuda_blocks(n), CUDA_THREADS>>>(
-                Y, g_cuda.train_targets, delta, g_cuda.train_lossbuf, n);
+                Y, g_cuda.train_targets, delta, g_cuda.train_lossbuf, n,
+                pnet->layers[out_idx].activation == ACTIVATION_SIGMOID);
         else
             cuda_mse_delta_loss<<<cuda_blocks(n), CUDA_THREADS>>>(
                 Y, g_cuda.train_targets, delta, g_cuda.train_lossbuf, n);

@@ -721,6 +721,10 @@ ANN_API void ann_set_learning_rate(PNetwork pnet, real rate);
  * 
  * @param pnet Network to configure
  * @param loss_type LOSS_MSE (regression) or LOSS_CATEGORICAL_CROSS_ENTROPY (classification)
+ *
+ * LOSS_CATEGORICAL_CROSS_ENTROPY requires a softmax output (one class per
+ * sample) or a sigmoid output (binary cross-entropy for each output). Training
+ * any other output activation with it fails with ERR_INVALID.
  */
 ANN_API void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
 

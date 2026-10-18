@@ -1556,7 +1556,8 @@ static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_siz
                 delta[offset + n] = t - y;
 
                 if (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY) {
-                    if (y > 1e-7f) total_loss -= t * logf(y);
+                    total_loss += ann_cross_entropy_term(
+                        pnet->layers[output_layer_idx].activation, t, y);
                 } else {
                     float diff = y - t;
                     total_loss += diff * diff;

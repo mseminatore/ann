@@ -86,7 +86,7 @@ __global__ void cuda_l2_regularize(float *weights, float decay, int n);
 __global__ void cuda_l1_regularize(float *weights, float l1_scale, int n);
 
 // Output delta + per-element loss (one thread per element). delta = T - Y; loss per element.
-__global__ void cuda_xent_delta_loss(const float *Y, const float *T, float *delta, float *loss, int n);
+__global__ void cuda_xent_delta_loss(const float *Y, const float *T, float *delta, float *loss, int n, int binary);
 __global__ void cuda_mse_delta_loss(const float *Y, const float *T, float *delta, float *loss, int n);
 
 // Softmax output with MSE: softmax Jacobian applied to delta (one thread per row).

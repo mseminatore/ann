@@ -811,6 +811,25 @@ static void accumulate_bias_gradient(PTensor bias_grad, const PTensor src, int b
 }
 
 //-------------------------------------------
+// One output's cross-entropy loss term. Softmax outputs use the categorical
+// form -t*log(y). Sigmoid outputs use binary cross-entropy,
+// -(t*log(y) + (1-t)*log(1-y)), so targets of 0 count too; T - Y is its exact
+// gradient. y is clamped away from 0 and 1 so a confidently wrong prediction
+// costs the most instead of nothing.
+// Shared with the GPU backends (declared in ann_gpu_backend.h).
+//-------------------------------------------
+real ann_cross_entropy_term(Activation_type output_act, real t, real y)
+{
+	const real lo = (real)1e-7, hi = (real)1.0 - (real)1e-7;
+	if (y < lo) y = lo;
+	if (y > hi) y = hi;
+
+	if (output_act == ACTIVATION_SIGMOID)
+		return -(t * (real)log(y) + ((real)1.0 - t) * (real)log((real)1.0 - y));
+	return -t * (real)log(y);
+}
+
+//-------------------------------------------
 // Turn the MSE output error delta = T - Y into the gradient with respect to
 // the output pre-activations, -dL/dz, by applying the output activation's
 // derivative. Needed for MSE with a nonlinear output; cross-entropy with
@@ -913,9 +932,8 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 			// Accumulate loss (cross-entropy or MSE based on loss function)
 			if (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY)
 			{
-				// Cross-entropy: -sum(t * log(y))
-				if (y > (real)1e-7)
-					total_loss -= t * (real)log(y);
+				// Cross-entropy (binary for sigmoid outputs)
+				total_loss += ann_cross_entropy_term(layer->activation, t, y);
 			}
 			else
 			{
@@ -1948,6 +1966,25 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 //-----------------------------------------------
 // Train the network for a set of inputs/outputs
 //-----------------------------------------------
+//-----------------------------------------------
+// Cross-entropy needs probabilities from the output layer: softmax (one class
+// per sample) or sigmoid (binary cross-entropy per output). Other output
+// activations have no meaningful log-loss, so training is refused.
+// Returns 1 when the network can be trained; otherwise reports ERR_INVALID.
+//-----------------------------------------------
+static int check_loss_output(PNetwork pnet, const char *function_name)
+{
+	if (pnet->loss_type != LOSS_CATEGORICAL_CROSS_ENTROPY || pnet->layer_count < 1)
+		return 1;
+
+	Activation_type act = pnet->layers[pnet->layer_count - 1].activation;
+	if (act == ACTIVATION_SOFTMAX || act == ACTIVATION_SIGMOID)
+		return 1;
+
+	invoke_error_callback(ERR_INVALID, function_name);
+	return 0;
+}
+
 real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 {
 	if (!pnet)
@@ -1963,6 +2000,9 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		return 0.0;
 
 	if (outputs->rows != rows)
+		return 0.0;
+
+	if (!check_loss_output(pnet, "ann_train_network"))
 		return 0.0;
 
 	ann_printf(pnet,	"\n%sTraining ANN%s\n"
@@ -2182,6 +2222,9 @@ int ann_train_begin(PNetwork pnet)
 	if (pnet->layer_count <= 0 || !pnet->layers)
 		return ERR_INVALID;
 
+	if (!check_loss_output(pnet, "ann_train_begin"))
+		return ERR_INVALID;
+
 	// Enable training mode (for dropout)
 	pnet->is_training = 1;
 
@@ -2218,6 +2261,9 @@ real ann_train_step(PNetwork pnet, const real *inputs, const real *targets, int 
 		return (real)0.0;
 
 	if (batch_size <= 0)
+		return (real)0.0;
+
+	if (!check_loss_output(pnet, "ann_train_step"))
 		return (real)0.0;
 
 	int input_node_count = pnet->layers[0].node_count;

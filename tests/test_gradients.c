@@ -7,8 +7,9 @@
 // the check covers the activation derivatives, propagation through two hidden
 // layers, and all weights and biases.
 //
-// Losses: MSE is L = 1/2 * sum((t - y)^2); cross-entropy is L = -sum(t * log(y))
-// with a softmax output and targets that sum to 1.
+// Losses: MSE is L = 1/2 * sum((t - y)^2). Cross-entropy is L = -sum(t * log(y))
+// with a softmax output and targets that sum to 1, or binary cross-entropy
+// L = -sum(t * log(y) + (1 - t) * log(1 - y)) with a sigmoid output.
 //
 // The analytic gradient is read from one SGD step: W += lr * g, so
 // g = (W_after - W_before) / lr, and g should equal -dL/dW.
@@ -32,8 +33,12 @@ static real gc_loss(PNetwork net)
 {
     real y[2];
     ann_predict(net, gc_x, y);
-    if (net->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY)
+    if (net->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY) {
+        if (net->layers[net->layer_count - 1].activation == ACTIVATION_SIGMOID)
+            return -(gc_t[0] * (real)log(y[0]) + (1 - gc_t[0]) * (real)log(1 - y[0]) +
+                     gc_t[1] * (real)log(y[1]) + (1 - gc_t[1]) * (real)log(1 - y[1]));
         return -(gc_t[0] * (real)log(y[0]) + gc_t[1] * (real)log(y[1]));
+    }
     real d0 = gc_t[0] - y[0], d1 = gc_t[1] - y[1];
     return 0.5f * (d0 * d0 + d1 * d1);
 }
@@ -154,4 +159,6 @@ void test_main(int argc, char *argv[])
     TESTEX("MSE with softmax output",    (gc_check_output(ACTIVATION_SOFTMAX,    LOSS_MSE) <= 1.0f));
     TESTEX("Cross-entropy with softmax output",
            (gc_check_output(ACTIVATION_SOFTMAX, LOSS_CATEGORICAL_CROSS_ENTROPY) <= 1.0f));
+    TESTEX("Binary cross-entropy with sigmoid output",
+           (gc_check_output(ACTIVATION_SIGMOID, LOSS_CATEGORICAL_CROSS_ENTROPY) <= 1.0f));
 }

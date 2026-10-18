@@ -368,7 +368,7 @@ used with ML training and inference.
 
 | Library | CMake Flag | Platforms | Notes |
 |---------|------------|-----------|-------|
-| [CBLAS](https://github.com/xianyi/CBLAS) | `-DUSE_CBLAS=1` | Windows, macOS, Linux (x64, ARM64) | Recommended, cross-platform |
+| [CBLAS](https://github.com/mseminatore/cblas) | `-DUSE_CBLAS=1` | Windows, macOS, Linux (x64, ARM64) | Recommended, cross-platform |
 | [OpenBLAS](https://openblas.net) | `-DUSE_BLAS=1` | macOS, Linux | Well-established, good performance |
 | [Intel MKL](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) | `-DUSE_MKL=1` | macOS, Linux (x64) | Highest performance on Intel CPUs |
 

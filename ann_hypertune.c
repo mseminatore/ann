@@ -1229,6 +1229,11 @@ int hypertune_bayesian_search(
 
     int total_trials = bayes_options->n_initial + bayes_options->n_iterations;
 
+    // The GP cannot learn from more than GP_MAX_OBSERVATIONS trials
+    if (bayes_options->n_initial < 0 || bayes_options->n_iterations < 0 ||
+        total_trials > GP_MAX_OBSERVATIONS)
+        return ERR_INVALID;
+
     if (tune_options->verbosity >= 1) {
         printf("Starting Bayesian optimization: %d initial + %d BO iterations\n",
                bayes_options->n_initial, bayes_options->n_iterations);
@@ -1266,6 +1271,16 @@ int hypertune_bayesian_search(
                 gp_tune(&gp, fit);
             gp_fit(&gp, fit);
 
+            // Incumbent for EI: the best posterior mean over the observed points.
+            // Trial scores are noisy, so a single lucky score would set the bar too high.
+            real incumbent = -999999.0f;
+            for (int i = 0; i < gp.n_observations; i++) {
+                real m, v;
+                gp_predict_fit(&gp, fit, gp.X[i], &m, &v);
+                if (m > incumbent)
+                    incumbent = m;
+            }
+
             for (int c = 0; c < bayes_options->n_candidates; c++) {
                 TrialConfig cand;
                 if (c % 2) {
@@ -1281,7 +1296,7 @@ int hypertune_bayesian_search(
                 real mean, variance;
                 gp_predict_fit(&gp, fit, x, &mean, &variance);
 
-                real ei = gp_expected_improvement(mean, variance, best.score,
+                real ei = gp_expected_improvement(mean, variance, incumbent,
                                                   bayes_options->exploration_weight);
                 if (ei > best_ei) {
                     best_ei = ei;

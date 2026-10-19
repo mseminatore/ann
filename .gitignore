@@ -6,6 +6,7 @@ mnist
 mnist_hypertune_tpe
 mnist_hypertune_grid
 mnist_hypertune_random
+mnist_hypertune_bayes
 logic
 digit5x7
 save_test

@@ -428,6 +428,12 @@ void test_main(int argc, char *argv[]) {
     TESTEX("All results have learning rates in range", 
            (results[0].learning_rate >= 0.01f && results[0].learning_rate <= 0.5f));
     
+    bo_opts.n_initial = GP_MAX_OBSERVATIONS;
+    bo_opts.n_iterations = 1;
+    TESTEX("Bayesian search rejects more trials than the GP can hold",
+           (hypertune_bayesian_search(&bo_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+                &xor_split, &opts, &bo_opts, results, 10, &best) == ERR_INVALID));
+
     hypertune_free_split(&xor_split);
     tensor_free(xor_in);
     tensor_free(xor_out);

@@ -713,6 +713,7 @@ with the library and its usage. These are:
 * **mnist** - model for the MNIST datasets (digit or fashion)
 * **mnist_hypertune_tpe** - TPE hyperparameter search on Fashion-MNIST, including per-layer activations
 * **mnist_hypertune_random** - random search over the full search space on Fashion-MNIST
+* **mnist_hypertune_bayes** - Bayesian (Gaussian Process) optimization on Fashion-MNIST
 * **mnist_hypertune_grid** - grid search over a small search space on Fashion-MNIST
 
 > Note that **logic** is not able to learn XOR. That is because XOR is not 

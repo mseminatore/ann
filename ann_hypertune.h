@@ -536,6 +536,11 @@ ANN_API void bayesian_options_init(BayesianOptions *opts);
  * @param max_results Maximum results to store
  * @param best_result Output: best result found
  * @return Number of trials completed, or negative error code
+ * @return ERR_INVALID if n_initial + n_iterations exceeds GP_MAX_OBSERVATIONS
+ *
+ * Expected Improvement is measured against the best posterior mean over the
+ * observed trials rather than the best raw score, so one lucky noisy trial does
+ * not raise the bar.
  */
 ANN_API int hypertune_bayesian_search(
     const HyperparamSpace *space,

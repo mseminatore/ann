@@ -195,7 +195,7 @@ bo_opts.fit_hyperparams = 1; // Fit GP length scales/noise each iteration
 HypertuneResult results[50], best;
 int trials = hypertune_bayesian_search(
     &space, input_size, output_size,
-    ACTIVATION_SOFTMAX, LOSS_CROSS_ENTROPY,
+    ACTIVATION_SOFTMAX, LOSS_CATEGORICAL_CROSS_ENTROPY,
     &split, &tune_opts, &bo_opts,
     results, 50, &best
 );
@@ -221,7 +221,12 @@ int trials = hypertune_bayesian_search(
 - Scores are standardized before fitting.
 - Half of the `n_candidates` are random configurations and half are small
   changes to the best trial so far.
+- Expected Improvement is measured against the best posterior mean over the
+  observed trials, not the best raw score, so one lucky noisy trial does not
+  raise the bar.
 - The GP holds at most `GP_MAX_OBSERVATIONS` (100) trials.
+  `hypertune_bayesian_search` returns `ERR_INVALID` if `n_initial + n_iterations`
+  is larger.
 
 **When to use GP-BO:**
 - Expensive evaluations (long training times)
@@ -385,13 +390,14 @@ list by layer instead of searching every combination.
 
 ## Samples
 
-Three runnable samples tune a network on Fashion-MNIST. Run them from `data/`,
+Four runnable samples tune a network on Fashion-MNIST. Run them from `data/`,
 where `fashion-mnist_train.csv` lives.
 
 | Sample | Strategy | Notes |
 |--------|----------|-------|
 | `mnist_hypertune_tpe` | TPE | Searches every dimension, with per-layer activations enabled |
 | `mnist_hypertune_random` | Random | 40 trials over every dimension, with per-layer activations enabled |
+| `mnist_hypertune_bayes` | GP-BO | 10 random + 20 GP-guided trials over every dimension, with per-layer activations enabled |
 | `mnist_hypertune_grid` | Grid | Small 96-point grid; activations rotate by layer rather than being searched per layer |
 
 Pass `-g` to any of them to train trials on the GPU in a Metal or CUDA build. This

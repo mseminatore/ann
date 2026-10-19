@@ -33,6 +33,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include "ann.h"
 #include "ann_hypertune.h"
@@ -61,8 +62,10 @@ static void progress_callback(
 
 int main(int argc, char *argv[])
 {
-    (void)argc;
-    (void)argv;
+    int use_gpu = 0;
+    for (int i = 1; i < argc; i++)
+        if (strcmp(argv[i], "-g") == 0)
+            use_gpu = 1;
 
     printf("Grid search on Fashion-MNIST\n\n");
 
@@ -130,6 +133,10 @@ int main(int argc, char *argv[])
     hypertune_options_init(&tune_opts);
     tune_opts.score_func = hypertune_score_accuracy;
     tune_opts.progress_func = progress_callback;
+
+    // Optionally train trials on the GPU (needs a Metal/CUDA build)
+    if (use_gpu)
+        tune_opts.use_gpu = ann_gpu_init();
 
     HypertuneResult *results = malloc(MAX_TRIALS * sizeof(HypertuneResult));
     HypertuneResult best_result;

@@ -97,8 +97,10 @@ static void progress_callback(
 //------------------------------
 int main(int argc, char *argv[])
 {
-    (void)argc;
-    (void)argv;
+    int use_gpu = 0;
+    for (int i = 1; i < argc; i++)
+        if (strcmp(argv[i], "-g") == 0)
+            use_gpu = 1;
     
     printf("=================================================\n");
     printf("  Fashion-MNIST Hyperparameter Tuning\n");
@@ -222,6 +224,10 @@ int main(int argc, char *argv[])
     hypertune_options_init(&tune_opts);
     tune_opts.score_func = hypertune_score_accuracy;  // Use accuracy as score
     tune_opts.progress_func = progress_callback;
+
+    // Optionally train trials on the GPU (needs a Metal/CUDA build)
+    if (use_gpu)
+        tune_opts.use_gpu = ann_gpu_init();
     tune_opts.verbosity = 0;  // Suppress internal output (we have progress callback)
     tune_opts.seed = 42;  // For reproducibility
     

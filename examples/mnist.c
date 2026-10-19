@@ -42,6 +42,7 @@ static int threads = -1;
 static int batch_size = 32;
 static int epoch_count = 5;
 static int export_onnx = 0;
+static int use_gpu = 0;     // train on the GPU (-g, needs a USE_METAL or USE_CUDA build)
 
 //----------------------------------
 // get options from the command line
@@ -72,11 +73,16 @@ int getopt(int n, char *args[])
 			i++;
 		}
 
+		// train on the GPU
+		if (args[i][1] == 'g')
+		{
+			use_gpu = 1;
+		}
+
 		// export ONNX file
 		if (args[i][1] == 'x')
 		{
 			export_onnx = 1;
-			i++;
 		}
 	}
 
@@ -203,6 +209,16 @@ int main(int argc, char *argv[])
 	printf("\nBLAS not enabled, using scalar single-threaded C implementation\n");
 #endif
 
+#ifdef USE_GPU
+	// GPU is opt-in at runtime: initialize it, then upload the network before training
+	if (use_gpu)
+		use_gpu = ann_gpu_init();
+#else
+	if (use_gpu)
+		puts("GPU support not compiled in, using CPU");
+	use_gpu = 0;
+#endif
+
 	// make a new network
 	PNetwork pnet = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
 
@@ -264,6 +280,11 @@ int main(int argc, char *argv[])
 	// Add exponential LR decay (5% reduction per epoch)
 	static real lr_decay = 0.95f;
 	ann_set_lr_scheduler(pnet, ann_lr_scheduler_exponential, &lr_decay);
+
+#ifdef USE_GPU
+	if (use_gpu && ERR_OK != ann_gpu_upload_network(pnet))
+		puts("GPU upload failed, training on CPU");
+#endif
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows);

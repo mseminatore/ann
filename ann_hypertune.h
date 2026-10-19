@@ -177,6 +177,11 @@ typedef struct {
     // Random seed for reproducibility (0 = use time)
     unsigned seed;
     
+    // Train each trial on the GPU (default 0). Requires a GPU build and a
+    // successful ann_gpu_init(); otherwise trials silently train on the CPU.
+    // Small networks and batch sizes are often faster on the CPU.
+    int use_gpu;
+
     // Verbosity: 0=quiet, 1=normal (trial summaries), 2=verbose (adds per-epoch training logs)
     int verbosity;
 } HypertuneOptions;

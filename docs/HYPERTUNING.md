@@ -394,5 +394,9 @@ where `fashion-mnist_train.csv` lives.
 | `mnist_hypertune_random` | Random | 40 trials over every dimension, with per-layer activations enabled |
 | `mnist_hypertune_grid` | Grid | Small 96-point grid; activations rotate by layer rather than being searched per layer |
 
+Pass `-g` to any of them to train trials on the GPU in a Metal or CUDA build. This
+sets `HypertuneOptions.use_gpu`, which is off by default. Small networks and batch
+sizes are often faster on the CPU, so compare timings before enabling it.
+
 Per-trial training logs are hidden by default. Set `HypertuneOptions.verbosity`
 to 2 to show them.

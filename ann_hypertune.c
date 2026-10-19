@@ -131,6 +131,7 @@ void hypertune_options_init(HypertuneOptions *options)
     options->progress_func = NULL;
     options->user_data = NULL;
     options->seed = 0;
+    options->use_gpu = 0;
     options->verbosity = 1;
 }
 
@@ -608,6 +609,10 @@ static void evaluate_trial(
     ann_set_epoch_limit(net, space->epoch_limit);
     ann_set_convergence(net, space->convergence_epsilon);
 
+    // Training re-uploads the weights it initializes
+    if (options->use_gpu)
+        ann_gpu_upload_network(net);
+
     double start_time = get_time_ms();
     ann_train_network(net, split->train_inputs, split->train_outputs, split->train_rows);
     double end_time = get_time_ms();
@@ -616,6 +621,10 @@ static void evaluate_trial(
     trial->epochs_used = (int)net->history_count;
     trial->score = options->score_func(net, split->val_inputs, split->val_outputs,
                                        options->user_data);
+
+    // Also resets the backend's shared training state, which differs per trial
+    if (options->use_gpu)
+        ann_gpu_free_network(net);
     ann_free_network(net);
 }
 

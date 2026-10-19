@@ -390,7 +390,7 @@ where `fashion-mnist_train.csv` lives.
 
 | Sample | Strategy | Notes |
 |--------|----------|-------|
-| `mnist_hypertune` | TPE | Searches every dimension, with per-layer activations enabled |
+| `mnist_hypertune_tpe` | TPE | Searches every dimension, with per-layer activations enabled |
 | `mnist_hypertune_random` | Random | 40 trials over every dimension, with per-layer activations enabled |
 | `mnist_hypertune_grid` | Grid | Small 96-point grid; activations rotate by layer rather than being searched per layer |
 

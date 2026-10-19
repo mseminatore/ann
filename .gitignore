@@ -3,7 +3,9 @@ build*/
 
 # Makefile-built executables (built in project root)
 mnist
-mnist_hypertune
+mnist_hypertune_tpe
+mnist_hypertune_grid
+mnist_hypertune_random
 logic
 digit5x7
 save_test

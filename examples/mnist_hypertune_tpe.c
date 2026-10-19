@@ -22,7 +22,7 @@
 /**********************************************************************************/
 
 /**
- * @file mnist_hypertune.c
+ * @file mnist_hypertune_tpe.c
  * @brief Hyperparameter tuning example using TPE on Fashion-MNIST
  *
  * This example demonstrates how to use the ann_hypertune module to find optimal

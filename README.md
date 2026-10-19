@@ -711,7 +711,7 @@ with the library and its usage. These are:
 * **save_test** - demonstrates loading and testing a pre-trained text model file
 * **save_test_binary** - demonstrates loading and testing a pre-trained binary model file
 * **mnist** - model for the MNIST datasets (digit or fashion)
-* **mnist_hypertune** - TPE hyperparameter search on Fashion-MNIST, including per-layer activations
+* **mnist_hypertune_tpe** - TPE hyperparameter search on Fashion-MNIST, including per-layer activations
 * **mnist_hypertune_random** - random search over the full search space on Fashion-MNIST
 * **mnist_hypertune_grid** - grid search over a small search space on Fashion-MNIST
 

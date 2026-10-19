@@ -28,7 +28,7 @@
  * Grid search tries every combination of the values in the search space, so keep the
  * space small. Per-layer activation search is not combined exhaustively by grid
  * search; it rotates through the activation list by layer.
- * See mnist_hypertune.c for the TPE version.
+ * See mnist_hypertune_tpe.c for the TPE version.
  */
 
 #include <stdio.h>

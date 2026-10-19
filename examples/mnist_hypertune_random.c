@@ -28,7 +28,7 @@
  * Random search samples each trial independently from the search space. It is a
  * good baseline, and it covers every dimension, including per-layer activations,
  * with a fixed trial budget.
- * See mnist_hypertune.c for the TPE version.
+ * See mnist_hypertune_tpe.c for the TPE version.
  */
 
 #include <stdio.h>

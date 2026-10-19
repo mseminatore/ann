@@ -201,6 +201,9 @@ int main(int argc, char *argv[])
     space.hidden_activations[2] = ACTIVATION_TANH;
     space.hidden_activations[3] = ACTIVATION_LEAKY_RELU;
     space.hidden_activation_count = 4;
+
+    // Let TPE choose a separate activation for each hidden layer
+    space.search_per_layer_activation = 1;
     
     // Training settings per trial
     space.epoch_limit = 5;  // Quick trials
@@ -238,7 +241,7 @@ int main(int argc, char *argv[])
     printf("    - Optimizers: Adam, SGD, Momentum, RMSProp\n");
     printf("    - Hidden layers: 1, 2, 3\n");
     printf("    - Topologies: Constant, Pyramid, Funnel\n");
-    printf("    - Activations: ReLU, Sigmoid, Tanh, LeakyReLU\n\n");
+    printf("    - Activations (per layer): ReLU, Sigmoid, Tanh, LeakyReLU\n\n");
     
     clock_t start = clock();
     
@@ -281,7 +284,6 @@ int main(int argc, char *argv[])
     printf("=== Best Configuration ===\n");
     hypertune_print_result(&best_result);
     
-    printf("\n=== Top 5 Results ===\n");
     hypertune_print_summary(results, trials_completed, 5);
     
     // Create and test a network with the best configuration

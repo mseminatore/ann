@@ -382,3 +382,17 @@ list by layer instead of searching every combination.
 - Random search: 10-100 trials typically sufficient
 - GP-BO: up to 100 trials, expensive trials
 - TPE: hundreds of trials, or when per-iteration overhead matters
+
+## Samples
+
+Three runnable samples tune a network on Fashion-MNIST. Run them from `data/`,
+where `fashion-mnist_train.csv` lives.
+
+| Sample | Strategy | Notes |
+|--------|----------|-------|
+| `mnist_hypertune` | TPE | Searches every dimension, with per-layer activations enabled |
+| `mnist_hypertune_random` | Random | 40 trials over every dimension, with per-layer activations enabled |
+| `mnist_hypertune_grid` | Grid | Small 96-point grid; activations rotate by layer rather than being searched per layer |
+
+Per-trial training logs are hidden by default. Set `HypertuneOptions.verbosity`
+to 2 to show them.

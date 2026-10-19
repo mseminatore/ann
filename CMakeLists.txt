@@ -171,6 +171,12 @@ target_link_libraries(mnist libann ${BLAS_LIB} ${MATH_LIB})
 add_executable(mnist_hypertune examples/mnist_hypertune.c)
 target_link_libraries(mnist_hypertune libann ${BLAS_LIB} ${MATH_LIB})
 
+add_executable(mnist_hypertune_grid examples/mnist_hypertune_grid.c)
+target_link_libraries(mnist_hypertune_grid libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(mnist_hypertune_random examples/mnist_hypertune_random.c)
+target_link_libraries(mnist_hypertune_random libann ${BLAS_LIB} ${MATH_LIB})
+
 add_executable(digit5x7 examples/digit5x7.c)
 target_link_libraries(digit5x7 libann ${BLAS_LIB} ${MATH_LIB})
 

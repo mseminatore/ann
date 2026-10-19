@@ -177,7 +177,7 @@ typedef struct {
     // Random seed for reproducibility (0 = use time)
     unsigned seed;
     
-    // Verbosity: 0=quiet, 1=normal, 2=verbose
+    // Verbosity: 0=quiet, 1=normal (trial summaries), 2=verbose (adds per-epoch training logs)
     int verbosity;
 } HypertuneOptions;
 

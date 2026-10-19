@@ -580,6 +580,9 @@ static void decode_config(const HyperparamSpace *space, const TrialConfig *cfg, 
     }
 }
 
+// Output sink used to silence per-epoch training logs during trials
+static void discard_output(const char *s) { (void)s; }
+
 // Build, train and score the network described by trial's configuration
 static void evaluate_trial(
     const HyperparamSpace *space,
@@ -598,6 +601,10 @@ static void evaluate_trial(
         return;
     }
 
+    // Per-epoch training logs only at verbosity 2 or higher
+    if (options->verbosity < 2)
+        net->print_func = discard_output;
+
     ann_set_epoch_limit(net, space->epoch_limit);
     ann_set_convergence(net, space->convergence_epsilon);
 
@@ -606,6 +613,7 @@ static void evaluate_trial(
     double end_time = get_time_ms();
 
     trial->training_time_ms = (real)(end_time - start_time);
+    trial->epochs_used = (int)net->history_count;
     trial->score = options->score_func(net, split->val_inputs, split->val_outputs,
                                        options->user_data);
     ann_free_network(net);

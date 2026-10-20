@@ -27,6 +27,27 @@
 
 static void quiet(const char *s) { (void)s; }
 
+// Captures what a network prints
+static char g_printed[2048];
+static void capture(const char *msg)
+{
+    size_t used = strlen(g_printed);
+    if (used + strlen(msg) < sizeof(g_printed))
+        strcat(g_printed, msg);
+}
+
+// 1 if the file contains the text
+static int file_contains(const char *path, const char *needle)
+{
+    static char buf[1 << 16];
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, needle) != NULL;
+}
+
 static real g_x[GC_BATCH * MAX_IN];
 static real g_t[GC_BATCH * MAX_OUT];
 
@@ -429,5 +450,48 @@ void test_main(int argc, char *argv[])
 
         tensor_free(tx);
         tensor_free(ty);
+    }
+
+    SUITE("ONNX Export and Diagrams");
+    {
+        PNetwork net = make_bar_net();
+        ann_train_begin(net);
+        ann_train_end(net);
+
+        const char *onnx = "test_conv.onnx.json";
+        TESTEX("CNN exports to ONNX", ann_export_onnx(net, onnx) == ERR_OK);
+        TESTEX("with a Conv node and its attributes", file_contains(onnx, "\"op_type\": \"Conv\"") &&
+               file_contains(onnx, "\"kernel_shape\", \"type\": 7, \"ints\": [3, 3]") &&
+               file_contains(onnx, "\"pads\", \"type\": 7, \"ints\": [1, 1, 1, 1]"));
+        TESTEX("conv weights as [F, C, k, k]", file_contains(onnx, "\"dims\": [4, 1, 3, 3]"));
+        TESTEX("MaxPool and Flatten nodes", file_contains(onnx, "\"op_type\": \"MaxPool\"") &&
+               file_contains(onnx, "\"op_type\": \"Flatten\""));
+        TESTEX("an image input [batch, 1, 6, 6]",
+               file_contains(onnx, "{\"dim_param\": \"batch\"}, {\"dim_value\": 1}, {\"dim_value\": 6}, {\"dim_value\": 6}"));
+        TESTEX("ONNX import rejects CNNs (not supported yet)", ann_import_onnx(onnx) == NULL);
+        remove(onnx);
+
+        const char *pik = "test_conv.pikchr";
+        TESTEX("CNN exports to PIKCHR", ann_export_pikchr(net, pik) == ERR_OK);
+        TESTEX("with kind names and image shapes", file_contains(pik, "\"Conv2D\" \"4x6x6\"") &&
+               file_contains(pik, "\"MaxPool2D\" \"4x3x3\"") && file_contains(pik, "\"Flatten\" \"36 nodes\""));
+        remove(pik);
+
+        g_printed[0] = '\0';
+        net->print_func = capture;
+        ann_print_props(net);
+        TESTEX("Network shape prints image layers as CxHxW", strstr(g_printed, "1x6x6-4x6x6-4x3x3-36-2") != NULL);
+        ann_free_network(net);
+
+        // A dense layer's output can't feed a conv layer in ONNX
+        net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 1, 4, 4);
+        ann_add_layer(net, 3, LAYER_HIDDEN, ACTIVATION_RELU);
+        ann_add_conv2d(net, 2, 1, 1, 0, ACTIVATION_RELU);
+        ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_NULL);
+        TESTEX("Conv after a dense layer is not exportable", ann_export_onnx(net, onnx) == ERR_INVALID);
+        remove(onnx);
+        ann_free_network(net);
     }
 }

@@ -931,17 +931,25 @@ typedef struct {
 static void dense_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
 static void dense_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
                              char *output, size_t output_size, int *first);
+static void conv_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
+static void conv_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                            char *output, size_t output_size, int *first);
+static void no_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
+static void maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                               char *output, size_t output_size, int *first);
+static void flatten_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                               char *output, size_t output_size, int *first);
 
 // indexed by Layer_kind
 static const Layer_ops g_layer_ops[] = {
 	{ "Dense", 0, dense_setup, dense_init_weights, dense_forward, dense_forward_single, dense_backward,
 	  dense_onnx_initializers, dense_onnx_nodes },
 	{ "Conv2D", CONV_CONFIG_COUNT, conv_setup, conv_init_weights, conv_forward, NULL, conv_backward,
-	  NULL, NULL },
+	  conv_onnx_initializers, conv_onnx_nodes },
 	{ "MaxPool2D", POOL_CONFIG_COUNT, maxpool_setup, NULL, maxpool_forward, NULL, maxpool_backward,
-	  NULL, NULL },
+	  no_onnx_initializers, maxpool_onnx_nodes },
 	{ "Flatten", 0, flatten_setup, NULL, flatten_forward, NULL, flatten_backward,
-	  NULL, NULL },
+	  no_onnx_initializers, flatten_onnx_nodes },
 };
 
 static const Layer_ops *layer_ops(const Layer *layer)
@@ -3750,9 +3758,13 @@ void ann_print_props(const PNetwork pnet)
 
 	for (int i = 0; i < pnet->layer_count; i++)
 	{
+		const Layer_shape *shape = &pnet->layers[i].shape;
 		if (i != 0)
 			ann_printf(pnet, "-");
-		ann_printf(pnet, "%d", pnet->layers[i].node_count);
+		if (shape->h == 1 && shape->w == 1)
+			ann_printf(pnet, "%d", pnet->layers[i].node_count);
+		else
+			ann_printf(pnet, "%dx%dx%d", shape->c, shape->h, shape->w);
 	}
 	
 	ann_printf(pnet, "%s\n", RESET());
@@ -3920,6 +3932,155 @@ static void dense_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const c
 }
 
 //-----------------------------------------------
+// Helper: 1 if a shape is a plain vector (H = W = 1)
+//-----------------------------------------------
+static int onnx_is_flat(const Layer_shape *shape)
+{
+	return shape->h == 1 && shape->w == 1;
+}
+
+//-----------------------------------------------
+// Helper: write a tensor's shape, [batch, C, H, W] for an image or
+// [batch, C*H*W] otherwise
+//-----------------------------------------------
+static void write_onnx_shape(FILE *fptr, const Layer_shape *shape, int image)
+{
+	if (image)
+		fprintf(fptr, "            \"shape\": {\"dim\": [{\"dim_param\": \"batch\"}, {\"dim_value\": %d}, "
+		              "{\"dim_value\": %d}, {\"dim_value\": %d}]}\n", shape->c, shape->h, shape->w);
+	else
+		fprintf(fptr, "            \"shape\": {\"dim\": [{\"dim_param\": \"batch\"}, {\"dim_value\": %d}]}\n",
+		        shape->c * shape->h * shape->w);
+}
+
+//-----------------------------------------------
+// Helper: write one ONNX node with a single input and output; attributes is
+// the JSON for its attribute list, or NULL
+//-----------------------------------------------
+static void write_onnx_node(FILE *fptr, const char *op_type, const char *name, const char *input,
+                            const char *output, const char *attributes, int *first)
+{
+	if (!*first) fprintf(fptr, ",\n");
+	*first = 0;
+
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"op_type\": \"%s\",\n", op_type);
+	fprintf(fptr, "        \"name\": \"%s\",\n", name);
+	fprintf(fptr, "        \"input\": [\"%s\"],\n", input);
+	fprintf(fptr, "        \"output\": [\"%s\"]%s\n", output, attributes ? "," : "");
+	if (attributes)
+		fprintf(fptr, "        \"attribute\": %s\n", attributes);
+	fprintf(fptr, "      }");
+}
+
+//-----------------------------------------------
+// Conv ONNX initializers: weight_N [F, C, k, k] (libann's W [F x C*k*k] is
+// already in that order) and bias_N [F], where N = layer - 1
+//-----------------------------------------------
+static void conv_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first)
+{
+	PLayer cur = &pnet->layers[layer];
+	int index = layer - 1, k = cur->config[CONV_KERNEL];
+	int w_dims[4];
+	int b_dims[1];
+	w_dims[0] = cur->shape.c;
+	w_dims[1] = cur->in_shape.c;
+	w_dims[2] = k;
+	w_dims[3] = k;
+	b_dims[0] = cur->shape.c;
+
+	if (!*first) fprintf(fptr, ",\n");
+	*first = 0;
+
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"weight_%d\",\n", index);
+	fprintf(fptr, "        \"data_type\": 1,\n");
+	fprintf(fptr, "        \"dims\": ");
+	write_json_int_array(fptr, w_dims, 4);
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "        \"float_data\": ");
+	write_json_float_array(fptr, cur->params[0].value->values, w_dims[0] * w_dims[1] * k * k);
+	fprintf(fptr, "\n");
+	fprintf(fptr, "      },\n");
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"bias_%d\",\n", index);
+	fprintf(fptr, "        \"data_type\": 1,\n");
+	fprintf(fptr, "        \"dims\": ");
+	write_json_int_array(fptr, b_dims, 1);
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "        \"float_data\": ");
+	write_json_float_array(fptr, cur->params[1].value->values, b_dims[0]);
+	fprintf(fptr, "\n");
+	fprintf(fptr, "      }");
+}
+
+//-----------------------------------------------
+// Conv ONNX node: Conv(input, weight_N, bias_N) with kernel_shape, strides, pads
+//-----------------------------------------------
+static void conv_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                            char *output, size_t output_size, int *first)
+{
+	PLayer cur = &pnet->layers[layer];
+	int index = layer - 1;
+	int k = cur->config[CONV_KERNEL], st = cur->config[CONV_STRIDE], p = cur->config[CONV_PADDING];
+	snprintf(output, output_size, "conv_%d_out", index);
+
+	if (!*first) fprintf(fptr, ",\n");
+	*first = 0;
+
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"op_type\": \"Conv\",\n");
+	fprintf(fptr, "        \"name\": \"conv_%d\",\n", index);
+	fprintf(fptr, "        \"input\": [\"%s\", \"weight_%d\", \"bias_%d\"],\n", input, index, index);
+	fprintf(fptr, "        \"output\": [\"%s\"],\n", output);
+	fprintf(fptr, "        \"attribute\": [{\"name\": \"kernel_shape\", \"type\": 7, \"ints\": [%d, %d]}, "
+	              "{\"name\": \"strides\", \"type\": 7, \"ints\": [%d, %d]}, "
+	              "{\"name\": \"pads\", \"type\": 7, \"ints\": [%d, %d, %d, %d]}]\n", k, k, st, st, p, p, p, p);
+	fprintf(fptr, "      }");
+}
+
+//-----------------------------------------------
+// Kinds without parameters have no initializers
+//-----------------------------------------------
+static void no_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first)
+{
+	(void)fptr;
+	(void)pnet;
+	(void)layer;
+	(void)first;
+}
+
+//-----------------------------------------------
+// MaxPool ONNX node with kernel_shape and strides
+//-----------------------------------------------
+static void maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                               char *output, size_t output_size, int *first)
+{
+	PLayer cur = &pnet->layers[layer];
+	int size = cur->config[POOL_SIZE], stride = cur->config[POOL_STRIDE];
+	char name[32], attributes[160];
+	snprintf(name, sizeof(name), "maxpool_%d", layer - 1);
+	snprintf(output, output_size, "maxpool_%d_out", layer - 1);
+	snprintf(attributes, sizeof(attributes),
+	         "[{\"name\": \"kernel_shape\", \"type\": 7, \"ints\": [%d, %d]}, "
+	         "{\"name\": \"strides\", \"type\": 7, \"ints\": [%d, %d]}]", size, size, stride, stride);
+	write_onnx_node(fptr, "MaxPool", name, input, output, attributes, first);
+}
+
+//-----------------------------------------------
+// Flatten ONNX node: [batch, C, H, W] -> [batch, C*H*W]
+//-----------------------------------------------
+static void flatten_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                               char *output, size_t output_size, int *first)
+{
+	char name[32];
+	(void)pnet;
+	snprintf(name, sizeof(name), "flatten_%d", layer - 1);
+	snprintf(output, output_size, "flatten_%d_out", layer - 1);
+	write_onnx_node(fptr, "Flatten", name, input, output, "[{\"name\": \"axis\", \"type\": 2, \"i\": 1}]", first);
+}
+
+//-----------------------------------------------
 int ann_export_onnx(const PNetwork pnet, const char *filename)
 {
 	if (!pnet || !filename)
@@ -3934,15 +4095,29 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 		return ERR_INVALID;
 	}
 
-	// every layer kind needs ONNX support
+	// The ONNX input is an image [batch, C, H, W] when the input layer has a
+	// 2-D shape or conv/pool layers follow; dense layers take [batch, n], so
+	// the tensor is flattened before them. Conv/pool need an image input.
+	int image_input = !onnx_is_flat(&pnet->layers[0].shape);
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		const Layer_ops *ops = layer_ops(&pnet->layers[layer]);
-		if (!ops->onnx_initializers || !ops->onnx_nodes)
+		Layer_kind kind = pnet->layers[layer].kind;
+		if (kind == LAYER_KIND_CONV2D || kind == LAYER_KIND_MAXPOOL2D)
+			image_input = 1;
+	}
+
+	int image = image_input;
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+	{
+		PLayer cur = &pnet->layers[layer];
+		const Layer_ops *ops = layer_ops(cur);
+		int needs_image = cur->kind == LAYER_KIND_CONV2D || cur->kind == LAYER_KIND_MAXPOOL2D;
+		if (!ops->onnx_initializers || !ops->onnx_nodes || (needs_image && !image))
 		{
 			invoke_error_callback(ERR_INVALID, "ann_export_onnx");
 			return ERR_INVALID;
 		}
+		image = needs_image;
 	}
 
 	FILE *fptr = fopen(filename, "wt");
@@ -3951,9 +4126,6 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 		invoke_error_callback(ERR_IO, "ann_export_onnx");
 		return ERR_IO;
 	}
-
-	int input_size = pnet->layers[0].node_count;
-	int output_size = pnet->layers[pnet->layer_count - 1].node_count;
 
 	// Start JSON object
 	fprintf(fptr, "{\n");
@@ -3983,6 +4155,7 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	int first_node = 1;
 	char prev_output[64];
 	snprintf(prev_output, sizeof(prev_output), "input");
+	image = image_input;
 
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
@@ -3990,6 +4163,19 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 		int index = layer - 1;
 		char linear_out[64], act_out[64];
 		snprintf(act_out, sizeof(act_out), "layer_%d_out", index);
+
+		// Dense layers take [batch, n]: flatten an image first
+		Layer_kind kind = pnet->layers[layer].kind;
+		if (image && kind == LAYER_KIND_DENSE)
+		{
+			char flat_name[32], flat_out[64];
+			snprintf(flat_name, sizeof(flat_name), "flatten_input_%d", index);
+			snprintf(flat_out, sizeof(flat_out), "flatten_input_%d_out", index);
+			write_onnx_node(fptr, "Flatten", flat_name, prev_output, flat_out,
+			                "[{\"name\": \"axis\", \"type\": 2, \"i\": 1}]", &first_node);
+			snprintf(prev_output, sizeof(prev_output), "%s", flat_out);
+		}
+		image = kind == LAYER_KIND_CONV2D || kind == LAYER_KIND_MAXPOOL2D;
 
 		// The layer's own nodes (e.g. MatMul + Add), then its activation
 		layer_ops(&pnet->layers[layer])->onnx_nodes(fptr, pnet, layer, prev_output,
@@ -4049,7 +4235,7 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	fprintf(fptr, "        \"type\": {\n");
 	fprintf(fptr, "          \"tensor_type\": {\n");
 	fprintf(fptr, "            \"elem_type\": 1,\n");
-	fprintf(fptr, "            \"shape\": {\"dim\": [{\"dim_param\": \"batch\"}, {\"dim_value\": %d}]}\n", input_size);
+	write_onnx_shape(fptr, &pnet->layers[0].shape, image_input);
 	fprintf(fptr, "          }\n");
 	fprintf(fptr, "        }\n");
 	fprintf(fptr, "      }\n");
@@ -4062,7 +4248,7 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	fprintf(fptr, "        \"type\": {\n");
 	fprintf(fptr, "          \"tensor_type\": {\n");
 	fprintf(fptr, "            \"elem_type\": 1,\n");
-	fprintf(fptr, "            \"shape\": {\"dim\": [{\"dim_param\": \"batch\"}, {\"dim_value\": %d}]}\n", output_size);
+	write_onnx_shape(fptr, &pnet->layers[pnet->layer_count - 1].shape, image);
 	fprintf(fptr, "          }\n");
 	fprintf(fptr, "        }\n");
 	fprintf(fptr, "      }\n");
@@ -4394,7 +4580,8 @@ int ann_export_pikchr(const PNetwork pnet, const char *filename)
 		if (pnet->layers[i].node_count > max_nodes)
 			max_nodes = pnet->layers[i].node_count;
 	}
-	int detailed_mode = (max_nodes <= 10);
+	// image-shaped and non-dense layers are drawn as boxes
+	int detailed_mode = (max_nodes <= 10) && network_fits_v1(pnet);
 
 	fprintf(fptr, "# Neural Network Architecture\n");
 	fprintf(fptr, "# Generated by libann\n\n");
@@ -4478,16 +4665,22 @@ int ann_export_pikchr(const PNetwork pnet, const char *filename)
 		
 		for (int layer = 0; layer < pnet->layer_count; layer++)
 		{
+			const Layer *cur = &pnet->layers[layer];
 			const char *layer_type = (layer == 0) ? "Input" : 
-			                         (layer == pnet->layer_count - 1) ? "Output" : "Hidden";
-			int nodes = pnet->layers[layer].node_count;
-			const char *act_name = get_activation_name(pnet->layers[layer].activation);
+			                         (layer == pnet->layer_count - 1) ? "Output" :
+			                         (cur->kind != LAYER_KIND_DENSE) ? layer_ops(cur)->name : "Hidden";
+			const char *act_name = get_activation_name(cur->activation);
+			char size[48];
+			if (cur->shape.h == 1 && cur->shape.w == 1)
+				snprintf(size, sizeof(size), "%d nodes", cur->node_count);
+			else
+				snprintf(size, sizeof(size), "%dx%dx%d", cur->shape.c, cur->shape.h, cur->shape.w);
 			
 			if (act_name)
-				fprintf(fptr, "box \"%s\" \"%d nodes\" \"(%s)\"\n", 
-					layer_type, nodes, act_name);
+				fprintf(fptr, "box \"%s\" \"%s\" \"(%s)\"\n", 
+					layer_type, size, act_name);
 			else
-				fprintf(fptr, "box \"%s\" \"%d nodes\"\n", layer_type, nodes);
+				fprintf(fptr, "box \"%s\" \"%s\"\n", layer_type, size);
 			
 			if (layer < pnet->layer_count - 1)
 				fprintf(fptr, "arrow right 0.3\n");

@@ -104,7 +104,7 @@ void test_main(int argc, char *argv[]) {
     TESTEX("tensor_copy duplicates dimensions", 
            (a_copy && a_copy->rows == a->rows && a_copy->cols == a->cols));
     TESTEX("tensor_copy duplicates values", 
-           (a_copy && tensors_equal(a, a_copy, 1e-6)));
+           (a_copy && tensors_equal(a, a_copy, 1e-6f)));
 
     // Test tensor_add
     PTensor b = tensor_create(2, 2);

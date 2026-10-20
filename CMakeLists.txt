@@ -41,6 +41,9 @@ include_directories(${PROJECT_SOURCE_DIR})
 if (NOT MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wall>
                         $<$<COMPILE_LANGUAGE:C,CXX>:-Wextra>)
+else()
+    # fopen/fscanf/strcat are standard C; MSVC's *_s replacements are not portable
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
 # set compiler and arch specific optimizations

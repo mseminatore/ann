@@ -11,7 +11,10 @@ ann_export_onnx(pnet, "model.onnx.json");
 ### Format Details
 
 - Outputs JSON (not binary protobuf) - see [Converting to binary ONNX](#converting-to-binary-onnx)
-- Each layer becomes: `MatMul` → `Add` → `Activation` nodes
+- Each dense layer becomes: `MatMul` → `Add` → `Activation` nodes
+- Convolutional networks export `Conv` (weights `[F, C, k, k]`, `kernel_shape`,
+  `strides`, `pads`), `MaxPool` and `Flatten` nodes with a `[batch, C, H, W]`
+  input; a `Flatten` is inserted before a dense layer that receives an image
 - `weight_N` has dims `[in_nodes, out_nodes]`, the layout ONNX `MatMul` expects
   (libann stores weights as `[out, in]` internally and transposes them on export)
 - Input shape: `[batch, input_size]` with dynamic batch dimension
@@ -57,6 +60,7 @@ ann_export_onnx(net, "model.onnx.json");                // 1.1 file
 ### Import Limitations
 
 - **Only reads libann-exported JSON** - not general ONNX files
+- Dense networks only: files with `Conv`, `MaxPool` or `Flatten` are rejected
 - Requires specific naming: `weight_0`, `bias_0`, `activation_0`, etc.
 - Does not restore: optimizer state, learning rate, dropout rates, training history
 - Imported networks default to `OPT_ADAM` and `LOSS_MSE`

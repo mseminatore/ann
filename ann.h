@@ -109,7 +109,10 @@ typedef enum {
 // New kinds are appended so saved model values stay stable.
 //------------------------------
 typedef enum {
-	LAYER_KIND_DENSE					// fully connected: y = act(W x + b)
+	LAYER_KIND_DENSE,					// fully connected: y = act(W x + b)
+	LAYER_KIND_CONV2D,					// 2-D convolution over a (C, H, W) input
+	LAYER_KIND_MAXPOOL2D,				// 2-D max pooling, per channel
+	LAYER_KIND_FLATTEN					// reshape (C, H, W) to (C*H*W, 1, 1)
 } Layer_kind;
 
 //------------------------------
@@ -217,6 +220,7 @@ struct Layer
 	int node_count;						// number of nodes in layer (shape.c * shape.h * shape.w)
 	Layer_kind kind;					// what the layer computes
 	Layer_shape shape;					// output shape
+	Layer_shape in_shape;				// shape of the layer below (set when the layer is added)
 	int config[ANN_LAYER_CONFIG_MAX];	// kind-specific settings (unused by dense)
 
 	Layer_type layer_type;				// type of this layer
@@ -225,6 +229,8 @@ struct Layer
 
 	real dropout_rate;					// dropout rate for this layer (0.0 = disabled)
 	PTensor t_dropout_mask;				// dropout mask tensor (for batched training)
+
+	PTensor t_scratch[2];				// kind work buffers (conv: im2col columns and their gradient)
 
 	PTensor t_values;					// tensor of node values for the layer
 
@@ -355,6 +361,62 @@ ANN_API PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type);
  * @see ann_train_network()
  */
 ANN_API int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type);
+
+/**
+ * Add an input layer for image-like data of shape (channels, height, width).
+ * 
+ * Each sample is C*H*W values stored channel by channel, row by row
+ * (C, H, W order, as in ONNX/PyTorch). Use it instead of
+ * ann_add_layer(..., LAYER_INPUT, ...) when convolution or pooling layers follow.
+ * 
+ * @param pnet Network to add the layer to (must be empty)
+ * @param channels Number of channels (e.g. 1 for grayscale)
+ * @param height Image height
+ * @param width Image width
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad size or not the first layer) or ERR_ALLOC
+ */
+ANN_API int ann_add_input(PNetwork pnet, int channels, int height, int width);
+
+/**
+ * Add a 2-D convolution layer with square kernels and zero padding.
+ * 
+ * Output shape is (filters, OH, OW) with OH = (H + 2*padding - kernel_size) / stride + 1,
+ * and likewise for OW. Weights have shape [filters, C, kernel_size, kernel_size].
+ * 
+ * @param pnet Network to add the layer to
+ * @param filters Number of output channels (> 0)
+ * @param kernel_size Kernel height and width (> 0)
+ * @param stride Step between windows (> 0)
+ * @param padding Zeros added on each side (>= 0); (kernel_size - 1) / 2 keeps the size at stride 1
+ * @param activation Activation applied to the output (not ACTIVATION_SOFTMAX)
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad settings or the kernel does not fit) or ERR_ALLOC
+ */
+ANN_API int ann_add_conv2d(PNetwork pnet, int filters, int kernel_size, int stride, int padding,
+                           Activation_type activation);
+
+/**
+ * Add a 2-D max pooling layer (no padding), applied to each channel.
+ * 
+ * Output shape is (C, OH, OW) with OH = (H - pool_size) / stride + 1, and likewise for OW.
+ * 
+ * @param pnet Network to add the layer to
+ * @param pool_size Window height and width (> 0)
+ * @param stride Step between windows (> 0); usually equal to pool_size
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad settings or the window does not fit) or ERR_ALLOC
+ */
+ANN_API int ann_add_maxpool2d(PNetwork pnet, int pool_size, int stride);
+
+/**
+ * Add a flatten layer: reshape (C, H, W) to (C*H*W, 1, 1).
+ * 
+ * Optional: a dense layer added after a convolution or pooling layer reads
+ * its output as a flat vector anyway. It makes the model's structure explicit
+ * and maps to an ONNX Flatten node.
+ * 
+ * @param pnet Network to add the layer to
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (first layer) or ERR_ALLOC
+ */
+ANN_API int ann_add_flatten(PNetwork pnet);
 
 /**
  * Free all memory associated with a network.

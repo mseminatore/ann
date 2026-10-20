@@ -302,6 +302,13 @@ void test_main(int argc, char *argv[])
         TESTEX("Validation rejects mismatched rows", ann_set_validation_data(net, x, y3) == ERR_INVALID);
         TESTEX("Validation accepts matching tensors", ann_set_validation_data(net, x, yv) == ERR_OK);
         TESTEX("Validation clears with NULLs", ann_set_validation_data(net, NULL, NULL) == ERR_OK);
+
+        // Training data must have as many columns as the input and output layers
+        PTensor wide = tensor_create(4, 2);
+        tensor_fill(wide, 1.0f);
+        TESTEX("Training rejects inputs with the wrong column count", ann_train_network(net, wide, y, 4) == 0.0f);
+        TESTEX("Training rejects targets with the wrong column count", ann_train_network(net, x, wide, 4) == 0.0f);
+        tensor_free(wide);
         TESTEX("Best epoch is 0 before training", ann_get_best_epoch(net) == 0);
         ann_free_network(net);
 

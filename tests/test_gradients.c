@@ -150,6 +150,7 @@ void test_main(int argc, char *argv[])
     TESTEX("Tanh hidden layers",       (gc_check(ACTIVATION_TANH)       <= 1.0f));
     TESTEX("Softsign hidden layers",   (gc_check(ACTIVATION_SOFTSIGN)   <= 1.0f));
     TESTEX("GELU hidden layers",       (gc_check(ACTIVATION_GELU)       <= 1.0f));
+    TESTEX("Linear hidden layers",     (gc_check(ACTIVATION_NULL)       <= 1.0f));
 
     SUITE("Output Layer Gradients");
     TESTEX("MSE with sigmoid output",    (gc_check_output(ACTIVATION_SIGMOID,    LOSS_MSE) <= 1.0f));

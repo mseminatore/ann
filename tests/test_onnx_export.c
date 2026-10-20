@@ -268,11 +268,11 @@ void test_main(int argc, char *argv[]) {
     ann_add_layer(net, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
     
     // Set some known weights for verification
-    net->layers[0].t_weights->values[0] = 0.123f;
-    net->layers[0].t_weights->values[1] = 0.456f;
-    net->layers[0].t_bias->values[0] = 0.789f;
-    net->layers[1].t_weights->values[0] = 0.321f;
-    net->layers[1].t_bias->values[0] = 0.654f;
+    net->layers[1].t_weights->values[0] = 0.123f;
+    net->layers[1].t_weights->values[1] = 0.456f;
+    net->layers[1].t_bias->values[0] = 0.789f;
+    net->layers[2].t_weights->values[0] = 0.321f;
+    net->layers[2].t_bias->values[0] = 0.654f;
     
     result = ann_export_onnx(net, import_file);
     TESTEX("Export for import test succeeds", (result == ERR_OK));
@@ -297,9 +297,9 @@ void test_main(int argc, char *argv[]) {
                (imported->layers[2].activation == ACTIVATION_SOFTMAX));
         
         // Verify weights match
-        real w0 = imported->layers[0].t_weights->values[0];
-        real w1 = imported->layers[0].t_weights->values[1];
-        real b0 = imported->layers[0].t_bias->values[0];
+        real w0 = imported->layers[1].t_weights->values[0];
+        real w1 = imported->layers[1].t_weights->values[1];
+        real b0 = imported->layers[1].t_bias->values[0];
         TESTEX("Imported weight[0][0] matches", (w0 > 0.12f && w0 < 0.13f));
         TESTEX("Imported weight[0][1] matches", (w1 > 0.45f && w1 < 0.46f));
         TESTEX("Imported bias[0][0] matches", (b0 > 0.78f && b0 < 0.80f));
@@ -329,9 +329,9 @@ void test_main(int argc, char *argv[]) {
     ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SIGMOID);
 
     // Inject NaN and Inf into weights
-    net->layers[0].t_weights->values[0] = NAN;
-    net->layers[0].t_weights->values[1] = INFINITY;
-    net->layers[0].t_bias->values[0] = -INFINITY;
+    net->layers[1].t_weights->values[0] = NAN;
+    net->layers[1].t_weights->values[1] = INFINITY;
+    net->layers[1].t_bias->values[0] = -INFINITY;
 
     result = ann_export_onnx(net, test_file);
     TESTEX("Export with NaN/Inf values returns ERR_OK", (result == ERR_OK));

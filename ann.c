@@ -60,10 +60,20 @@ ANN_API int ann_gpu_init(void)
     return 0;
 }
 
+static int network_is_dense(const PNetwork pnet);
+static void invoke_error_callback(int error_code, const char *function_name);
+
 ANN_API int ann_gpu_upload_network(PNetwork pnet)
 {
     if (!g_gpu_backend)
         return ERR_FAIL;
+
+    // The GPU backends implement dense layers only; other networks stay on the CPU
+    if (!pnet || !network_is_dense(pnet))
+    {
+        invoke_error_callback(pnet ? ERR_INVALID : ERR_NULL_PTR, "ann_gpu_upload_network");
+        return pnet ? ERR_INVALID : ERR_NULL_PTR;
+    }
 
     int err = g_gpu_backend->upload_network(pnet);
     if (err == ERR_OK)
@@ -85,11 +95,11 @@ ANN_API void ann_gpu_sync_weights(PNetwork pnet)
 }
 
 #ifdef USE_GPU
-// Weights are on the GPU (dispatch checks layer 0, which every backend uploads)
+// Weights are on the GPU (dispatch checks layer 1's weights, which every backend uploads)
 static int gpu_uploaded(const PNetwork pnet)
 {
-    return g_gpu_backend && pnet->layer_count > 0 &&
-           pnet->layers[0].t_weights && pnet->layers[0].t_weights->gpu_buf;
+    return g_gpu_backend && pnet->layer_count > 1 &&
+           pnet->layers[1].t_weights && pnet->layers[1].t_weights->gpu_buf;
 }
 
 // The GPU copy may be used for inference: uploaded and as new as the CPU weights
@@ -185,8 +195,9 @@ static ErrorLogCallback g_error_log_callback = NULL;
 //------------------------------------------------
 // define the text and binary file format versions
 //------------------------------------------------
-static const int ANN_TEXT_FORMAT_VERSION = 1;
-static const int ANN_BINARY_FORMAT_VERSION = 1;
+// model file format versions (see save_network)
+static const int ANN_FORMAT_V1 = 1;
+static const int ANN_FORMAT_V2 = 2;
 
 #if defined(_WIN32) && !defined(_WIN64)
 #	define R_MIN -1
@@ -399,6 +410,233 @@ static void softmax(PNetwork pnet)
 	}
 }
 
+//================================================================================================
+// Layer kinds
+//
+// Each Layer_kind supplies the operations below. Generic code (training loop, optimizers,
+// regularization, early stopping, freeing) works through them and through each layer's
+// params[] list, so a new kind only implements its own math.
+//================================================================================================
+
+//-------------------------------------------
+// Accumulate column sums from a [batch × cols] matrix into a [1 × cols] vector.
+// bias_grad[n] += sum over batch rows of src[b * cols + n]
+//-------------------------------------------
+static void accumulate_bias_gradient(PTensor bias_grad, const PTensor src, int batch_size, int cols)
+{
+	for (int b = 0; b < batch_size; b++)
+	{
+		const real *row = src->values + b * cols;
+		real *bg = bias_grad->values;
+		int n = 0;
+		int unroll_limit = cols - 3;
+		for (; n < unroll_limit; n += 4)
+		{
+			bg[n]     += row[n];
+			bg[n + 1] += row[n + 1];
+			bg[n + 2] += row[n + 2];
+			bg[n + 3] += row[n + 3];
+		}
+		for (; n < cols; n++)
+			bg[n] += row[n];
+	}
+}
+
+//------------------------------
+// free a layer's parameters, gradients and optimizer state
+//------------------------------
+static void free_layer_params(PLayer layer)
+{
+	for (int i = 0; i < layer->param_count; i++)
+	{
+		tensor_free(layer->params[i].value);
+		tensor_free(layer->params[i].grad);
+		tensor_free(layer->params[i].m);
+		tensor_free(layer->params[i].v);
+	}
+	memset(layer->params, 0, sizeof(layer->params));
+	layer->param_count = 0;
+
+	// the dense aliases pointed at the tensors just freed
+	layer->t_weights	= NULL;
+	layer->t_gradients	= NULL;
+	layer->t_m			= NULL;
+	layer->t_v			= NULL;
+	layer->t_bias		= NULL;
+	layer->t_bias_grad	= NULL;
+	layer->t_bias_m		= NULL;
+	layer->t_bias_v		= NULL;
+}
+
+//------------------------------
+// add a zeroed [rows x cols] parameter with its gradient and optimizer
+// state; on failure the caller frees the layer's params
+//------------------------------
+static int add_param(PLayer layer, int rows, int cols, int regularize)
+{
+	if (layer->param_count >= ANN_LAYER_MAX_PARAMS)
+		return ERR_INVALID;
+
+	Layer_param *p = &layer->params[layer->param_count++];
+	p->value		= tensor_zeros(rows, cols);
+	p->grad			= tensor_zeros(rows, cols);
+	p->m			= tensor_zeros(rows, cols);
+	p->v			= tensor_zeros(rows, cols);
+	p->regularize	= regularize;
+
+	return (p->value && p->grad && p->m && p->v) ? ERR_OK : ERR_ALLOC;
+}
+
+//------------------------------
+// Dense: allocate weights [nodes x in_nodes] and bias [1 x nodes]
+//------------------------------
+static int dense_setup(PNetwork pnet, int layer)
+{
+	PLayer cur = &pnet->layers[layer];
+	int in_nodes = pnet->layers[layer - 1].node_count;
+
+	if (add_param(cur, cur->node_count, in_nodes, 1) != ERR_OK ||
+		add_param(cur, 1, cur->node_count, 0) != ERR_OK)
+	{
+		free_layer_params(cur);
+		return ERR_ALLOC;
+	}
+
+	cur->t_weights		= cur->params[0].value;
+	cur->t_gradients	= cur->params[0].grad;
+	cur->t_m			= cur->params[0].m;
+	cur->t_v			= cur->params[0].v;
+	cur->t_bias			= cur->params[1].value;
+	cur->t_bias_grad	= cur->params[1].grad;
+	cur->t_bias_m		= cur->params[1].m;
+	cur->t_bias_v		= cur->params[1].v;
+	return ERR_OK;
+}
+
+//------------------------------
+// Dense: initialize weights and bias with the chosen scheme
+//------------------------------
+static void dense_init_weights(PNetwork pnet, int layer, Weight_init_type init_type)
+{
+	PLayer cur = &pnet->layers[layer];
+	int fan_in = pnet->layers[layer - 1].node_count;
+	int fan_out = cur->node_count;
+
+	switch (init_type)
+	{
+	case WEIGHT_INIT_HE:
+		// He initialization: std = sqrt(2 / fan_in)
+		{
+			real std = (real)sqrt(2.0 / fan_in);
+			tensor_random_normal(cur->t_weights, (real)0.0, std);
+			tensor_fill(cur->t_bias, (real)0.0);
+		}
+		break;
+
+	case WEIGHT_INIT_XAVIER:
+		// Xavier/Glorot initialization: std = sqrt(2 / (fan_in + fan_out))
+		{
+			real std = (real)sqrt(2.0 / (fan_in + fan_out));
+			tensor_random_normal(cur->t_weights, (real)0.0, std);
+			tensor_fill(cur->t_bias, (real)0.0);
+		}
+		break;
+
+	default:
+	case WEIGHT_INIT_UNIFORM:
+		// Original uniform initialization
+		tensor_random_uniform(cur->t_bias, (real)-pnet->weight_limit, (real)pnet->weight_limit);
+		tensor_random_uniform(cur->t_weights, (real)-pnet->weight_limit, (real)pnet->weight_limit);
+		break;
+	}
+}
+
+//------------------------------
+// Dense forward, linear part: Y = X * W^T + b for X [rows x in_nodes]
+//------------------------------
+static void dense_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	int out_nodes = layer->node_count;
+
+	// Y = X * W^T (gemm with B transposed)
+	// X is [batch × in], W is [out × in], Y is [batch × out]
+	tensor_gemm_transB((real)1.0, X, layer->t_weights, (real)0.0, Y);
+
+	// Add bias to each row
+	for (int b = 0; b < rows; b++)
+	{
+		int row_offset = b * out_nodes;
+		for (int n = 0; n < out_nodes; n++)
+		{
+			Y->values[row_offset + n] += layer->t_bias->values[n];
+		}
+	}
+}
+
+//------------------------------
+// Dense forward for one sample: y = W x + b
+//------------------------------
+static void dense_forward_single(PLayer layer, const PTensor x, PTensor y)
+{
+	tensor_matvec(Tensor_NoTranspose, (real)1.0, layer->t_weights, (real)0.0, x, y);
+	tensor_add(y, layer->t_bias);
+}
+
+//------------------------------
+// Dense backward: given dZ = -dL/dz [rows x nodes] and the layer's input X,
+// accumulate dW += dZ^T X and db += column sums of dZ, and, when dX is not
+// NULL, propagate dX = dZ W to the layer below
+//------------------------------
+static void dense_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
+{
+	// dZ is [batch × out], X is [batch × in]; dZ^T X is [out × in]
+	tensor_gemm_transA((real)1.0, dZ, X, (real)1.0, layer->t_gradients);
+
+	accumulate_bias_gradient(layer->t_bias_grad, dZ, rows, layer->node_count);
+
+	// dX = dZ * W: [batch × out] * [out × in] = [batch × in]
+	if (dX)
+		tensor_gemm((real)1.0, dZ, layer->t_weights, (real)0.0, dX);
+}
+
+//------------------------------
+// Operations every layer kind provides
+//------------------------------
+typedef struct {
+	const char *name;
+	int config_count;		// how many config[] entries the kind uses (saved in v2 files)
+	// allocate and register params[]; shape and node_count are already set
+	int  (*setup)(PNetwork pnet, int layer);
+	void (*init_weights)(PNetwork pnet, int layer, Weight_init_type init_type);
+	// linear part of the forward pass for X [rows x input nodes] into Y
+	void (*forward)(PLayer layer, const PTensor X, PTensor Y, int rows);
+	// single-sample forward pass; NULL means use forward() with one row
+	void (*forward_single)(PLayer layer, const PTensor x, PTensor y);
+	// accumulate parameter gradients from dZ; write dX unless it is NULL
+	void (*backward)(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows);
+	// ONNX export: the layer's initializers, then its nodes from input to output
+	// (the activation node is added by the caller); *first tracks JSON commas
+	void (*onnx_initializers)(FILE *fptr, const PNetwork pnet, int layer, int *first);
+	void (*onnx_nodes)(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+	                   char *output, size_t output_size, int *first);
+} Layer_ops;
+
+// ONNX hooks live with the rest of the ONNX export code
+static void dense_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
+static void dense_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                             char *output, size_t output_size, int *first);
+
+// indexed by Layer_kind
+static const Layer_ops g_layer_ops[] = {
+	{ "Dense", 0, dense_setup, dense_init_weights, dense_forward, dense_forward_single, dense_backward,
+	  dense_onnx_initializers, dense_onnx_nodes },
+};
+
+static const Layer_ops *layer_ops(const Layer *layer)
+{
+	return &g_layer_ops[layer->kind];
+}
+
 //------------------------------
 // initialize the weights
 //------------------------------
@@ -413,8 +651,6 @@ static void init_weights(PNetwork pnet)
 
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		int fan_in = pnet->layers[layer - 1].node_count;
-		int fan_out = pnet->layers[layer].node_count;
 		Activation_type activation = pnet->layers[layer].activation;
 
 		// Determine initialization strategy
@@ -442,34 +678,7 @@ static void init_weights(PNetwork pnet)
 			}
 		}
 
-		// Initialize weights based on strategy
-		switch (init_type)
-		{
-		case WEIGHT_INIT_HE:
-			// He initialization: std = sqrt(2 / fan_in)
-			{
-				real std = (real)sqrt(2.0 / fan_in);
-				tensor_random_normal(pnet->layers[layer - 1].t_weights, (real)0.0, std);
-				tensor_fill(pnet->layers[layer - 1].t_bias, (real)0.0);
-			}
-			break;
-
-		case WEIGHT_INIT_XAVIER:
-			// Xavier/Glorot initialization: std = sqrt(2 / (fan_in + fan_out))
-			{
-				real std = (real)sqrt(2.0 / (fan_in + fan_out));
-				tensor_random_normal(pnet->layers[layer - 1].t_weights, (real)0.0, std);
-				tensor_fill(pnet->layers[layer - 1].t_bias, (real)0.0);
-			}
-			break;
-
-		default:
-		case WEIGHT_INIT_UNIFORM:
-			// Original uniform initialization
-			tensor_random_uniform(pnet->layers[layer - 1].t_bias, (real)-pnet->weight_limit, (real)pnet->weight_limit);
-			tensor_random_uniform(pnet->layers[layer - 1].t_weights, (real)-pnet->weight_limit, (real)pnet->weight_limit);
-			break;
-		}
+		layer_ops(&pnet->layers[layer])->init_weights(pnet, layer, init_type);
 	}
 
 	pnet->weights_set = 1;
@@ -605,17 +814,22 @@ static void eval_network(PNetwork pnet)
 	}
 #endif
 
-	// loop over the non-output layers
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	// loop over the non-input layers; each owns the weights that produce it
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		// y = Wx + b
-		tensor_matvec(Tensor_NoTranspose, (real)1.0, pnet->layers[layer].t_weights, (real)0.0, pnet->layers[layer].t_values, pnet->layers[layer + 1].t_values);
-		tensor_add(pnet->layers[layer + 1].t_values, pnet->layers[layer].t_bias);
+		PLayer cur = &pnet->layers[layer];
+		const Layer_ops *ops = layer_ops(cur);
+
+		// linear part, e.g. y = Wx + b
+		if (ops->forward_single)
+			ops->forward_single(cur, pnet->layers[layer - 1].t_values, cur->t_values);
+		else
+			ops->forward(cur, pnet->layers[layer - 1].t_values, cur->t_values, 1);
 
 		// apply activation function to values
-		for (int i = 0; i < pnet->layers[layer + 1].node_count; i++)
+		for (int i = 0; i < cur->node_count; i++)
 		{
-			pnet->layers[layer + 1].t_values->values[i] = pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values->values[i]);
+			cur->t_values->values[i] = cur->activation_func(cur->t_values->values[i]);
 		}
 	}
 
@@ -739,33 +953,19 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 	if (!pnet)
 		return;
 
-	// Loop over non-output layers (weights connect layer i to layer i+1)
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	// Loop over non-input layers (each owns the parameters from the layer below)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		PTensor X = pnet->layers[layer].t_batch_values;      // [batch × in_nodes]
-		PTensor W = pnet->layers[layer].t_weights;           // [out_nodes × in_nodes]
-		PTensor Y = pnet->layers[layer + 1].t_batch_values;  // [batch × out_nodes]
-		PTensor Z = pnet->layers[layer + 1].t_batch_z;       // [batch × out_nodes]
-		PTensor bias = pnet->layers[layer].t_bias;           // [out_nodes × 1]
-		int out_nodes = pnet->layers[layer + 1].node_count;
+		PLayer cur = &pnet->layers[layer];
+		PTensor X = pnet->layers[layer - 1].t_batch_values;  // [batch × in_nodes]
+		PTensor Y = cur->t_batch_values;                     // [batch × out_nodes]
+		PTensor Z = cur->t_batch_z;                          // [batch × out_nodes]
 
-		// Y = X * W^T (gemm with B transposed)
-		// X is [batch × in], W is [out × in], Y is [batch × out]
-		tensor_gemm_transB((real)1.0, X, W, (real)0.0, Y);
+		// Linear part (e.g. Y = X * W^T + b), then save the pre-activation Z
+		layer_ops(cur)->forward(cur, X, Y, batch_size);
 
-		// Fused bias add + pre-activation save + activation (single pass over Y)
-		Activation_type act_type = pnet->layers[layer + 1].activation;
-		int total = batch_size * out_nodes;
-
-		// Add bias to each row and save pre-activation Z
-		for (int b = 0; b < batch_size; b++)
-		{
-			int row_offset = b * out_nodes;
-			for (int n = 0; n < out_nodes; n++)
-			{
-				Y->values[row_offset + n] += bias->values[n];
-			}
-		}
+		Activation_type act_type = cur->activation;
+		int total = batch_size * cur->node_count;
 		memcpy(Z->values, Y->values, total * sizeof(real));
 
 		// Inlined activation (avoids function pointer overhead, enables auto-vectorization)
@@ -803,39 +1003,15 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 		}
 		
 		// Apply dropout to hidden layers (not output layer)
-		if (layer + 1 < pnet->layer_count - 1)
+		if (layer < pnet->layer_count - 1)
 		{
-			apply_dropout_batched(pnet, layer + 1, batch_size);
+			apply_dropout_batched(pnet, layer, batch_size);
 		}
 	}
 
 	// Apply softmax on output if requested
 	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
 		softmax_batched(pnet, batch_size);
-}
-
-//-------------------------------------------
-// Accumulate column sums from a [batch × cols] matrix into a [1 × cols] vector.
-// bias_grad[n] += sum over batch rows of src[b * cols + n]
-//-------------------------------------------
-static void accumulate_bias_gradient(PTensor bias_grad, const PTensor src, int batch_size, int cols)
-{
-	for (int b = 0; b < batch_size; b++)
-	{
-		const real *row = src->values + b * cols;
-		real *bg = bias_grad->values;
-		int n = 0;
-		int unroll_limit = cols - 3;
-		for (; n < unroll_limit; n += 4)
-		{
-			bg[n]     += row[n];
-			bg[n + 1] += row[n + 1];
-			bg[n + 2] += row[n + 2];
-			bg[n + 3] += row[n + 3];
-		}
-		for (; n < cols; n++)
-			bg[n] += row[n];
-	}
 }
 
 //-------------------------------------------
@@ -887,7 +1063,7 @@ static real sample_loss(const PNetwork pnet, const real *t, const real *y, int n
 //-------------------------------------------
 // Turn the MSE output error delta = T - Y into the gradient with respect to
 // the output pre-activations, -dL/dz, by applying the output activation's
-// derivative. Needed for MSE with a nonlinear output; cross-entropy with
+// derivative. Hidden layers use it the same way to turn dL/da into dL/dz. Needed for MSE with a nonlinear output; cross-entropy with
 // softmax already has -dL/dz = T - Y. Softmax uses its full Jacobian per row:
 // delta_j = y_j * (d_j - sum_i d_i * y_i).
 // Shared with the GPU backends (declared in ann_gpu_backend.h) so every path
@@ -1003,18 +1179,9 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 		ann_mse_output_delta(layer->activation, delta->values, Y->values,
 		                     layer->t_batch_z->values, batch_size, out_nodes);
 	
-	// Gradient: dW += delta^T * A_prev
-	// delta is [batch × out], A_prev is [batch × in]
-	// delta^T is [out × batch], result is [out × in]
-	tensor_gemm_transA((real)1.0, delta, A_prev, (real)1.0, prev_layer->t_gradients);
-	
-	// Bias gradient: sum of delta columns
-	accumulate_bias_gradient(prev_layer->t_bias_grad, delta, batch_size, out_nodes);
-	
-	// Propagate to previous layer: dl_dz_prev = delta * W
-	// delta is [batch × out], W is [out × in]
-	// Result is [batch × in]
-	tensor_gemm((real)1.0, delta, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+	// Parameter gradients, and the gradient for the layer below (the input
+	// layer needs none)
+	layer_ops(layer)->backward(layer, A_prev, delta, output_layer > 1 ? prev_layer->t_batch_dl_dz : NULL, batch_size);
 	
 	return total_loss;
 }
@@ -1046,237 +1213,28 @@ static void apply_dropout_mask_to_gradient(PLayer layer, int batch_size)
 }
 
 //-------------------------------------------
-// Batched hidden layer backpropagation for sigmoid
-// Applies sigmoid derivative: dL/dz = dL/da * a * (1 - a)
-// Then computes gradient and propagates
+// Batched hidden layer backpropagation. On entry t_batch_dl_dz holds the
+// gradient with respect to the layer's activations; undo dropout, apply the
+// activation's derivative (the same one the output layer uses with MSE), then
+// let the layer kind accumulate its parameter gradients and propagate.
 //-------------------------------------------
-static void back_propagate_sigmoid_batched(PNetwork pnet, int batch_size, int layer_idx)
+static void back_propagate_hidden_batched(PNetwork pnet, int batch_size, int layer_idx)
 {
 	PLayer layer = &pnet->layers[layer_idx];
 	PLayer prev_layer = &pnet->layers[layer_idx - 1];
-	
-	int nodes = layer->node_count;
 	
 	PTensor dl_dz = layer->t_batch_dl_dz;        // [batch × nodes]
-	PTensor A = layer->t_batch_values;           // [batch × nodes] activations
-	PTensor A_prev = prev_layer->t_batch_values; // [batch × prev_nodes]
 	
 	// Apply dropout mask to gradient (if dropout was used in forward pass)
 	apply_dropout_mask_to_gradient(layer, batch_size);
 	
-	// Apply sigmoid derivative: dL/dz *= a * (1 - a)
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			real a = A->values[offset + n];
-			real deriv = a * ((real)1.0 - a);
-			dl_dz->values[offset + n] *= deriv;
-		}
-	}
+	// dL/dz = dL/da * f'(z)
+	ann_mse_output_delta(layer->activation, dl_dz->values, layer->t_batch_values->values,
+	                     layer->t_batch_z->values, batch_size, layer->node_count);
 	
-	// Gradient: dW += dl_dz^T * A_prev
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
-	
-	// Bias gradient: sum of dl_dz columns
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
-	
-	// Propagate: dl_dz_prev = dl_dz * W
-	if (layer_idx > 1)  // Don't propagate to input layer
-	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
-	}
-}
-
-//-------------------------------------------
-// Batched hidden layer backpropagation for ReLU
-//-------------------------------------------
-static void back_propagate_relu_batched(PNetwork pnet, int batch_size, int layer_idx)
-{
-	PLayer layer = &pnet->layers[layer_idx];
-	PLayer prev_layer = &pnet->layers[layer_idx - 1];
-	
-	int nodes = layer->node_count;
-	
-	PTensor dl_dz = layer->t_batch_dl_dz;
-	PTensor Z = layer->t_batch_z;  // Pre-activation values
-	PTensor A_prev = prev_layer->t_batch_values;
-	
-	// Apply dropout mask to gradient (if dropout was used in forward pass)
-	apply_dropout_mask_to_gradient(layer, batch_size);
-	
-	// Apply ReLU derivative: dL/dz *= (z > 0 ? 1 : 0)
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			if (Z->values[offset + n] <= (real)0.0)
-				dl_dz->values[offset + n] = (real)0.0;
-		}
-	}
-	
-	// Gradient: dW += dl_dz^T * A_prev
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
-	
-	// Bias gradient
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
-	
-	// Propagate
-	if (layer_idx > 1)
-	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
-	}
-}
-
-//-------------------------------------------
-// Batched hidden layer backpropagation for Leaky ReLU
-//-------------------------------------------
-static void back_propagate_leaky_relu_batched(PNetwork pnet, int batch_size, int layer_idx)
-{
-	PLayer layer = &pnet->layers[layer_idx];
-	PLayer prev_layer = &pnet->layers[layer_idx - 1];
-	
-	int nodes = layer->node_count;
-	
-	PTensor dl_dz = layer->t_batch_dl_dz;
-	PTensor Z = layer->t_batch_z;
-	PTensor A_prev = prev_layer->t_batch_values;
-	
-	// Apply dropout mask to gradient (if dropout was used in forward pass)
-	apply_dropout_mask_to_gradient(layer, batch_size);
-	
-	// Apply Leaky ReLU derivative: dL/dz *= (z > 0 ? 1 : 0.01)
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			real deriv = Z->values[offset + n] > (real)0.0 ? (real)1.0 : (real)0.01;
-			dl_dz->values[offset + n] *= deriv;
-		}
-	}
-	
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
-	
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
-	
-	if (layer_idx > 1)
-	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
-	}
-}
-
-//-------------------------------------------
-// Batched hidden layer backpropagation for Tanh
-//-------------------------------------------
-static void back_propagate_tanh_batched(PNetwork pnet, int batch_size, int layer_idx)
-{
-	PLayer layer = &pnet->layers[layer_idx];
-	PLayer prev_layer = &pnet->layers[layer_idx - 1];
-	
-	int nodes = layer->node_count;
-	
-	PTensor dl_dz = layer->t_batch_dl_dz;
-	PTensor A = layer->t_batch_values;  // tanh output
-	PTensor A_prev = prev_layer->t_batch_values;
-	
-	// Apply dropout mask to gradient (if dropout was used in forward pass)
-	apply_dropout_mask_to_gradient(layer, batch_size);
-	
-	// Apply tanh derivative: dL/dz *= (1 - a^2)
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			real a = A->values[offset + n];
-			real deriv = (real)1.0 - a * a;
-			dl_dz->values[offset + n] *= deriv;
-		}
-	}
-	
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
-	
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
-	
-	if (layer_idx > 1)
-	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
-	}
-}
-
-//-------------------------------------------
-// Batched hidden layer backpropagation for Softsign
-//-------------------------------------------
-static void back_propagate_softsign_batched(PNetwork pnet, int batch_size, int layer_idx)
-{
-	PLayer layer = &pnet->layers[layer_idx];
-	PLayer prev_layer = &pnet->layers[layer_idx - 1];
-	
-	int nodes = layer->node_count;
-	
-	PTensor dl_dz = layer->t_batch_dl_dz;
-	PTensor A = layer->t_batch_values;  // softsign output
-	PTensor A_prev = prev_layer->t_batch_values;
-	
-	// Apply dropout mask to gradient (if dropout was used in forward pass)
-	apply_dropout_mask_to_gradient(layer, batch_size);
-	
-	// Apply softsign derivative: dL/dz *= (1 - |a|)^2
-	for (int b = 0; b < batch_size; b++)
-	{
-		int offset = b * nodes;
-		for (int n = 0; n < nodes; n++)
-		{
-			real a = A->values[offset + n];
-			real one_minus_abs = (real)1.0 - (real)fabs(a);
-			real deriv = one_minus_abs * one_minus_abs;
-			dl_dz->values[offset + n] *= deriv;
-		}
-	}
-	
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
-	
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
-	
-	if (layer_idx > 1)
-	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
-	}
-}
-
-//-------------------------------------------
-// Batched hidden layer backpropagation for GELU
-//-------------------------------------------
-static void back_propagate_gelu_batched(PNetwork pnet, int batch_size, int layer_idx)
-{
-	PLayer layer = &pnet->layers[layer_idx];
-	PLayer prev_layer = &pnet->layers[layer_idx - 1];
-	
-	int nodes = layer->node_count;
-	
-	PTensor dl_dz = layer->t_batch_dl_dz;
-	PTensor Z = layer->t_batch_z;  // Pre-activation values
-	PTensor A_prev = prev_layer->t_batch_values;
-	
-	// Apply dropout mask to gradient (if dropout was used in forward pass)
-	apply_dropout_mask_to_gradient(layer, batch_size);
-	
-	// Apply GELU derivative: dL/dz *= gelu'(z)
-	int total = batch_size * nodes;
-	for (int i = 0; i < total; i++)
-		dl_dz->values[i] *= gelu_derivative(Z->values[i]);
-	
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
-	
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
-	
-	if (layer_idx > 1)
-	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
-	}
+	// Gradients, and propagation unless the layer below is the input
+	layer_ops(layer)->backward(layer, prev_layer->t_batch_values, dl_dz,
+	                           layer_idx > 1 ? prev_layer->t_batch_dl_dz : NULL, batch_size);
 }
 
 //-------------------------------------------
@@ -1292,35 +1250,7 @@ static real back_propagate_batched(PNetwork pnet, int batch_size, PTensor target
 	
 	// Hidden layers backprop (from output-1 to layer 1)
 	for (int layer = output_layer - 1; layer > 0; layer--)
-	{
-		Activation_type act = pnet->layers[layer].activation;
-		
-		switch (act)
-		{
-		case ACTIVATION_SIGMOID:
-			back_propagate_sigmoid_batched(pnet, batch_size, layer);
-			break;
-		case ACTIVATION_RELU:
-			back_propagate_relu_batched(pnet, batch_size, layer);
-			break;
-		case ACTIVATION_LEAKY_RELU:
-			back_propagate_leaky_relu_batched(pnet, batch_size, layer);
-			break;
-		case ACTIVATION_TANH:
-			back_propagate_tanh_batched(pnet, batch_size, layer);
-			break;
-		case ACTIVATION_SOFTSIGN:
-			back_propagate_softsign_batched(pnet, batch_size, layer);
-			break;
-		case ACTIVATION_GELU:
-			back_propagate_gelu_batched(pnet, batch_size, layer);
-			break;
-		default:
-			// Default to sigmoid behavior
-			back_propagate_sigmoid_batched(pnet, batch_size, layer);
-			break;
-		}
-	}
+		back_propagate_hidden_batched(pnet, batch_size, layer);
 	
 	return loss;
 }
@@ -1409,10 +1339,11 @@ static void clip_gradients(PNetwork pnet)
 	if (pnet->max_gradient <= (real)0.0)
 		return;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		tensor_clip(pnet->layers[layer].t_gradients, -pnet->max_gradient, pnet->max_gradient);
-		tensor_clip(pnet->layers[layer].t_bias_grad, -pnet->max_gradient, pnet->max_gradient);
+		PLayer cur = &pnet->layers[layer];
+		for (int p = 0; p < cur->param_count; p++)
+			tensor_clip(cur->params[p].grad, -pnet->max_gradient, pnet->max_gradient);
 	}
 }
 
@@ -1431,29 +1362,36 @@ static void apply_regularization(PNetwork pnet)
 	if (l2 <= (real)0.0 && l1 <= (real)0.0)
 		return;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		PTensor W = pnet->layers[layer].t_weights;
-		int size = W->rows * W->cols;
-
-		// L2 regularization: W = W * (1 - lr * l2)
-		if (l2 > (real)0.0)
+		PLayer cur = &pnet->layers[layer];
+		for (int p = 0; p < cur->param_count; p++)
 		{
-			real decay = (real)1.0 - lr * l2;
-			tensor_mul_scalar(W, decay);
-		}
+			if (!cur->params[p].regularize)
+				continue;
 
-		// L1 regularization: W = W - lr * l1 * sign(W)
-		if (l1 > (real)0.0)
-		{
-			real *w = W->values;
-			real delta = lr * l1;
-			for (int i = 0; i < size; i++)
+			PTensor W = cur->params[p].value;
+			int size = W->rows * W->cols;
+
+			// L2 regularization: W = W * (1 - lr * l2)
+			if (l2 > (real)0.0)
 			{
-				if (w[i] > (real)0.0)
-					w[i] -= delta;
-				else if (w[i] < (real)0.0)
-					w[i] += delta;
+				real decay = (real)1.0 - lr * l2;
+				tensor_mul_scalar(W, decay);
+			}
+
+			// L1 regularization: W = W - lr * l1 * sign(W)
+			if (l1 > (real)0.0)
+			{
+				real *w = W->values;
+				real delta = lr * l1;
+				for (int i = 0; i < size; i++)
+				{
+					if (w[i] > (real)0.0)
+						w[i] -= delta;
+					else if (w[i] < (real)0.0)
+						w[i] += delta;
+				}
 			}
 		}
 	}
@@ -1472,13 +1410,14 @@ static void optimize_sgd(PNetwork pnet)
 {
 	clip_gradients(pnet);
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		// W = W + n * gradients
-		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_gradients, pnet->layers[layer].t_weights);
-
-		// bias = bias + n * bias_grad
-		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_bias_grad, pnet->layers[layer].t_bias);
+		PLayer cur = &pnet->layers[layer];
+		for (int p = 0; p < cur->param_count; p++)
+		{
+			// W = W + n * gradients
+			tensor_axpy(pnet->learning_rate, cur->params[p].grad, cur->params[p].value);
+		}
 	}
 
 	apply_regularization(pnet);
@@ -1500,19 +1439,19 @@ static void optimize_momentum(PNetwork pnet)
 
 	real beta = (real)0.9, one_minus_beta = (real)0.1;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		// momentum = beta * m + one_minus_beta * gradients
-		tensor_axpby(one_minus_beta, pnet->layers[layer].t_gradients, beta, pnet->layers[layer].t_m);
+		PLayer cur = &pnet->layers[layer];
+		for (int p = 0; p < cur->param_count; p++)
+		{
+			Layer_param *param = &cur->params[p];
 
-		// W = W + n * m
-		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_m, pnet->layers[layer].t_weights);
+			// momentum = beta * m + one_minus_beta * gradients
+			tensor_axpby(one_minus_beta, param->grad, beta, param->m);
 
-		// bias momentum = beta * bias_m + one_minus_beta * bias_grad
-		tensor_axpby(one_minus_beta, pnet->layers[layer].t_bias_grad, beta, pnet->layers[layer].t_bias_m);
-
-		// bias = bias + n * bias_m
-		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_bias_m, pnet->layers[layer].t_bias);
+			// W = W + n * m
+			tensor_axpy(pnet->learning_rate, param->m, param->value);
+		}
 	}
 
 	apply_regularization(pnet);
@@ -1531,34 +1470,24 @@ static void optimize_adagrad(PNetwork pnet)
 
 	real epsilon = (real)1e-8;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		PTensor g = pnet->layers[layer].t_gradients;
-		PTensor v = pnet->layers[layer].t_v;
-		PTensor w = pnet->layers[layer].t_weights;
-
-		int size = g->rows * g->cols;
-
-		// v = v + g^2, then W = W + lr * g / (sqrt(v) + epsilon)
-		for (int i = 0; i < size; i++)
+		PLayer cur = &pnet->layers[layer];
+		for (int p = 0; p < cur->param_count; p++)
 		{
-			real grad = g->values[i];
-			v->values[i] += grad * grad;
-			w->values[i] += pnet->learning_rate * grad / ((real)sqrt(v->values[i]) + epsilon);
-		}
+			PTensor g = cur->params[p].grad;
+			PTensor v = cur->params[p].v;
+			PTensor w = cur->params[p].value;
 
-		// Update biases with AdaGrad
-		PTensor bg = pnet->layers[layer].t_bias_grad;
-		PTensor bv = pnet->layers[layer].t_bias_v;
-		PTensor b = pnet->layers[layer].t_bias;
+			int size = g->rows * g->cols;
 
-		int bias_size = bg->cols;
-
-		for (int i = 0; i < bias_size; i++)
-		{
-			real grad = bg->values[i];
-			bv->values[i] += grad * grad;
-			b->values[i] += pnet->learning_rate * grad / ((real)sqrt(bv->values[i]) + epsilon);
+			// v = v + g^2, then W = W + lr * g / (sqrt(v) + epsilon)
+			for (int i = 0; i < size; i++)
+			{
+				real grad = g->values[i];
+				v->values[i] += grad * grad;
+				w->values[i] += pnet->learning_rate * grad / ((real)sqrt(v->values[i]) + epsilon);
+			}
 		}
 	}
 
@@ -1579,35 +1508,25 @@ static void optimize_rmsprop(PNetwork pnet)
 	real one_minus_beta = (real)0.1;
 	real epsilon = (real)1e-8;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		PTensor g = pnet->layers[layer].t_gradients;
-		PTensor v = pnet->layers[layer].t_v;
-		PTensor w = pnet->layers[layer].t_weights;
-
-		int size = g->rows * g->cols;
-
-		// v = beta * v + (1 - beta) * g^2
-		// W = W + lr * g / (sqrt(v) + epsilon)
-		for (int i = 0; i < size; i++)
+		PLayer cur = &pnet->layers[layer];
+		for (int p = 0; p < cur->param_count; p++)
 		{
-			real grad = g->values[i];
-			v->values[i] = beta * v->values[i] + one_minus_beta * grad * grad;
-			w->values[i] += pnet->learning_rate * grad / ((real)sqrt(v->values[i]) + epsilon);
-		}
+			PTensor g = cur->params[p].grad;
+			PTensor v = cur->params[p].v;
+			PTensor w = cur->params[p].value;
 
-		// Update biases with RMSProp
-		PTensor bg = pnet->layers[layer].t_bias_grad;
-		PTensor bv = pnet->layers[layer].t_bias_v;
-		PTensor b = pnet->layers[layer].t_bias;
+			int size = g->rows * g->cols;
 
-		int bias_size = bg->cols;
-
-		for (int i = 0; i < bias_size; i++)
-		{
-			real grad = bg->values[i];
-			bv->values[i] = beta * bv->values[i] + one_minus_beta * grad * grad;
-			b->values[i] += pnet->learning_rate * grad / ((real)sqrt(bv->values[i]) + epsilon);
+			// v = beta * v + (1 - beta) * g^2
+			// W = W + lr * g / (sqrt(v) + epsilon)
+			for (int i = 0; i < size; i++)
+			{
+				real grad = g->values[i];
+				v->values[i] = beta * v->values[i] + one_minus_beta * grad * grad;
+				w->values[i] += pnet->learning_rate * grad / ((real)sqrt(v->values[i]) + epsilon);
+			}
 		}
 	}
 
@@ -1633,57 +1552,35 @@ static void optimize_adam(PNetwork pnet)
 	real bias_correction1 = (real)1.0 / ((real)1.0 - (real)pow(beta1, pnet->train_iteration));
 	real bias_correction2 = (real)1.0 / ((real)1.0 - (real)pow(beta2, pnet->train_iteration));
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		PTensor g = pnet->layers[layer].t_gradients;
-		PTensor m = pnet->layers[layer].t_m;
-		PTensor v = pnet->layers[layer].t_v;
-		PTensor w = pnet->layers[layer].t_weights;
-
-		int size = g->rows * g->cols;
-
-		for (int i = 0; i < size; i++)
+		PLayer cur = &pnet->layers[layer];
+		for (int p = 0; p < cur->param_count; p++)
 		{
-			real grad = g->values[i];
+			PTensor g = cur->params[p].grad;
+			PTensor m = cur->params[p].m;
+			PTensor v = cur->params[p].v;
+			PTensor w = cur->params[p].value;
 
-			// Update biased first moment estimate: m = beta1 * m + (1 - beta1) * g
-			m->values[i] = beta1 * m->values[i] + ((real)1.0 - beta1) * grad;
+			int size = g->rows * g->cols;
 
-			// Update biased second moment estimate: v = beta2 * v + (1 - beta2) * g^2
-			v->values[i] = beta2 * v->values[i] + ((real)1.0 - beta2) * grad * grad;
+			for (int i = 0; i < size; i++)
+			{
+				real grad = g->values[i];
 
-			// Compute bias-corrected estimates
-			real mhat = m->values[i] * bias_correction1;
-			real vhat = v->values[i] * bias_correction2;
+				// Update biased first moment estimate: m = beta1 * m + (1 - beta1) * g
+				m->values[i] = beta1 * m->values[i] + ((real)1.0 - beta1) * grad;
 
-			// Update weights: W = W + lr * mhat / (sqrt(vhat) + epsilon)
-			w->values[i] += pnet->learning_rate * mhat / ((real)sqrt(vhat) + epsilon);
-		}
+				// Update biased second moment estimate: v = beta2 * v + (1 - beta2) * g^2
+				v->values[i] = beta2 * v->values[i] + ((real)1.0 - beta2) * grad * grad;
 
-		// Update biases with Adam
-		PTensor bg = pnet->layers[layer].t_bias_grad;
-		PTensor bm = pnet->layers[layer].t_bias_m;
-		PTensor bv = pnet->layers[layer].t_bias_v;
-		PTensor b = pnet->layers[layer].t_bias;
+				// Compute bias-corrected estimates
+				real mhat = m->values[i] * bias_correction1;
+				real vhat = v->values[i] * bias_correction2;
 
-		int bias_size = bg->cols;
-
-		for (int i = 0; i < bias_size; i++)
-		{
-			real grad = bg->values[i];
-
-			// Update biased first moment estimate: bm = beta1 * bm + (1 - beta1) * g
-			bm->values[i] = beta1 * bm->values[i] + ((real)1.0 - beta1) * grad;
-
-			// Update biased second moment estimate: bv = beta2 * bv + (1 - beta2) * g^2
-			bv->values[i] = beta2 * bv->values[i] + ((real)1.0 - beta2) * grad * grad;
-
-			// Compute bias-corrected estimates
-			real mhat = bm->values[i] * bias_correction1;
-			real vhat = bv->values[i] * bias_correction2;
-
-			// Update biases: b = b + lr * mhat / (sqrt(vhat) + epsilon)
-			b->values[i] += pnet->learning_rate * mhat / ((real)sqrt(vhat) + epsilon);
+				// Update: W = W + lr * mhat / (sqrt(vhat) + epsilon)
+				w->values[i] += pnet->learning_rate * mhat / ((real)sqrt(vhat) + epsilon);
+			}
 		}
 	}
 
@@ -1695,16 +1592,21 @@ static void optimize_adam(PNetwork pnet)
 //[]---------------------------------------------[]
 
 //------------------------------
-// add a new layer to the network
+// add a layer of any kind with the given output shape and kind settings
+// (config may be NULL when config_count is 0)
 //------------------------------
-int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type)
+static int add_layer(PNetwork pnet, Layer_kind kind, Layer_shape shape, const int *config, int config_count,
+                     Layer_type layer_type, Activation_type activation_type)
 {
 	if (!pnet) {
 		invoke_error_callback(ERR_NULL_PTR, "ann_add_layer");
 		return ERR_NULL_PTR;
 	}
 
-	if (node_count <= 0) {
+	int node_count = shape.c * shape.h * shape.w;
+	if (shape.c <= 0 || shape.h <= 0 || shape.w <= 0 ||
+		(int)kind < 0 || (size_t)kind >= sizeof(g_layer_ops) / sizeof(g_layer_ops[0]) ||
+		config_count < 0 || config_count > ANN_LAYER_CONFIG_MAX) {
 		invoke_error_callback(ERR_INVALID, "ann_add_layer");
 		return ERR_INVALID;
 	}
@@ -1727,25 +1629,8 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 
 		pnet->layers = layer;
 		
-		// Initialize the newly allocated layers to NULL
-		for (int i = old_size; i < pnet->layer_size; i++)
-		{
-			pnet->layers[i].t_m 		= NULL;
-			pnet->layers[i].t_v 		= NULL;
-			pnet->layers[i].t_values 	= NULL;
-			pnet->layers[i].t_weights 	= NULL;
-			pnet->layers[i].t_gradients = NULL;
-			pnet->layers[i].t_dl_dz		= NULL;
-			pnet->layers[i].t_bias		= NULL;
-			pnet->layers[i].t_bias_grad	= NULL;
-			pnet->layers[i].t_bias_m	= NULL;
-			pnet->layers[i].t_bias_v	= NULL;
-			pnet->layers[i].t_batch_values	= NULL;
-			pnet->layers[i].t_batch_dl_dz	= NULL;
-			pnet->layers[i].t_batch_z		= NULL;
-			pnet->layers[i].dropout_rate	= (real)0.0;
-			pnet->layers[i].t_dropout_mask	= NULL;
-		}
+		// Initialize the newly allocated layers: every tensor NULL, dropout off
+		memset(&pnet->layers[old_size], 0, (pnet->layer_size - old_size) * sizeof(Layer));
 	}
 
 	int cur_layer = pnet->layer_count - 1;
@@ -1788,6 +1673,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		break;
 
 	default:
+		pnet->layer_count--;
 		invoke_error_callback(ERR_INVALID, "ann_add_layer");
 		return ERR_INVALID;
 	}
@@ -1805,141 +1691,34 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		return ERR_ALLOC;
 	}
 	pnet->layers[cur_layer].node_count	= node_count;
+	pnet->layers[cur_layer].kind		= kind;
+	pnet->layers[cur_layer].shape		= shape;
+	for (int i = 0; i < config_count; i++)
+		pnet->layers[cur_layer].config[i] = config[i];
 
-	// create the tensors
-	if (cur_layer > 0)
+	// create the parameters that produce this layer from the one below
+	if (cur_layer > 0 && layer_ops(&pnet->layers[cur_layer])->setup(pnet, cur_layer) != ERR_OK)
 	{
-		// weights should not already be allocated
-		if (pnet->layers[cur_layer - 1].t_weights != NULL)
-		{
-			invoke_error_callback(ERR_INVALID, "ann_add_layer");
-			return ERR_INVALID;
-		}
-		pnet->layers[cur_layer - 1].t_weights	= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-		if (pnet->layers[cur_layer - 1].t_weights == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		pnet->layers[cur_layer - 1].t_v			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-		if (pnet->layers[cur_layer - 1].t_v == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		pnet->layers[cur_layer - 1].t_m			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-		if (pnet->layers[cur_layer - 1].t_m == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_v = NULL;
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		pnet->layers[cur_layer - 1].t_gradients = tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-		if (pnet->layers[cur_layer - 1].t_gradients == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_m);
-			tensor_free(pnet->layers[cur_layer - 1].t_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_m = NULL;
-			pnet->layers[cur_layer - 1].t_v = NULL;
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		pnet->layers[cur_layer - 1].t_dl_dz		= tensor_zeros(1, pnet->layers[cur_layer - 1].node_count);
-		if (pnet->layers[cur_layer - 1].t_dl_dz == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_gradients);
-			tensor_free(pnet->layers[cur_layer - 1].t_m);
-			tensor_free(pnet->layers[cur_layer - 1].t_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_gradients = NULL;
-			pnet->layers[cur_layer - 1].t_m = NULL;
-			pnet->layers[cur_layer - 1].t_v = NULL;
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		pnet->layers[cur_layer - 1].t_bias		= tensor_zeros(1, node_count);
-		if (pnet->layers[cur_layer - 1].t_bias == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_dl_dz);
-			tensor_free(pnet->layers[cur_layer - 1].t_gradients);
-			tensor_free(pnet->layers[cur_layer - 1].t_m);
-			tensor_free(pnet->layers[cur_layer - 1].t_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_dl_dz = NULL;
-			pnet->layers[cur_layer - 1].t_gradients = NULL;
-			pnet->layers[cur_layer - 1].t_m = NULL;
-			pnet->layers[cur_layer - 1].t_v = NULL;
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		// Allocate bias accumulators for adaptive optimizers
-		pnet->layers[cur_layer - 1].t_bias_grad	= tensor_zeros(1, node_count);
-		pnet->layers[cur_layer - 1].t_bias_m	= tensor_zeros(1, node_count);
-		pnet->layers[cur_layer - 1].t_bias_v	= tensor_zeros(1, node_count);
-		if (pnet->layers[cur_layer - 1].t_bias_grad == NULL ||
-			pnet->layers[cur_layer - 1].t_bias_m == NULL ||
-			pnet->layers[cur_layer - 1].t_bias_v == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_bias_grad);
-			tensor_free(pnet->layers[cur_layer - 1].t_bias_m);
-			tensor_free(pnet->layers[cur_layer - 1].t_bias_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_bias);
-			tensor_free(pnet->layers[cur_layer - 1].t_dl_dz);
-			tensor_free(pnet->layers[cur_layer - 1].t_gradients);
-			tensor_free(pnet->layers[cur_layer - 1].t_m);
-			tensor_free(pnet->layers[cur_layer - 1].t_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_bias_grad = NULL;
-			pnet->layers[cur_layer - 1].t_bias_m = NULL;
-			pnet->layers[cur_layer - 1].t_bias_v = NULL;
-			pnet->layers[cur_layer - 1].t_bias = NULL;
-			pnet->layers[cur_layer - 1].t_dl_dz = NULL;
-			pnet->layers[cur_layer - 1].t_gradients = NULL;
-			pnet->layers[cur_layer - 1].t_m = NULL;
-			pnet->layers[cur_layer - 1].t_v = NULL;
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
+		tensor_free(pnet->layers[cur_layer].t_values);
+		pnet->layers[cur_layer].t_values = NULL;
+		pnet->layer_count--;
+		invoke_error_callback(ERR_ALLOC, "ann_add_layer");
+		return ERR_ALLOC;
 	}
 
 	return ERR_OK;
+}
+
+//------------------------------
+// add a new dense layer to the network
+//------------------------------
+int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type)
+{
+	Layer_shape shape;
+	shape.c = node_count;
+	shape.h = 1;
+	shape.w = 1;
+	return add_layer(pnet, LAYER_KIND_DENSE, shape, NULL, 0, layer_type, activation_type);
 }
 
 //------------------------------
@@ -1969,24 +1748,8 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->weight_limit	= R_MAX;
 	pnet->init_bias		= (real)1.0;
 
-	for (int i = 0; i < pnet->layer_size; i++)
-	{
-		pnet->layers[i].t_m 		= NULL;
-		pnet->layers[i].t_v 		= NULL;
-		pnet->layers[i].t_values 	= NULL;
-		pnet->layers[i].t_weights 	= NULL;
-		pnet->layers[i].t_gradients = NULL;
-		pnet->layers[i].t_dl_dz		= NULL;
-		pnet->layers[i].t_bias		= NULL;
-		pnet->layers[i].t_bias_grad	= NULL;
-		pnet->layers[i].t_bias_m	= NULL;
-		pnet->layers[i].t_bias_v	= NULL;
-		pnet->layers[i].t_batch_values	= NULL;
-		pnet->layers[i].t_batch_dl_dz	= NULL;
-		pnet->layers[i].t_batch_z		= NULL;
-		pnet->layers[i].dropout_rate	= (real)0.0;
-		pnet->layers[i].t_dropout_mask	= NULL;
-	}
+	// every tensor NULL, dropout off
+	memset(pnet->layers, 0, pnet->layer_size * sizeof(Layer));
 
 	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
 	{
@@ -2081,7 +1844,40 @@ static int check_loss_output(PNetwork pnet, const char *function_name)
 }
 
 //-----------------------------------------------
-// Copy every layer's weights and biases to or from one flat buffer, used to
+// Zero every layer's parameter gradients before a batch
+//-----------------------------------------------
+static void zero_gradients(PNetwork pnet)
+{
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+	{
+		PLayer cur = &pnet->layers[layer];
+		for (int p = 0; p < cur->param_count; p++)
+			tensor_fill(cur->params[p].grad, (real)0.0);
+	}
+}
+
+//-----------------------------------------------
+// One CPU training step on the batch already in layers[0].t_batch_values:
+// forward, backward, then the optimizer update. Returns the batch loss.
+//-----------------------------------------------
+static real train_batch_cpu(PNetwork pnet, int batch_size, PTensor targets)
+{
+	eval_network_batched(pnet, batch_size);
+
+	// Batched backward pass (also computes loss)
+	real loss = back_propagate_batched(pnet, batch_size, targets);
+
+	// Increment training iteration for Adam bias correction
+	pnet->train_iteration++;
+
+	// update weights based on batched gradients using the chosen optimizer
+	pnet->optimize_func(pnet);
+
+	return loss;
+}
+
+//-----------------------------------------------
+// Copy every layer's parameters to or from one flat buffer, used to
 // keep the best epoch's parameters for early stopping. Pass NULL as buf to
 // get the number of reals needed.
 //-----------------------------------------------
@@ -2089,19 +1885,17 @@ static size_t copy_parameters(PNetwork pnet, real *buf, int restore)
 {
 	size_t offset = 0;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		PTensor params[2];
-		params[0] = pnet->layers[layer].t_weights;
-		params[1] = pnet->layers[layer].t_bias;
-
-		for (int i = 0; i < 2; i++)
+		PLayer cur = &pnet->layers[layer];
+		for (int p = 0; p < cur->param_count; p++)
 		{
-			size_t count = (size_t)params[i]->rows * params[i]->cols;
+			PTensor t = cur->params[p].value;
+			size_t count = (size_t)t->rows * t->cols;
 			if (buf && restore)
-				memcpy(params[i]->values, buf + offset, count * sizeof(real));
+				memcpy(t->values, buf + offset, count * sizeof(real));
 			else if (buf)
-				memcpy(buf + offset, params[i]->values, count * sizeof(real));
+				memcpy(buf + offset, t->values, count * sizeof(real));
 			offset += count;
 		}
 	}
@@ -2244,12 +2038,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		// iterate over all batches
 		for (int batch = 0; batch < batch_count; batch++)
 		{
-			// zero the gradients
-			for (int layer = 0; layer < pnet->layer_count - 1; layer++)
-			{
-				tensor_fill(pnet->layers[layer].t_gradients, (real)0.0);
-				tensor_fill(pnet->layers[layer].t_bias_grad, (real)0.0);
-			}
+			zero_gradients(pnet);
 
 			// Assemble batch input matrix into layers[0].t_batch_values
 			PTensor batch_input = pnet->layers[0].t_batch_values;
@@ -2289,18 +2078,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 			if (!gpu_done)
 #endif
 			{
-				// CPU path: forward pass
-				eval_network_batched(pnet, actual_batch_size);
-
-				// Batched backward pass (also computes loss)
-				loss = back_propagate_batched(pnet, actual_batch_size, batch_targets);
-
-				// Increment training iteration for Adam bias correction
-				pnet->train_iteration++;
-
-				// update weights based on batched gradients
-				// using the chosen optimization function
-				pnet->optimize_func(pnet);
+				loss = train_batch_cpu(pnet, actual_batch_size, batch_targets);
 			}
 
 			epoch_loss += loss;
@@ -2490,12 +2268,7 @@ real ann_train_step(PNetwork pnet, const real *inputs, const real *targets, int 
 		return (real)0.0;
 	}
 
-	// Zero gradients
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
-	{
-		tensor_fill(pnet->layers[layer].t_gradients, (real)0.0);
-		tensor_fill(pnet->layers[layer].t_bias_grad, (real)0.0);
-	}
+	zero_gradients(pnet);
 
 	// Copy inputs into batch input tensor
 	PTensor batch_input = pnet->layers[0].t_batch_values;
@@ -2504,17 +2277,7 @@ real ann_train_step(PNetwork pnet, const real *inputs, const real *targets, int 
 	// Copy targets into batch target tensor
 	memcpy(batch_targets->values, targets, actual_batch_size * output_node_count * sizeof(real));
 
-	// Forward pass
-	eval_network_batched(pnet, actual_batch_size);
-
-	// Backward pass (computes loss and gradients)
-	real loss = back_propagate_batched(pnet, actual_batch_size, batch_targets);
-
-	// Increment training iteration (for Adam bias correction)
-	pnet->train_iteration++;
-
-	// Update weights
-	pnet->optimize_func(pnet);
+	real loss = train_batch_cpu(pnet, actual_batch_size, batch_targets);
 
 #ifdef USE_GPU
 	if (gpu_uploaded(pnet))
@@ -3004,6 +2767,17 @@ Activation_type ann_get_layer_activation(const PNetwork pnet, int layer)
 }
 
 //------------------------------
+// get what a layer computes
+//------------------------------
+Layer_kind ann_get_layer_kind(const PNetwork pnet, int layer)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return LAYER_KIND_DENSE;
+
+	return pnet->layers[layer].kind;
+}
+
+//------------------------------
 // set the loss function
 //------------------------------
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
@@ -3030,18 +2804,7 @@ void ann_free_network(PNetwork pnet)
 		if (pnet->layers[layer].t_values)
 			tensor_free(pnet->layers[layer].t_values);
 
-		if (pnet->layers[layer].t_weights)
-		{
-			tensor_free(pnet->layers[layer].t_m);
-			tensor_free(pnet->layers[layer].t_v);
-			tensor_free(pnet->layers[layer].t_gradients);
-			tensor_free(pnet->layers[layer].t_weights);
-			tensor_free(pnet->layers[layer].t_dl_dz);
-			tensor_free(pnet->layers[layer].t_bias);
-			tensor_free(pnet->layers[layer].t_bias_grad);
-			tensor_free(pnet->layers[layer].t_bias_m);
-			tensor_free(pnet->layers[layer].t_bias_v);
-		}
+		free_layer_params(&pnet->layers[layer]);
 
 		// Free batch tensors
 		tensor_free(pnet->layers[layer].t_batch_values);
@@ -3251,75 +3014,273 @@ int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, in
 	return ERR_OK;
 }
 
-//-----------------------------------
-// save network to a binary file
-//-----------------------------------
-int ann_save_network_binary(const PNetwork pnet, const char *filename)
+//================================================================================================
+// Model files (.nna text, .nnb binary). Both hold the same values: text writes one per line,
+// binary writes raw ints and reals.
+//
+// v1, written when every layer is dense so older libann versions can read it:
+//   version optimizer loss layer_count
+//   per layer:            node_count layer_type activation
+//   per layer 1..n-1:     bias values, then weight values
+// v2, written when any layer is another kind:
+//   version optimizer loss layer_count
+//   per layer:            kind layer_type activation c h w config_count config...
+//   per layer 1..n-1:     each params[] tensor's values, in order
+//================================================================================================
+
+//------------------------------
+// value I/O shared by the text and binary formats; each returns 1 on success
+//------------------------------
+static int write_int(FILE *fptr, int binary, int value)
+{
+	if (binary)
+		return fwrite(&value, sizeof(value), 1, fptr) == 1;
+	return fprintf(fptr, "%d\n", value) > 0;
+}
+
+static int write_real(FILE *fptr, int binary, real value)
+{
+	if (binary)
+		return fwrite(&value, sizeof(value), 1, fptr) == 1;
+	return fprintf(fptr, "%f\n", value) > 0;
+}
+
+static int write_values(FILE *fptr, int binary, const PTensor t)
+{
+	int count = t->rows * t->cols;
+	for (int i = 0; i < count; i++)
+	{
+		if (!write_real(fptr, binary, t->values[i]))
+			return 0;
+	}
+	return 1;
+}
+
+static int read_int(FILE *fptr, int binary, int *value)
+{
+	if (binary)
+		return fread(value, sizeof(*value), 1, fptr) == 1;
+	return fscanf(fptr, "%d", value) == 1;
+}
+
+static int read_values(FILE *fptr, int binary, PTensor t)
+{
+	int count = t->rows * t->cols;
+	for (int i = 0; i < count; i++)
+	{
+		int ok = binary ? fread(&t->values[i], sizeof(real), 1, fptr) == 1
+		                : fscanf(fptr, "%f", &t->values[i]) == 1;
+		if (!ok)
+			return 0;
+	}
+	return 1;
+}
+
+//------------------------------
+// 1 if every layer is dense (the network fits the v1 file format)
+//------------------------------
+static int network_is_dense(const PNetwork pnet)
+{
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		if (pnet->layers[layer].kind != LAYER_KIND_DENSE)
+			return 0;
+	}
+	return 1;
+}
+
+//------------------------------
+// save a network in the text or binary format
+//------------------------------
+static int save_network(const PNetwork pnet, const char *filename, int binary, const char *function_name)
 {
 	if (!pnet || !filename)
 	{
-		invoke_error_callback(ERR_NULL_PTR, "ann_save_network_binary");
+		invoke_error_callback(ERR_NULL_PTR, function_name);
 		return ERR_NULL_PTR;
 	}
 
-	FILE *fptr = fopen(filename, "wb");
+	FILE *fptr = fopen(filename, binary ? "wb" : "wt");
 	if (!fptr)
 	{
-		invoke_error_callback(ERR_IO, "ann_save_network_binary");
+		invoke_error_callback(ERR_IO, function_name);
 		return ERR_IO;
 	}
 
-	// write binary version
-	fwrite (&ANN_BINARY_FORMAT_VERSION, sizeof(int), 1, fptr);
+	int v1 = network_is_dense(pnet);
 
-	// save out network
-	// save optimizer
-	fwrite(&pnet->optimizer, sizeof(int), 1, fptr);
+	// header
+	int ok = write_int(fptr, binary, v1 ? ANN_FORMAT_V1 : ANN_FORMAT_V2) &&
+	         write_int(fptr, binary, pnet->optimizer) &&
+	         write_int(fptr, binary, pnet->loss_type) &&
+	         write_int(fptr, binary, pnet->layer_count);
 
-	// save loss
-	fwrite(&pnet->loss_type, sizeof(int), 1, fptr);
-
-	// save network props
-	fwrite(&pnet->layer_count, sizeof(int), 1, fptr);
-
-	// save layer details
-	int val;
-	for (int layer = 0; layer < pnet->layer_count; layer++)
+	// layer details
+	for (int layer = 0; ok && layer < pnet->layer_count; layer++)
 	{
-		// node count
-		val = pnet->layers[layer].node_count;
-		fwrite(&val, sizeof(val), 1, fptr);
-
-		// layer type
-		val = pnet->layers[layer].layer_type;
-		fwrite(&val, sizeof(val), 1, fptr);
-
-		// activation type
-		val = pnet->layers[layer].activation;
-		fwrite(&val, sizeof(val), 1, fptr);
-	}
-
-	real w;
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
-	{
-		// save bias vector
-		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
+		PLayer cur = &pnet->layers[layer];
+		if (v1)
 		{
-			w = pnet->layers[layer].t_bias->values[element];
-			fwrite(&w, sizeof(w), 1, fptr);
+			ok = write_int(fptr, binary, cur->node_count) &&
+			     write_int(fptr, binary, cur->layer_type) &&
+			     write_int(fptr, binary, cur->activation);
+			continue;
 		}
 
-		// save node weights
-		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
-		for (int element = 0; element < limit; element++)
+		int config_count = layer_ops(cur)->config_count;
+		ok = write_int(fptr, binary, cur->kind) &&
+		     write_int(fptr, binary, cur->layer_type) &&
+		     write_int(fptr, binary, cur->activation) &&
+		     write_int(fptr, binary, cur->shape.c) &&
+		     write_int(fptr, binary, cur->shape.h) &&
+		     write_int(fptr, binary, cur->shape.w) &&
+		     write_int(fptr, binary, config_count);
+		for (int i = 0; ok && i < config_count; i++)
+			ok = write_int(fptr, binary, cur->config[i]);
+	}
+
+	// parameters
+	for (int layer = 1; ok && layer < pnet->layer_count; layer++)
+	{
+		PLayer cur = &pnet->layers[layer];
+		if (v1)
 		{
-			w = pnet->layers[layer].t_weights->values[element];
-			fwrite(&w, sizeof(w), 1, fptr);
+			ok = write_values(fptr, binary, cur->t_bias) && write_values(fptr, binary, cur->t_weights);
+			continue;
+		}
+
+		for (int p = 0; ok && p < cur->param_count; p++)
+			ok = write_values(fptr, binary, cur->params[p].value);
+	}
+
+	if (fclose(fptr) != 0)
+		ok = 0;
+
+	if (!ok)
+	{
+		invoke_error_callback(ERR_IO, function_name);
+		return ERR_IO;
+	}
+	return ERR_OK;
+}
+
+//------------------------------
+// load a network saved in the text or binary format (v1 or v2)
+//------------------------------
+static PNetwork load_network(const char *filename, int binary)
+{
+	if (!filename)
+		return NULL;
+
+	FILE *fptr = fopen(filename, binary ? "rb" : "rt");
+	if (!fptr)
+		return NULL;
+
+	PNetwork pnet = NULL;
+	int ver, optimizer, loss_type, layer_count;
+
+	if (!read_int(fptr, binary, &ver))
+		goto fail;
+
+	if (ver != ANN_FORMAT_V1 && ver != ANN_FORMAT_V2)
+	{
+		printf("Incompatible version, was %d, expected %d or %d\n", ver, ANN_FORMAT_V1, ANN_FORMAT_V2);
+		goto fail;
+	}
+
+	if (!read_int(fptr, binary, &optimizer) ||
+		!read_int(fptr, binary, &loss_type) ||
+		!read_int(fptr, binary, &layer_count) ||
+		layer_count < 1)
+		goto fail;
+
+	pnet = ann_make_network(optimizer, loss_type);
+	if (!pnet)
+		goto fail;
+
+	ann_printf(pnet, "%sloading network%s %s%s%s...", 
+		COLOR(ANSI_CYAN), RESET(),
+		COLOR(ANSI_WHITE), filename, RESET());
+
+	// create layers
+	for (int layer = 0; layer < layer_count; layer++)
+	{
+		int layer_type, activation;
+
+		if (ver == ANN_FORMAT_V1)
+		{
+			int node_count;
+			if (!read_int(fptr, binary, &node_count) ||
+				!read_int(fptr, binary, &layer_type) ||
+				!read_int(fptr, binary, &activation) ||
+				ann_add_layer(pnet, node_count, layer_type, activation) != ERR_OK)
+				goto fail;
+			continue;
+		}
+
+		int kind, config_count, config[ANN_LAYER_CONFIG_MAX];
+		Layer_shape shape;
+		if (!read_int(fptr, binary, &kind) ||
+			!read_int(fptr, binary, &layer_type) ||
+			!read_int(fptr, binary, &activation) ||
+			!read_int(fptr, binary, &shape.c) ||
+			!read_int(fptr, binary, &shape.h) ||
+			!read_int(fptr, binary, &shape.w) ||
+			!read_int(fptr, binary, &config_count) ||
+			config_count < 0 || config_count > ANN_LAYER_CONFIG_MAX)
+			goto fail;
+
+		for (int i = 0; i < config_count; i++)
+		{
+			if (!read_int(fptr, binary, &config[i]))
+				goto fail;
+		}
+
+		if (add_layer(pnet, kind, shape, config, config_count, layer_type, activation) != ERR_OK)
+			goto fail;
+	}
+
+	// read parameters
+	for (int layer = 1; layer < layer_count; layer++)
+	{
+		PLayer cur = &pnet->layers[layer];
+		if (ver == ANN_FORMAT_V1)
+		{
+			if (!read_values(fptr, binary, cur->t_bias) || !read_values(fptr, binary, cur->t_weights))
+				goto fail;
+			continue;
+		}
+
+		for (int p = 0; p < cur->param_count; p++)
+		{
+			if (!read_values(fptr, binary, cur->params[p].value))
+				goto fail;
 		}
 	}
+
+	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
 
 	fclose(fptr);
-	return ERR_OK;
+
+	// mark network weights as set
+	pnet->weights_set = 1;
+
+	return pnet;
+
+fail:
+	if (pnet)
+		ann_printf(pnet, "%sfailed.%s\n", COLOR(ANSI_RED), RESET());
+	fclose(fptr);
+	ann_free_network(pnet);
+	return NULL;
+}
+
+//------------------------------
+// save network to a binary file
+//------------------------------
+int ann_save_network_binary(const PNetwork pnet, const char *filename)
+{
+	return save_network(pnet, filename, 1, "ann_save_network_binary");
 }
 
 //------------------------------
@@ -3327,74 +3288,7 @@ int ann_save_network_binary(const PNetwork pnet, const char *filename)
 //------------------------------
 PNetwork ann_load_network_binary(const char *filename)
 {
-	if (!filename)
-		return NULL;
-
-	FILE *fptr = fopen(filename, "rb");
-	if (!fptr)
-		return NULL;
-
-	// load version
-	int ver;
-	CHECK_RESULT(fread(&ver, sizeof(ver), 1, fptr), 1, NULL);
-	if (ver != ANN_BINARY_FORMAT_VERSION)
-	{
-		printf("Incompatible version, was %d, expected %d\n", ver, ANN_TEXT_FORMAT_VERSION);
-		fclose(fptr);
-		return NULL;
-	}
-
-	// load network
-	int optimizer, loss_type, layer_count, node_count, layer_type, activation;
-	CHECK_RESULT(fread(&optimizer, sizeof(optimizer), 1, fptr), 1, NULL);
-	CHECK_RESULT(fread(&loss_type, sizeof(loss_type), 1, fptr), 1, NULL);
-	CHECK_RESULT(fread(&layer_count, sizeof(layer_count), 1, fptr), 1, NULL);
-
-	PNetwork pnet = ann_make_network(optimizer, loss_type);
-	if (!pnet)
-	{
-		fclose(fptr);
-		return NULL;
-	}
-
-	ann_printf(pnet, "%sloading network%s %s%s%s...", 
-		COLOR(ANSI_CYAN), RESET(),
-		COLOR(ANSI_WHITE), filename, RESET());
-
-	// create layers
-	for (int layer = 0; layer < layer_count; layer++)
-	{
-		CHECK_RESULT(fread(&node_count, sizeof(node_count), 1, fptr), 1, NULL);
-		CHECK_RESULT(fread(&layer_type, sizeof(layer_type), 1, fptr), 1, NULL);
-		CHECK_RESULT(fread(&activation, sizeof(activation), 1, fptr), 1, NULL);
-
-		ann_add_layer(pnet, node_count, layer_type, activation);
-	}
-
-	for (int layer = 0; layer < layer_count - 1; layer++)
-	{
-		// read bias vector
-		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
-		{
-			CHECK_RESULT(fread(&pnet->layers[layer].t_bias->values[element], sizeof(real), 1, fptr), 1, NULL);
-		}
-
-		// read node weights
-		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
-		for (int element = 0; element < limit; element++)
-		{
-			CHECK_RESULT(fread(&pnet->layers[layer].t_weights->values[element], sizeof(real), 1, fptr), 1, NULL);
-		}
-	}
-
-	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
-
-	fclose(fptr);
-
-	// mark network weights as set
-	pnet->weights_set = 1;
-
-	return pnet;
+	return load_network(filename, 1);
 }
 
 //------------------------------
@@ -3402,63 +3296,7 @@ PNetwork ann_load_network_binary(const char *filename)
 //------------------------------
 int ann_save_network(const PNetwork pnet, const char *filename)
 {
-	if (!pnet || !filename)
-	{
-		invoke_error_callback(ERR_NULL_PTR, "ann_save_network");
-		return ERR_NULL_PTR;
-	}
-
-	FILE *fptr = fopen(filename, "wt");
-	if (!fptr)
-	{
-		invoke_error_callback(ERR_IO, "ann_save_network");
-		return ERR_IO;
-	}
-
-	// save out version
-	fprintf(fptr, "%d\n", ANN_TEXT_FORMAT_VERSION);
-
-	// save out network
-	// save optimizer
-	fprintf(fptr, "%d\n", pnet->optimizer);
-
-	// save loss
-	fprintf(fptr, "%d\n", pnet->loss_type);
-
-	// save network props
-	fprintf(fptr, "%d\n", pnet->layer_count);
-
-	// save layer details
-	for (int layer = 0; layer < pnet->layer_count; layer++)
-	{
-		// node count
-		fprintf(fptr, "%d\n", pnet->layers[layer].node_count);
-
-		// layer type
-		fprintf(fptr, "%d\n", pnet->layers[layer].layer_type);
-
-		// activation type
-		fprintf(fptr, "%d\n", pnet->layers[layer].activation);
-	}
-
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
-	{
-		// save bias vector
-		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
-		{
-			fprintf(fptr, "%f\n", pnet->layers[layer].t_bias->values[element]);
-		}
-
-		// save node weights
-		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
-		for (int element = 0; element < limit; element++)
-		{
-			fprintf(fptr, "%f\n", pnet->layers[layer].t_weights->values[element]);			
-		}
-	}
-
-	fclose(fptr);
-	return ERR_OK;
+	return save_network(pnet, filename, 0, "ann_save_network");
 }
 
 //--------------------------------
@@ -3466,70 +3304,7 @@ int ann_save_network(const PNetwork pnet, const char *filename)
 //--------------------------------
 PNetwork ann_load_network(const char *filename)
 {
-	FILE *fptr = fopen(filename, "rt");
-	if (!fptr)
-		return NULL;
-
-	int ver;
-	CHECK_RESULT(fscanf(fptr, "%d", &ver), 1, NULL);
-	if (ver != ANN_TEXT_FORMAT_VERSION)
-	{
-		printf("Incompatible version, was %d, expected %d\n", ver, ANN_TEXT_FORMAT_VERSION);
-		fclose(fptr);
-		return NULL;
-	}
-
-	// load network
-	int optimizer, loss_type, layer_count, node_count, layer_type, activation;
-	CHECK_RESULT(fscanf(fptr, "%d", &optimizer), 1, NULL);
-	CHECK_RESULT(fscanf(fptr, "%d", &loss_type), 1, NULL);
-	CHECK_RESULT(fscanf(fptr, "%d", &layer_count), 1, NULL);
-
-	PNetwork pnet = ann_make_network(optimizer, loss_type);
-	if (!pnet)
-	{
-		fclose(fptr);
-		return NULL;
-	}
-
-	ann_printf(pnet, "%sloading network%s %s%s%s...", 
-		COLOR(ANSI_CYAN), RESET(),
-		COLOR(ANSI_WHITE), filename, RESET());
-
-	// create layers
-	for (int layer = 0; layer < layer_count; layer++)
-	{
-		CHECK_RESULT(fscanf(fptr, "%d", &node_count), 1, NULL);
-		CHECK_RESULT(fscanf(fptr, "%d", &layer_type), 1, NULL);
-		CHECK_RESULT(fscanf(fptr, "%d", &activation), 1, NULL);
-
-		ann_add_layer(pnet, node_count, layer_type, activation);
-	}
-
-	for (int layer = 0; layer < layer_count - 1; layer++)
-	{
-		// read bias vector
-		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
-		{
-			CHECK_RESULT(fscanf(fptr, "%f", &pnet->layers[layer].t_bias->values[element]), 1, NULL);
-		}
-
-		// read node weights
-		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
-		for (int element = 0; element < limit; element++)
-		{
-			CHECK_RESULT(fscanf(fptr, "%f", &pnet->layers[layer].t_weights->values[element]), 1, NULL);
-		}
-	}
-
-	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
-
-	fclose(fptr);
-
-	// mark network weights as set
-	pnet->weights_set = 1;
-
-	return pnet;
+	return load_network(filename, 0);
 }
 
 //-----------------------------------------------
@@ -3610,6 +3385,82 @@ static void write_json_int_array(FILE *fptr, const int *values, int count)
 //-----------------------------------------------
 // Export network to ONNX JSON format
 //-----------------------------------------------
+// Dense ONNX initializers: weight_N [in_nodes, nodes] and bias_N [nodes],
+// where N = layer - 1
+//-----------------------------------------------
+static void dense_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first)
+{
+	PLayer cur = &pnet->layers[layer];
+	int index = layer - 1;
+	int next_nodes = cur->node_count;
+	int curr_nodes = pnet->layers[layer - 1].node_count;
+
+	// Weights: shape is [curr_nodes, next_nodes] stored row-major
+	// ONNX MatMul: input [batch, curr_nodes] @ weights [curr_nodes, next_nodes] -> [batch, next_nodes]
+	if (!*first) fprintf(fptr, ",\n");
+	*first = 0;
+
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"weight_%d\",\n", index);
+	fprintf(fptr, "        \"data_type\": 1,\n");  // 1 = FLOAT
+	int w_dims[] = {curr_nodes, next_nodes};
+	fprintf(fptr, "        \"dims\": ");
+	write_json_int_array(fptr, w_dims, 2);
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "        \"float_data\": ");
+	write_json_float_array(fptr, cur->t_weights->values, curr_nodes * next_nodes);
+	fprintf(fptr, "\n");
+	fprintf(fptr, "      }");
+
+	// Bias: shape is [next_nodes]
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"bias_%d\",\n", index);
+	fprintf(fptr, "        \"data_type\": 1,\n");
+	int b_dims[] = {next_nodes};
+	fprintf(fptr, "        \"dims\": ");
+	write_json_int_array(fptr, b_dims, 1);
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "        \"float_data\": ");
+	write_json_float_array(fptr, cur->t_bias->values, next_nodes);
+	fprintf(fptr, "\n");
+	fprintf(fptr, "      }");
+}
+
+//-----------------------------------------------
+// Dense ONNX nodes: MatMul with weight_N, then Add bias_N
+//-----------------------------------------------
+static void dense_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                             char *output, size_t output_size, int *first)
+{
+	(void)pnet;
+	int index = layer - 1;
+	char matmul_out[64];
+	snprintf(matmul_out, sizeof(matmul_out), "matmul_%d_out", index);
+	snprintf(output, output_size, "add_%d_out", index);
+
+	// MatMul node: input @ weight_N -> matmul_N_out
+	if (!*first) fprintf(fptr, ",\n");
+	*first = 0;
+
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"op_type\": \"MatMul\",\n");
+	fprintf(fptr, "        \"name\": \"matmul_%d\",\n", index);
+	fprintf(fptr, "        \"input\": [\"%s\", \"weight_%d\"],\n", input, index);
+	fprintf(fptr, "        \"output\": [\"%s\"]\n", matmul_out);
+	fprintf(fptr, "      }");
+
+	// Add node: matmul_N_out + bias_N -> add_N_out
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"op_type\": \"Add\",\n");
+	fprintf(fptr, "        \"name\": \"add_%d\",\n", index);
+	fprintf(fptr, "        \"input\": [\"%s\", \"bias_%d\"],\n", matmul_out, index);
+	fprintf(fptr, "        \"output\": [\"%s\"]\n", output);
+	fprintf(fptr, "      }");
+}
+
+//-----------------------------------------------
 int ann_export_onnx(const PNetwork pnet, const char *filename)
 {
 	if (!pnet || !filename)
@@ -3653,43 +3504,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	// ========== INITIALIZERS (weights and biases) ==========
 	fprintf(fptr, "    \"initializer\": [\n");
 	int first_init = 1;
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
-	{
-		PLayer pL = &pnet->layers[layer];
-		int next_nodes = pnet->layers[layer + 1].node_count;
-		int curr_nodes = pL->node_count;
-
-		// Weights: shape is [curr_nodes, next_nodes] stored row-major
-		// ONNX MatMul: input [batch, curr_nodes] @ weights [curr_nodes, next_nodes] -> [batch, next_nodes]
-		if (!first_init) fprintf(fptr, ",\n");
-		first_init = 0;
-
-		fprintf(fptr, "      {\n");
-		fprintf(fptr, "        \"name\": \"weight_%d\",\n", layer);
-		fprintf(fptr, "        \"data_type\": 1,\n");  // 1 = FLOAT
-		int w_dims[] = {curr_nodes, next_nodes};
-		fprintf(fptr, "        \"dims\": ");
-		write_json_int_array(fptr, w_dims, 2);
-		fprintf(fptr, ",\n");
-		fprintf(fptr, "        \"float_data\": ");
-		write_json_float_array(fptr, pL->t_weights->values, curr_nodes * next_nodes);
-		fprintf(fptr, "\n");
-		fprintf(fptr, "      }");
-
-		// Bias: shape is [next_nodes]
-		fprintf(fptr, ",\n");
-		fprintf(fptr, "      {\n");
-		fprintf(fptr, "        \"name\": \"bias_%d\",\n", layer);
-		fprintf(fptr, "        \"data_type\": 1,\n");
-		int b_dims[] = {next_nodes};
-		fprintf(fptr, "        \"dims\": ");
-		write_json_int_array(fptr, b_dims, 1);
-		fprintf(fptr, ",\n");
-		fprintf(fptr, "        \"float_data\": ");
-		write_json_float_array(fptr, pL->t_bias->values, next_nodes);
-		fprintf(fptr, "\n");
-		fprintf(fptr, "      }");
-	}
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+		layer_ops(&pnet->layers[layer])->onnx_initializers(fptr, pnet, layer, &first_init);
 	fprintf(fptr, "\n    ],\n");
 
 	// ========== NODES (operations) ==========
@@ -3698,36 +3514,19 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	char prev_output[64];
 	snprintf(prev_output, sizeof(prev_output), "input");
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		char matmul_out[64], add_out[64], act_out[64];
-		snprintf(matmul_out, sizeof(matmul_out), "matmul_%d_out", layer);
-		snprintf(add_out, sizeof(add_out), "add_%d_out", layer);
-		snprintf(act_out, sizeof(act_out), "layer_%d_out", layer);
+		// ONNX names count the layers that have parameters, from 0
+		int index = layer - 1;
+		char linear_out[64], act_out[64];
+		snprintf(act_out, sizeof(act_out), "layer_%d_out", index);
 
-		// Get activation for the NEXT layer (output of this transform)
-		Activation_type next_act = pnet->layers[layer + 1].activation;
+		// The layer's own nodes (e.g. MatMul + Add), then its activation
+		layer_ops(&pnet->layers[layer])->onnx_nodes(fptr, pnet, layer, prev_output,
+		                                            linear_out, sizeof(linear_out), &first_node);
+
+		Activation_type next_act = pnet->layers[layer].activation;
 		const char *act_op = onnx_activation_op(next_act);
-
-		// MatMul node: prev_output @ weight_N -> matmul_N_out
-		if (!first_node) fprintf(fptr, ",\n");
-		first_node = 0;
-
-		fprintf(fptr, "      {\n");
-		fprintf(fptr, "        \"op_type\": \"MatMul\",\n");
-		fprintf(fptr, "        \"name\": \"matmul_%d\",\n", layer);
-		fprintf(fptr, "        \"input\": [\"%s\", \"weight_%d\"],\n", prev_output, layer);
-		fprintf(fptr, "        \"output\": [\"%s\"]\n", matmul_out);
-		fprintf(fptr, "      }");
-
-		// Add node: matmul_N_out + bias_N -> add_N_out
-		fprintf(fptr, ",\n");
-		fprintf(fptr, "      {\n");
-		fprintf(fptr, "        \"op_type\": \"Add\",\n");
-		fprintf(fptr, "        \"name\": \"add_%d\",\n", layer);
-		fprintf(fptr, "        \"input\": [\"%s\", \"bias_%d\"],\n", matmul_out, layer);
-		fprintf(fptr, "        \"output\": [\"%s\"]\n", add_out);
-		fprintf(fptr, "      }");
 
 		// Activation node (if any)
 		if (act_op != NULL)
@@ -3735,8 +3534,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 			fprintf(fptr, ",\n");
 			fprintf(fptr, "      {\n");
 			fprintf(fptr, "        \"op_type\": \"%s\",\n", act_op);
-			fprintf(fptr, "        \"name\": \"activation_%d\",\n", layer);
-			fprintf(fptr, "        \"input\": [\"%s\"],\n", add_out);
+			fprintf(fptr, "        \"name\": \"activation_%d\",\n", index);
+			fprintf(fptr, "        \"input\": [\"%s\"],\n", linear_out);
 			fprintf(fptr, "        \"output\": [\"%s\"]", act_out);
 
 			// LeakyRelu needs alpha attribute
@@ -3767,8 +3566,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 		}
 		else
 		{
-			// No activation, next input is add output
-			snprintf(prev_output, sizeof(prev_output), "%s", add_out);
+			// No activation, next input is the linear output
+			snprintf(prev_output, sizeof(prev_output), "%s", linear_out);
 		}
 	}
 	fprintf(fptr, "\n    ],\n");
@@ -4024,7 +3823,7 @@ PNetwork ann_import_onnx(const char *filename)
 				JsonValue *float_data = json_get(init, "float_data");
 				if (float_data && float_data->type == JSON_ARRAY)
 				{
-					PTensor weights = pnet->layers[layer].t_weights;
+					PTensor weights = pnet->layers[layer + 1].t_weights;	// weight_N produces layer N+1
 					size_t count = json_array_length(float_data);
 					for (size_t j = 0; j < count && j < (size_t)(weights->rows * weights->cols); j++)
 					{
@@ -4039,7 +3838,7 @@ PNetwork ann_import_onnx(const char *filename)
 				JsonValue *float_data = json_get(init, "float_data");
 				if (float_data && float_data->type == JSON_ARRAY)
 				{
-					PTensor bias = pnet->layers[layer].t_bias;
+					PTensor bias = pnet->layers[layer + 1].t_bias;
 					size_t count = json_array_length(float_data);
 					for (size_t j = 0; j < count && j < (size_t)bias->cols; j++)
 					{

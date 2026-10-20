@@ -26,8 +26,8 @@ static PNetwork make_always_one_net(void)
     PNetwork net = ann_make_network(OPT_SGD, LOSS_CATEGORICAL_CROSS_ENTROPY);
     ann_add_layer(net, 1, LAYER_INPUT,  ACTIVATION_NULL);
     ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
-    net->layers[0].t_weights->values[0] = 0.0f;
-    net->layers[0].t_bias->values[0] = 12.0f;     // sigmoid(12) ~ 0.999994
+    net->layers[1].t_weights->values[0] = 0.0f;
+    net->layers[1].t_bias->values[0] = 12.0f;     // sigmoid(12) ~ 0.999994
     net->weights_set = 1;                         // keep these weights
     ann_set_learning_rate(net, 1e-9f);            // and leave them unchanged
     ann_set_epoch_limit(net, 1);
@@ -153,10 +153,10 @@ void test_main(int argc, char* argv[])
         PNetwork sm = ann_make_network(OPT_SGD, LOSS_CATEGORICAL_CROSS_ENTROPY);
         ann_add_layer(sm, 1, LAYER_INPUT,  ACTIVATION_NULL);
         ann_add_layer(sm, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
-        sm->layers[0].t_weights->values[0] = 0.0f;
-        sm->layers[0].t_weights->values[1] = 0.0f;
-        sm->layers[0].t_bias->values[0] = 30.0f;   // predicts class 0 with p ~ 1
-        sm->layers[0].t_bias->values[1] = -30.0f;
+        sm->layers[1].t_weights->values[0] = 0.0f;
+        sm->layers[1].t_weights->values[1] = 0.0f;
+        sm->layers[1].t_bias->values[0] = 30.0f;   // predicts class 0 with p ~ 1
+        sm->layers[1].t_bias->values[1] = -30.0f;
         sm->weights_set = 1;
         ann_set_learning_rate(sm, 1e-9f);
         ann_set_epoch_limit(sm, 1);

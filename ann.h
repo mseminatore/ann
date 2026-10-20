@@ -105,6 +105,37 @@ typedef enum {
 } Layer_type;
 
 //------------------------------
+// Layer kinds: what a layer computes (Layer_type is where it sits).
+// New kinds are appended so saved model values stay stable.
+//------------------------------
+typedef enum {
+	LAYER_KIND_DENSE					// fully connected: y = act(W x + b)
+} Layer_kind;
+
+//------------------------------
+// Layer output shape: channels x height x width. Activations are stored
+// row-major as C*H*W values per sample; dense layers are (nodes, 1, 1).
+//------------------------------
+typedef struct {
+	int c, h, w;
+} Layer_shape;
+
+#define ANN_LAYER_MAX_PARAMS	4		// trainable tensors per layer (dense uses 2: W, b)
+#define ANN_LAYER_CONFIG_MAX	8		// kind-specific settings (kernel size, stride, ...)
+
+//------------------------------
+// One trainable tensor of a layer with its gradient and optimizer state.
+// The layer owns these tensors.
+//------------------------------
+typedef struct {
+	PTensor value;						// the parameter
+	PTensor grad;						// accumulated gradient (-dL/dvalue)
+	PTensor m;							// first moment (Momentum, Adam)
+	PTensor v;							// second moment (AdaGrad, RMSProp, Adam)
+	int regularize;						// 1 if L1/L2 apply (weights, not biases)
+} Layer_param;
+
+//------------------------------
 // Activation types
 //------------------------------
 typedef enum { 
@@ -183,7 +214,10 @@ typedef real(*LRSchedulerFunc)(unsigned epoch, real base_lr, void *user_data);
 //------------------------------
 struct Layer
 {
-	int node_count;						// number of nodes in layer
+	int node_count;						// number of nodes in layer (shape.c * shape.h * shape.w)
+	Layer_kind kind;					// what the layer computes
+	Layer_shape shape;					// output shape
+	int config[ANN_LAYER_CONFIG_MAX];	// kind-specific settings (unused by dense)
 
 	Layer_type layer_type;				// type of this layer
 	Activation_type activation;			// type of activation, none, sigmoid, Relu
@@ -193,12 +227,18 @@ struct Layer
 	PTensor t_dropout_mask;				// dropout mask tensor (for batched training)
 
 	PTensor t_values;					// tensor of node values for the layer
-	PTensor t_weights;					// tensor of weights for the layer
+
+	// Trainable parameters (none on the input layer). For dense layers the
+	// named tensors below are the same tensors as params[0] (W) and params[1] (b).
+	int param_count;
+	Layer_param params[ANN_LAYER_MAX_PARAMS];
+
+	// Parameters that produce this layer from the layer below (NULL on the input layer)
+	PTensor t_weights;					// weights [node_count x previous layer's node_count]
 	PTensor t_v;						// tensor of velocities for optimizer
 	PTensor t_m;						// tensor of momentums for optimizer
 	PTensor t_gradients;				// tensor of gradients for back propagation
-	PTensor t_dl_dz;					// tensor of dL_dz
-	PTensor t_bias;						// bias vector
+	PTensor t_bias;						// bias vector [1 x node_count]
 	PTensor t_bias_grad;				// tensor of gradients for bias
 	PTensor t_bias_m;					// tensor of momentums for bias (Adam)
 	PTensor t_bias_v;					// tensor of velocities for bias (AdaGrad/RMSProp/Adam)
@@ -1046,6 +1086,15 @@ ANN_API int ann_get_layer_nodes(const PNetwork pnet, int layer);
  * @return Activation type, or ACTIVATION_NULL on error
  */
 ANN_API Activation_type ann_get_layer_activation(const PNetwork pnet, int layer);
+
+/**
+ * Get the kind of a specific layer (what it computes).
+ * 
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @return Layer kind, or LAYER_KIND_DENSE on error
+ */
+ANN_API Layer_kind ann_get_layer_kind(const PNetwork pnet, int layer);
 
 /**
  * Print network properties and configuration to stdout.

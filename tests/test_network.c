@@ -131,6 +131,22 @@ void test_main(int argc, char *argv[]) {
                (net_sgd_mse->layers[1].activation == ACTIVATION_SIGMOID));
         TESTEX("Third layer activation is SIGMOID", 
                (net_sgd_mse->layers[2].activation == ACTIVATION_SIGMOID));
+
+        TESTEX("ann_add_layer creates dense layers",
+               (ann_get_layer_kind(net_sgd_mse, 0) == LAYER_KIND_DENSE &&
+                ann_get_layer_kind(net_sgd_mse, 2) == LAYER_KIND_DENSE));
+        TESTEX("Dense layer shape is (nodes, 1, 1)",
+               (net_sgd_mse->layers[1].shape.c == 5 && net_sgd_mse->layers[1].shape.h == 1 &&
+                net_sgd_mse->layers[1].shape.w == 1));
+        TESTEX("Input layer has no parameters", (net_sgd_mse->layers[0].param_count == 0 &&
+               net_sgd_mse->layers[0].t_weights == NULL));
+        TESTEX("Dense layer owns its weights [nodes x previous nodes] and bias",
+               (net_sgd_mse->layers[1].param_count == 2 &&
+                net_sgd_mse->layers[1].params[0].value == net_sgd_mse->layers[1].t_weights &&
+                net_sgd_mse->layers[1].t_weights->rows == 5 && net_sgd_mse->layers[1].t_weights->cols == 10 &&
+                net_sgd_mse->layers[1].params[1].value == net_sgd_mse->layers[1].t_bias &&
+                net_sgd_mse->layers[1].params[0].regularize && !net_sgd_mse->layers[1].params[1].regularize));
+        TESTEX("ann_get_layer_kind rejects a bad index", (ann_get_layer_kind(net_sgd_mse, 99) == LAYER_KIND_DENSE));
     }
 
     // ========================================================================
@@ -189,6 +205,13 @@ void test_main(int argc, char *argv[]) {
     result = ann_add_layer(net_adam, -5, LAYER_INPUT, ACTIVATION_NULL);
     TESTEX("ann_add_layer with negative nodes returns ERR_INVALID", 
            (result == ERR_INVALID));
+
+    // A rejected layer must not be counted
+    int count_before = net_adam ? net_adam->layer_count : 0;
+    result = ann_add_layer(net_adam, 4, LAYER_HIDDEN, (Activation_type)99);
+    TESTEX("ann_add_layer with an unknown activation returns ERR_INVALID", (result == ERR_INVALID));
+    TESTEX("Rejected layer leaves layer_count unchanged",
+           (net_adam != NULL && net_adam->layer_count == count_before));
 
     // Test adding very large layer - use separate network to avoid state corruption
     // Use 10000 nodes instead of 1000000 to avoid Debug mode slowness

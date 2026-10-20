@@ -128,14 +128,14 @@ void test_main(int argc, char *argv[])
 
     int upload_ok = ann_gpu_upload_network(net);
     TESTEX("ann_gpu_upload_network() returns ERR_OK", (upload_ok == ERR_OK));
-    TESTEX("Layer 0 weights have gpu_buf after upload",
-           (net->layers[0].t_weights != NULL && net->layers[0].t_weights->gpu_buf != NULL));
-    TESTEX("Layer 0 bias has gpu_buf after upload",
-           (net->layers[0].t_bias != NULL && net->layers[0].t_bias->gpu_buf != NULL));
+    TESTEX("Layer 1 weights have gpu_buf after upload",
+           (net->layers[1].t_weights != NULL && net->layers[1].t_weights->gpu_buf != NULL));
+    TESTEX("Layer 1 bias has gpu_buf after upload",
+           (net->layers[1].t_bias != NULL && net->layers[1].t_bias->gpu_buf != NULL));
 
     ann_gpu_free_network(net);
     TESTEX("gpu_buf is NULL after ann_gpu_free_network()",
-           (net->layers[0].t_weights->gpu_buf == NULL));
+           (net->layers[1].t_weights->gpu_buf == NULL));
 
     ann_free_network(net);
 

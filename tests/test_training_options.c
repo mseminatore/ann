@@ -55,8 +55,8 @@ static PNetwork make_linear_net(real w)
     PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
     ann_add_layer(net, 1, LAYER_INPUT,  ACTIVATION_NULL);
     ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_NULL);
-    net->layers[0].t_weights->values[0] = w;
-    net->layers[0].t_bias->values[0] = 0.0f;
+    net->layers[1].t_weights->values[0] = w;
+    net->layers[1].t_bias->values[0] = 0.0f;
     net->weights_set = 1;
     net->print_func = silent_print;
     ann_set_batch_size(net, 4);
@@ -142,21 +142,21 @@ void test_main(int argc, char *argv[])
         double mean, std;
 
         PNetwork net = make_init_net(WEIGHT_INIT_HE, ACTIVATION_SIGMOID);
-        tensor_stats(net->layers[0].t_weights, &mean, &std);
+        tensor_stats(net->layers[1].t_weights, &mean, &std);
         TESTEX("He: zero mean", near(mean, 0.0, 0.01));
         TESTEX("He: std = sqrt(2 / fan_in)", near(std, sqrt(2.0 / 200), 0.005));
-        TESTEX("He: biases start at zero", all_zero(net->layers[0].t_bias));
+        TESTEX("He: biases start at zero", all_zero(net->layers[1].t_bias));
         ann_free_network(net);
 
         net = make_init_net(WEIGHT_INIT_XAVIER, ACTIVATION_RELU);
-        tensor_stats(net->layers[0].t_weights, &mean, &std);
+        tensor_stats(net->layers[1].t_weights, &mean, &std);
         TESTEX("Xavier: std = sqrt(2 / (fan_in + fan_out))", near(std, sqrt(2.0 / 300), 0.004));
-        TESTEX("Xavier: biases start at zero", all_zero(net->layers[0].t_bias));
+        TESTEX("Xavier: biases start at zero", all_zero(net->layers[1].t_bias));
         ann_free_network(net);
 
         net = make_init_net(WEIGHT_INIT_UNIFORM, ACTIVATION_RELU);
         real limit = net->weight_limit;
-        PTensor w = net->layers[0].t_weights;
+        PTensor w = net->layers[1].t_weights;
         int in_range = 1;
         for (int i = 0; i < w->rows * w->cols; i++)
             if (fabs(w->values[i]) > limit) in_range = 0;
@@ -166,12 +166,12 @@ void test_main(int argc, char *argv[])
         ann_free_network(net);
 
         net = make_init_net(WEIGHT_INIT_AUTO, ACTIVATION_RELU);
-        tensor_stats(net->layers[0].t_weights, &mean, &std);
+        tensor_stats(net->layers[1].t_weights, &mean, &std);
         TESTEX("Auto picks He for ReLU", near(std, sqrt(2.0 / 200), 0.005));
         ann_free_network(net);
 
         net = make_init_net(WEIGHT_INIT_AUTO, ACTIVATION_TANH);
-        tensor_stats(net->layers[0].t_weights, &mean, &std);
+        tensor_stats(net->layers[1].t_weights, &mean, &std);
         TESTEX("Auto picks Xavier for tanh", near(std, sqrt(2.0 / 300), 0.004));
         ann_free_network(net);
     }
@@ -252,10 +252,10 @@ void test_main(int argc, char *argv[])
         PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
         ann_add_layer(net, 1, LAYER_INPUT,  ACTIVATION_NULL);
         ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_NULL);
-        net->layers[0].t_weights->values[0] = -1.0f;
-        net->layers[0].t_weights->values[1] =  1.0f;
-        net->layers[0].t_bias->values[0] = 0.0f;
-        net->layers[0].t_bias->values[1] = 0.0f;
+        net->layers[1].t_weights->values[0] = -1.0f;
+        net->layers[1].t_weights->values[1] =  1.0f;
+        net->layers[1].t_bias->values[0] = 0.0f;
+        net->layers[1].t_bias->values[1] = 0.0f;
         net->print_func = capture_print;
 
         // TP: x=2, x=1   TN: x=-1   FN: x=-2   FP: x=3

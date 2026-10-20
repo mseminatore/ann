@@ -89,6 +89,14 @@ typedef struct {
     // Training: dropout
     id<MTLComputePipelineState> pso_dropout_forward;
     id<MTLComputePipelineState> pso_dropout_backward;
+    // Training: output layer gradient and loss
+    id<MTLComputePipelineState> pso_output_delta_loss;
+    id<MTLComputePipelineState> pso_softmax_jacobian;
+    // MPS GEMM kernels by shape, reused across batches
+    NSMutableDictionary<NSString *, MPSMatrixMultiplication *> *gemm_cache;
+    // Per-batch targets and per-row losses (shared memory)
+    id<MTLBuffer> targets_buf;
+    id<MTLBuffer> row_loss_buf;
     int initialized;
     int training_buffers_ready;   // 1 once gpu_alloc_training_buffers() succeeds
     int training_batch_size;      // batch size for which training buffers are allocated
@@ -329,7 +337,43 @@ int tensor_metal_init(void)
         "    uint gid [[thread_position_in_grid]]) {\n"
         "    float m = mask[gid];\n"
         "    dl_dz[gid] *= m;\n"
-        "    if (m != 0.0f) a[gid] /= m; }\n";
+        "    if (m != 0.0f) a[gid] /= m; }\n"
+        // ----------------------------------------------------------------
+        // Output layer: delta = t - y and each row's loss term, one thread
+        // per row. mode 0 = MSE (squared error), 1 = categorical cross-entropy,
+        // 2 = binary cross-entropy (sigmoid outputs); y is clamped like
+        // ann_cross_entropy_term().
+        // ----------------------------------------------------------------
+        "kernel void output_delta_loss(\n"
+        "    device const float *y [[buffer(0)]],\n"
+        "    device const float *t [[buffer(1)]],\n"
+        "    device float *delta [[buffer(2)]],\n"
+        "    device float *row_loss [[buffer(3)]],\n"
+        "    constant uint &cols [[buffer(4)]],\n"
+        "    constant uint &mode [[buffer(5)]],\n"
+        "    uint row [[thread_position_in_grid]]) {\n"
+        "    float s = 0.0f;\n"
+        "    for (uint n = 0; n < cols; n++) {\n"
+        "        uint i = row * cols + n;\n"
+        "        float yi = y[i], ti = t[i];\n"
+        "        delta[i] = ti - yi;\n"
+        "        if (mode == 0) { float d = yi - ti; s += d * d; }\n"
+        "        else {\n"
+        "            float c = clamp(yi, 1e-7f, 1.0f - 1e-7f);\n"
+        "            s += mode == 2 ? -(ti * log(c) + (1.0f - ti) * log(1.0f - c)) : -ti * log(c);\n"
+        "        } }\n"
+        "    row_loss[row] = s; }\n"
+        // ----------------------------------------------------------------
+        // MSE through a softmax output: d = y * (d - sum(d * y)) per row
+        // ----------------------------------------------------------------
+        "kernel void softmax_jacobian(\n"
+        "    device float *d [[buffer(0)]],\n"
+        "    device const float *y [[buffer(1)]],\n"
+        "    constant uint &cols [[buffer(2)]],\n"
+        "    uint row [[thread_position_in_grid]]) {\n"
+        "    uint o = row * cols; float dot = 0.0f;\n"
+        "    for (uint n = 0; n < cols; n++) dot += d[o + n] * y[o + n];\n"
+        "    for (uint n = 0; n < cols; n++) d[o + n] = y[o + n] * (d[o + n] - dot); }\n";
 
     NSError *err = nil;
     NSString *src = [NSString stringWithUTF8String:kShaderSource];
@@ -373,6 +417,8 @@ int tensor_metal_init(void)
     g_metal.pso_l1_regularize    = make_pso(g_metal.library, "l1_regularize");
     g_metal.pso_dropout_forward  = make_pso(g_metal.library, "dropout_forward");
     g_metal.pso_dropout_backward = make_pso(g_metal.library, "dropout_backward");
+    g_metal.pso_output_delta_loss = make_pso(g_metal.library, "output_delta_loss");
+    g_metal.pso_softmax_jacobian = make_pso(g_metal.library, "softmax_jacobian");
 
     if (!g_metal.pso_deriv_sigmoid || !g_metal.pso_deriv_relu   ||
         !g_metal.pso_deriv_leaky_relu || !g_metal.pso_deriv_tanh ||
@@ -382,9 +428,11 @@ int tensor_metal_init(void)
         !g_metal.pso_momentum_update || !g_metal.pso_adagrad_update ||
         !g_metal.pso_rmsprop_update || !g_metal.pso_adam_update  ||
         !g_metal.pso_l2_regularize  || !g_metal.pso_l1_regularize ||
-        !g_metal.pso_dropout_forward || !g_metal.pso_dropout_backward)
+        !g_metal.pso_dropout_forward || !g_metal.pso_dropout_backward ||
+        !g_metal.pso_output_delta_loss || !g_metal.pso_softmax_jacobian)
         return 0;
 
+    g_metal.gemm_cache = [NSMutableDictionary dictionary];
     g_metal.initialized = 1;
     return 1;
 }
@@ -535,125 +583,140 @@ static id<MTLComputePipelineState> pso_for_activation(Activation_type act)
     }
 }
 
+static void dispatch_binary_elementwise(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pso,
+                                        id<MTLBuffer> buf0, id<MTLBuffer> buf1, NSUInteger count);
+
 //-----------------------------------------------------------
-// GPU batched forward pass.
-// Performs Y = X * W^T + b + activation(Y) for each layer.
+// A cached MPS GEMM kernel: C = alpha * op(A) * op(B) + beta * C, with
+// op(A) [M x K], op(B) [K x N]. Creating these is costly, so one is kept
+// per shape and reused for every batch.
+//-----------------------------------------------------------
+static MPSMatrixMultiplication *gemm_kernel(BOOL trans_a, BOOL trans_b, NSUInteger M, NSUInteger N,
+                                            NSUInteger K, double alpha, double beta)
+{
+    NSString *key = [NSString stringWithFormat:@"%d%d:%lu:%lu:%lu:%g:%g", trans_a, trans_b,
+                     (unsigned long)M, (unsigned long)N, (unsigned long)K, alpha, beta];
+    MPSMatrixMultiplication *k = g_metal.gemm_cache[key];
+    if (!k) {
+        k = [[MPSMatrixMultiplication alloc] initWithDevice:g_metal.device
+                                              transposeLeft:trans_a
+                                             transposeRight:trans_b
+                                                 resultRows:M
+                                              resultColumns:N
+                                            interiorColumns:K
+                                                      alpha:alpha
+                                                       beta:beta];
+        g_metal.gemm_cache[key] = k;
+    }
+    return k;
+}
+
+//-----------------------------------------------------------
+// A row-major [rows x cols] float matrix over a buffer
+//-----------------------------------------------------------
+static MPSMatrix *gpu_matrix(id<MTLBuffer> buf, NSUInteger rows, NSUInteger cols)
+{
+    MPSMatrixDescriptor *desc = [MPSMatrixDescriptor matrixDescriptorWithRows:rows
+                                                                      columns:cols
+                                                                     rowBytes:cols * sizeof(float)
+                                                                     dataType:MPSDataTypeFloat32];
+    return [[MPSMatrix alloc] initWithBuffer:buf descriptor:desc];
+}
+
+//-----------------------------------------------------------
+// Encode C = alpha * op(A) * op(B) + beta * C. A, B and C are given with
+// their stored shapes; op() transposes when asked.
+//-----------------------------------------------------------
+static void encode_gemm(id<MTLCommandBuffer> cmd,
+                        id<MTLBuffer> a, NSUInteger a_rows, NSUInteger a_cols, BOOL trans_a,
+                        id<MTLBuffer> b, NSUInteger b_rows, NSUInteger b_cols, BOOL trans_b,
+                        id<MTLBuffer> c, double alpha, double beta)
+{
+    NSUInteger M = trans_a ? a_cols : a_rows;
+    NSUInteger K = trans_a ? a_rows : a_cols;
+    NSUInteger N = trans_b ? b_rows : b_cols;
+    [gemm_kernel(trans_a, trans_b, M, N, K, alpha, beta) encodeToCommandBuffer:cmd
+                                                                    leftMatrix:gpu_matrix(a, a_rows, a_cols)
+                                                                   rightMatrix:gpu_matrix(b, b_rows, b_cols)
+                                                                  resultMatrix:gpu_matrix(c, M, N)];
+}
+
+//-----------------------------------------------------------
+// Encode a dense layer's forward pass for a batch: Y = X * W^T + b, then
+// (when Z is given) save the pre-activation, apply the activation, and
+// apply dropout when a mask is given.
+//-----------------------------------------------------------
+static void encode_dense_forward(id<MTLCommandBuffer> cmd, PLayer dst, int in_nodes, int batch_size,
+                                 id<MTLBuffer> X, id<MTLBuffer> Y, id<MTLBuffer> Z, id<MTLBuffer> mask)
+{
+    int out_nodes = dst->node_count;
+    NSUInteger count = (NSUInteger)batch_size * out_nodes;
+    id<MTLBuffer> W = (__bridge id<MTLBuffer>)dst->t_weights->gpu_buf;
+    id<MTLBuffer> b = (__bridge id<MTLBuffer>)dst->t_bias->gpu_buf;
+
+    encode_gemm(cmd, X, batch_size, in_nodes, NO, W, out_nodes, in_nodes, YES, Y, 1.0, 0.0);
+    dispatch_bias_add(cmd, Y, b, (NSUInteger)batch_size, (NSUInteger)out_nodes);
+
+    if (Z) {
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        [blit copyFromBuffer:Y sourceOffset:0 toBuffer:Z destinationOffset:0 size:count * sizeof(float)];
+        [blit endEncoding];
+    }
+
+    if (dst->activation == ACTIVATION_SOFTMAX) {
+        dispatch_softmax(cmd, Y, (uint32_t)out_nodes, (NSUInteger)batch_size);
+    } else if (dst->activation != ACTIVATION_NULL) {
+        id<MTLComputePipelineState> pso = pso_for_activation(dst->activation);
+        if (pso)
+            dispatch_activation(cmd, pso, Y, count);
+    }
+
+    if (mask)
+        dispatch_binary_elementwise(cmd, g_metal.pso_dropout_forward, Y, mask, count);
+}
+
+//-----------------------------------------------------------
+// GPU batched inference: Y = act(X * W^T + b) layer by layer, encoded in one
+// command buffer.
 //
 // Inputs:
 //   pnet       - trained network (weights already uploaded)
 //   input_buf  - [batch_size x input_nodes] MTLBuffer (already on GPU)
 //   output_buf - [batch_size x output_nodes] MTLBuffer (result destination)
 //   batch_size - number of samples in the batch
-//
-// Intermediate buffers are allocated per call (could be cached for perf).
 //-----------------------------------------------------------
 static int metal_forward_pass(PNetwork pnet,
                               id<MTLBuffer> input_buf,
                               id<MTLBuffer> output_buf,
                               int batch_size)
 {
-    int layer_count = pnet->layer_count;
-
-    // Track current activation buffer as we propagate forward
+    id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
     id<MTLBuffer> cur_buf = input_buf;
-    int cur_cols = pnet->layers[0].node_count;
 
-    // Allocate intermediate buffers for each non-input layer
-    NSMutableArray<id<MTLBuffer>> *intermediates = [NSMutableArray arrayWithCapacity:layer_count];
-
-    for (int layer = 0; layer < layer_count - 1; layer++)
+    for (int layer = 1; layer < pnet->layer_count; layer++)
     {
-        PLayer dst = &pnet->layers[layer + 1];   // owns the weights from layer to layer + 1
-
-        if (!dst->t_weights || !dst->t_weights->gpu_buf ||
-            !dst->t_bias    || !dst->t_bias->gpu_buf)
+        PLayer dst = &pnet->layers[layer];
+        if (!dst->t_weights || !dst->t_weights->gpu_buf || !dst->t_bias || !dst->t_bias->gpu_buf)
         {
             fprintf(stderr, "[Metal] Layer %d weights/biases not on GPU\n", layer);
             return 0;
         }
 
-        id<MTLBuffer> W_buf   = (__bridge id<MTLBuffer>)dst->t_weights->gpu_buf;
-        id<MTLBuffer> b_buf   = (__bridge id<MTLBuffer>)dst->t_bias->gpu_buf;
-        int out_nodes = dst->node_count;
-
-        // Allocate output buffer for this layer: [batch_size x out_nodes]
-        size_t out_bytes = (size_t)batch_size * out_nodes * sizeof(float);
-        id<MTLBuffer> layer_out = [g_metal.device newBufferWithLength:out_bytes
-                                                              options:MTLResourceStorageModeShared];
-        if (!layer_out) return 0;
-        [intermediates addObject:layer_out];
-
-        // --- Matrix multiply: Y = X * W^T ---
-        // X: [batch x in_nodes], W: [out_nodes x in_nodes] → Y: [batch x out_nodes]
-        MPSMatrixDescriptor *X_desc = [MPSMatrixDescriptor
-            matrixDescriptorWithRows:(NSUInteger)batch_size
-                             columns:(NSUInteger)cur_cols
-                            rowBytes:(NSUInteger)(cur_cols * sizeof(float))
-                            dataType:MPSDataTypeFloat32];
-
-        MPSMatrixDescriptor *W_desc = [MPSMatrixDescriptor
-            matrixDescriptorWithRows:(NSUInteger)dst->t_weights->rows
-                             columns:(NSUInteger)dst->t_weights->cols
-                            rowBytes:(NSUInteger)(dst->t_weights->cols * sizeof(float))
-                            dataType:MPSDataTypeFloat32];
-
-        MPSMatrixDescriptor *Y_desc = [MPSMatrixDescriptor
-            matrixDescriptorWithRows:(NSUInteger)batch_size
-                             columns:(NSUInteger)out_nodes
-                            rowBytes:(NSUInteger)(out_nodes * sizeof(float))
-                            dataType:MPSDataTypeFloat32];
-
-        MPSMatrix *X_mat   = [[MPSMatrix alloc] initWithBuffer:cur_buf   descriptor:X_desc];
-        MPSMatrix *W_mat   = [[MPSMatrix alloc] initWithBuffer:W_buf     descriptor:W_desc];
-        MPSMatrix *Y_mat   = [[MPSMatrix alloc] initWithBuffer:layer_out descriptor:Y_desc];
-
-        // Y = X * W^T  (transposeRight=YES)
-        MPSMatrixMultiplication *gemm =
-            [[MPSMatrixMultiplication alloc] initWithDevice:g_metal.device
-                                            transposeLeft:NO
-                                           transposeRight:YES
-                                               resultRows:(NSUInteger)batch_size
-                                            resultColumns:(NSUInteger)out_nodes
-                                          interiorColumns:(NSUInteger)cur_cols
-                                                    alpha:1.0
-                                                     beta:0.0];
-
-        id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-        [gemm encodeToCommandBuffer:cmd
-                         leftMatrix:X_mat
-                        rightMatrix:W_mat
-                       resultMatrix:Y_mat];
-
-        // --- Bias add: Y[b][n] += b[n] ---
-        dispatch_bias_add(cmd, layer_out, b_buf, (NSUInteger)batch_size, (NSUInteger)out_nodes);
-
-        // --- Activation ---
-        NSUInteger elem_count = (NSUInteger)(batch_size * out_nodes);
-        Activation_type act = dst->activation;
-
-        if (act == ACTIVATION_SOFTMAX)
-        {
-            dispatch_softmax(cmd, layer_out, (uint32_t)out_nodes, (NSUInteger)batch_size);
-        }
-        else if (act != ACTIVATION_NULL)
-        {
-            id<MTLComputePipelineState> pso = pso_for_activation(act);
-            if (pso)
-                dispatch_activation(cmd, pso, layer_out, elem_count);
+        // the last layer writes straight into the caller's buffer
+        id<MTLBuffer> out = output_buf;
+        if (layer < pnet->layer_count - 1) {
+            out = [g_metal.device newBufferWithLength:(size_t)batch_size * dst->node_count * sizeof(float)
+                                              options:MTLResourceStorageModePrivate];
+            if (!out) return 0;
         }
 
-        [cmd commit];
-        [cmd waitUntilCompleted];
-
-        cur_buf  = layer_out;
-        cur_cols = out_nodes;
+        encode_dense_forward(cmd, dst, pnet->layers[layer - 1].node_count, batch_size, cur_buf, out, nil, nil);
+        cur_buf = out;
     }
 
-    // Copy final layer output into caller-supplied output_buf
-    size_t final_bytes = (size_t)batch_size * cur_cols * sizeof(float);
-    memcpy([output_buf contents], [cur_buf contents], final_bytes);
-
-    return 1;
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return cmd.status == MTLCommandBufferStatusCompleted;
 }
 
 //-----------------------------------------------------------
@@ -673,9 +736,8 @@ static int metal_upload_network(PNetwork pnet)
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
-
-        if (l->t_weights && !tensor_metal_upload(l->t_weights)) return ERR_FAIL;
-        if (l->t_bias    && !tensor_metal_upload(l->t_bias))    return ERR_FAIL;
+        for (int p = 0; p < l->param_count; p++)
+            if (!tensor_metal_upload(l->params[p].value)) return ERR_FAIL;
     }
 
     return ERR_OK;
@@ -688,14 +750,12 @@ static void metal_free_network(PNetwork pnet)
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
-
-        if (l->t_weights && l->t_weights->gpu_buf) {
-            tensor_metal_release_buffer(l->t_weights->gpu_buf);
-            l->t_weights->gpu_buf = NULL;
-        }
-        if (l->t_bias && l->t_bias->gpu_buf) {
-            tensor_metal_release_buffer(l->t_bias->gpu_buf);
-            l->t_bias->gpu_buf = NULL;
+        for (int p = 0; p < l->param_count; p++) {
+            PTensor v = l->params[p].value;
+            if (v && v->gpu_buf) {
+                tensor_metal_release_buffer(v->gpu_buf);
+                v->gpu_buf = NULL;
+            }
         }
     }
 
@@ -787,14 +847,17 @@ static int metal_eval_batch(const PNetwork pnet, const real *inputs, real *outpu
 }
 
 // ============================================================================
-// PHASE 2+3: GPU TRAINING SUPPORT
+// GPU TRAINING
+//
+// Each batch is encoded into one command buffer: zero the gradients, forward
+// pass, output gradient and loss, backward pass, then clipping, the optimizer
+// update and regularization. The CPU waits once, at the end, to read the loss.
 // ============================================================================
 
 //-----------------------------------------------------------
 // Helper: alloc or realloc a GPU shared buffer on a tensor.
-// On Apple Silicon, MTLResourceStorageModeShared means the
-// buffer is accessible by both CPU and GPU — no explicit
-// blit needed for zero-init or reading back scalars.
+// MTLResourceStorageModeShared buffers are visible to both CPU and GPU, so
+// inputs, targets and dropout masks are written into them directly.
 //-----------------------------------------------------------
 static int gpu_ensure_shared_buf(PTensor t)
 {
@@ -827,6 +890,16 @@ static int gpu_upload_shared_buf(PTensor t)
 }
 
 //-----------------------------------------------------------
+// A shared buffer of at least bytes, reallocated when too small
+//-----------------------------------------------------------
+static id<MTLBuffer> gpu_scratch(id<MTLBuffer> buf, size_t bytes)
+{
+    if (buf && [buf length] >= bytes)
+        return buf;
+    return [g_metal.device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+}
+
+//-----------------------------------------------------------
 // The dropout mask for a hidden layer in this batch, copied to the GPU.
 // ann.c draws the masks before each batch. Returns nil when the layer
 // does not use dropout.
@@ -843,9 +916,10 @@ static id<MTLBuffer> gpu_dropout_mask(PNetwork pnet, PLayer l, int batch_size)
 
 //-----------------------------------------------------------
 // Allocate GPU buffers for all training tensors.
-// Weights/biases already have gpu_buf from ann_gpu_upload_network().
-// This function adds gpu_buf to all training-time tensors.
-// Called lazily on first ann_gpu_train_batch() call.
+// Parameter values already have gpu_buf from ann_gpu_upload_network().
+// This adds the batch activations, pre-activations and gradients, and each
+// parameter's gradient and optimizer state (carried over from the CPU so
+// training continues where it left off). Called lazily by metal_train_batch().
 //-----------------------------------------------------------
 static int gpu_alloc_training_buffers(PNetwork pnet, int batch_size)
 {
@@ -854,29 +928,43 @@ static int gpu_alloc_training_buffers(PNetwork pnet, int batch_size)
 
         // t_batch_values: all layers [batch x nodes]
         if (!l->t_batch_values || !gpu_ensure_shared_buf(l->t_batch_values)) return 0;
+        if (layer == 0)
+            continue;
 
-        if (layer > 0) {
-            // Non-input layers also need pre-activation and gradient buffers
-            if (!l->t_batch_z     || !gpu_ensure_shared_buf(l->t_batch_z))     return 0;
-            if (!l->t_batch_dl_dz || !gpu_ensure_shared_buf(l->t_batch_dl_dz)) return 0;
-        }
+        // Non-input layers also need pre-activation and gradient buffers
+        if (!l->t_batch_z     || !gpu_ensure_shared_buf(l->t_batch_z))     return 0;
+        if (!l->t_batch_dl_dz || !gpu_ensure_shared_buf(l->t_batch_dl_dz)) return 0;
 
-        if (layer > 0) {
-            // Weight-carrying layers: gradients, optimizer state
-            if (!l->t_gradients || !gpu_ensure_shared_buf(l->t_gradients)) return 0;
-            if (!l->t_bias_grad  || !gpu_ensure_shared_buf(l->t_bias_grad))  return 0;
-            // Optimizer state (may be NULL for SGD which doesn't use them),
-            // carried over from the CPU so training continues where it left off
-            if (l->t_m     && !gpu_upload_shared_buf(l->t_m))     return 0;
-            if (l->t_v     && !gpu_upload_shared_buf(l->t_v))     return 0;
-            if (l->t_bias_m && !gpu_upload_shared_buf(l->t_bias_m)) return 0;
-            if (l->t_bias_v && !gpu_upload_shared_buf(l->t_bias_v)) return 0;
+        for (int p = 0; p < l->param_count; p++) {
+            Layer_param *param = &l->params[p];
+            if (!gpu_ensure_shared_buf(param->grad)) return 0;
+            if (param->m && !gpu_upload_shared_buf(param->m)) return 0;
+            if (param->v && !gpu_upload_shared_buf(param->v)) return 0;
         }
     }
 
     g_metal.training_buffers_ready = 1;
     g_metal.training_batch_size = batch_size;
     return 1;
+}
+
+//-----------------------------------------------------------
+// Encode a 1-D kernel over count elements: buffers at indices 0..n_bufs-1,
+// then float constants at the following indices
+//-----------------------------------------------------------
+static void encode_1d(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pso,
+                      id<MTLBuffer> __strong *bufs, int n_bufs,
+                      const float *consts, int n_consts, NSUInteger count)
+{
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:pso];
+    for (int i = 0; i < n_bufs; i++)
+        [enc setBuffer:bufs[i] offset:0 atIndex:(NSUInteger)i];
+    for (int i = 0; i < n_consts; i++)
+        [enc setBytes:&consts[i] length:sizeof(float) atIndex:(NSUInteger)(n_bufs + i)];
+    NSUInteger tg = MIN(pso.maxTotalThreadsPerThreadgroup, count);
+    [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [enc endEncoding];
 }
 
 //-----------------------------------------------------------
@@ -888,21 +976,14 @@ static void dispatch_binary_elementwise(id<MTLCommandBuffer> cmd,
                                         id<MTLBuffer> buf1,
                                         NSUInteger count)
 {
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-    [enc setComputePipelineState:pso];
-    [enc setBuffer:buf0 offset:0 atIndex:0];
-    [enc setBuffer:buf1 offset:0 atIndex:1];
-    NSUInteger tg = MIN(pso.maxTotalThreadsPerThreadgroup, count);
-    [enc dispatchThreads:MTLSizeMake(count, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding];
+    id<MTLBuffer> bufs[2] = { buf0, buf1 };
+    encode_1d(cmd, pso, bufs, 2, NULL, 0, count);
 }
 
 //-----------------------------------------------------------
 // Select the derivative PSO for a given activation.
-// Returns nil for activations that don't need a kernel
-// (ACTIVATION_NULL handled via memset delta, ACTIVATION_SOFTMAX
-//  output layers get their derivative from ann_mse_output_delta()).
+// Returns nil for activations that need no kernel (ACTIVATION_NULL; softmax
+// is handled by softmax_jacobian).
 //-----------------------------------------------------------
 static id<MTLComputePipelineState> pso_for_deriv(Activation_type act)
 {
@@ -918,313 +999,127 @@ static id<MTLComputePipelineState> pso_for_deriv(Activation_type act)
 }
 
 //-----------------------------------------------------------
-// gpu_forward_training()
-// Full forward pass saving pre-activation Z for backprop.
-// On entry: layer[0].t_batch_values->gpu_buf has the batch inputs.
-// On exit: all layers have t_batch_values->gpu_buf with activations,
-//          non-input layers have t_batch_z->gpu_buf with pre-activations.
+// Encode dL/dz = dL/da * f'(z) for a layer, reading A (sigmoid, tanh,
+// softsign) or Z (ReLU, leaky ReLU, GELU) as the CPU path does
 //-----------------------------------------------------------
-static int gpu_forward_training(PNetwork pnet, int batch_size)
+static void encode_activation_derivative(id<MTLCommandBuffer> cmd, PLayer l, int batch_size)
 {
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++) {
-        PLayer src = &pnet->layers[layer];
-        PLayer dst = &pnet->layers[layer + 1];
+    NSUInteger count = (NSUInteger)batch_size * l->node_count;
+    id<MTLBuffer> dl_dz = (__bridge id<MTLBuffer>)l->t_batch_dl_dz->gpu_buf;
+    id<MTLBuffer> A = (__bridge id<MTLBuffer>)l->t_batch_values->gpu_buf;
+    id<MTLBuffer> Z = (__bridge id<MTLBuffer>)l->t_batch_z->gpu_buf;
 
-        id<MTLBuffer> X_buf = (__bridge id<MTLBuffer>)src->t_batch_values->gpu_buf;
-        id<MTLBuffer> W_buf = (__bridge id<MTLBuffer>)dst->t_weights->gpu_buf;
-        id<MTLBuffer> b_buf = (__bridge id<MTLBuffer>)dst->t_bias->gpu_buf;
-        id<MTLBuffer> Y_buf = (__bridge id<MTLBuffer>)dst->t_batch_values->gpu_buf;
-        id<MTLBuffer> Z_buf = (__bridge id<MTLBuffer>)dst->t_batch_z->gpu_buf;
-
-        int in_nodes  = src->node_count;
-        int out_nodes = dst->node_count;
-
-        // --- GEMM: Y = X * W^T ---
-        MPSMatrixDescriptor *X_desc = [MPSMatrixDescriptor
-            matrixDescriptorWithRows:(NSUInteger)batch_size
-                             columns:(NSUInteger)in_nodes
-                            rowBytes:(NSUInteger)(in_nodes * sizeof(float))
-                            dataType:MPSDataTypeFloat32];
-        MPSMatrixDescriptor *W_desc = [MPSMatrixDescriptor
-            matrixDescriptorWithRows:(NSUInteger)dst->t_weights->rows
-                             columns:(NSUInteger)dst->t_weights->cols
-                            rowBytes:(NSUInteger)(dst->t_weights->cols * sizeof(float))
-                            dataType:MPSDataTypeFloat32];
-        MPSMatrixDescriptor *Y_desc = [MPSMatrixDescriptor
-            matrixDescriptorWithRows:(NSUInteger)batch_size
-                             columns:(NSUInteger)out_nodes
-                            rowBytes:(NSUInteger)(out_nodes * sizeof(float))
-                            dataType:MPSDataTypeFloat32];
-
-        MPSMatrix *X_mat = [[MPSMatrix alloc] initWithBuffer:X_buf descriptor:X_desc];
-        MPSMatrix *W_mat = [[MPSMatrix alloc] initWithBuffer:W_buf descriptor:W_desc];
-        MPSMatrix *Y_mat = [[MPSMatrix alloc] initWithBuffer:Y_buf descriptor:Y_desc];
-
-        MPSMatrixMultiplication *gemm =
-            [[MPSMatrixMultiplication alloc] initWithDevice:g_metal.device
-                                            transposeLeft:NO
-                                           transposeRight:YES
-                                               resultRows:(NSUInteger)batch_size
-                                            resultColumns:(NSUInteger)out_nodes
-                                          interiorColumns:(NSUInteger)in_nodes
-                                                    alpha:1.0
-                                                     beta:0.0];
-
-        id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-        [gemm encodeToCommandBuffer:cmd leftMatrix:X_mat rightMatrix:W_mat resultMatrix:Y_mat];
-
-        // --- Bias add ---
-        dispatch_bias_add(cmd, Y_buf, b_buf, (NSUInteger)batch_size, (NSUInteger)out_nodes);
-
-        [cmd commit];
-        [cmd waitUntilCompleted];
-
-        // --- Save pre-activation Z from Y (shared memory copy, no GPU round-trip) ---
-        size_t nbytes = (size_t)(batch_size * out_nodes) * sizeof(real);
-        memcpy([Z_buf contents], [Y_buf contents], nbytes);
-
-        // --- Activation ---
-        Activation_type act = dst->activation;
-        cmd = [g_metal.queue commandBuffer];
-
-        if (act == ACTIVATION_SOFTMAX) {
-            dispatch_softmax(cmd, Y_buf, (uint32_t)out_nodes, (NSUInteger)batch_size);
-        } else if (act != ACTIVATION_NULL) {
-            id<MTLComputePipelineState> pso = pso_for_activation(act);
-            if (pso)
-                dispatch_activation(cmd, pso, Y_buf, (NSUInteger)(batch_size * out_nodes));
-        }
-
-        // --- Dropout (hidden layers only) ---
-        if (layer + 1 < pnet->layer_count - 1) {
-            id<MTLBuffer> mask_buf = gpu_dropout_mask(pnet, dst, batch_size);
-            if (mask_buf)
-                dispatch_binary_elementwise(cmd, g_metal.pso_dropout_forward, Y_buf, mask_buf,
-                                            (NSUInteger)(batch_size * out_nodes));
-        }
-
-        [cmd commit];
-        [cmd waitUntilCompleted];
+    if (l->activation == ACTIVATION_SOFTMAX) {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        uint32_t cols = (uint32_t)l->node_count;
+        [enc setComputePipelineState:g_metal.pso_softmax_jacobian];
+        [enc setBuffer:dl_dz offset:0 atIndex:0];
+        [enc setBuffer:A offset:0 atIndex:1];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:2];
+        [enc dispatchThreads:MTLSizeMake((NSUInteger)batch_size, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [enc endEncoding];
+        return;
     }
-    return 1;
+
+    id<MTLComputePipelineState> pso = pso_for_deriv(l->activation);
+    if (!pso)
+        return;
+    int uses_z = l->activation == ACTIVATION_RELU || l->activation == ACTIVATION_LEAKY_RELU ||
+                 l->activation == ACTIVATION_GELU;
+    dispatch_binary_elementwise(cmd, pso, dl_dz, uses_z ? Z : A, count);
 }
 
 //-----------------------------------------------------------
-// gpu_backward_pass()
-// Backward pass after delta (= T - Y) is written to
-// output_layer.t_batch_dl_dz->gpu_buf by the caller.
-//
-// For each layer backward (output-1 down to 1):
-//   1. Apply activation derivative kernel to dl_dz using A or Z
-//   2. MPS GEMM (transA): dW += dl_dz^T * A_prev / (accumulated)
-//   3. bias_grad_sum kernel: bias_grad += col_sum(dl_dz)
-//   4. MPS GEMM: dl_dz_prev = dl_dz * W  (propagate)
+// Encode the output layer's delta (t - y, then the activation derivative for
+// MSE; cross-entropy with softmax/sigmoid needs none) and each row's loss
 //-----------------------------------------------------------
-static int gpu_backward_pass(PNetwork pnet, int batch_size)
+static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_size)
 {
-    int layer_count = pnet->layer_count;
+    PLayer out = &pnet->layers[pnet->layer_count - 1];
+    uint32_t cols = (uint32_t)out->node_count;
+    uint32_t mode = pnet->loss_type == LOSS_MSE ? 0 : (out->activation == ACTIVATION_SIGMOID ? 2 : 1);
 
-    for (int li = layer_count - 1; li >= 1; li--) {
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:g_metal.pso_output_delta_loss];
+    [enc setBuffer:(__bridge id<MTLBuffer>)out->t_batch_values->gpu_buf offset:0 atIndex:0];
+    [enc setBuffer:g_metal.targets_buf offset:0 atIndex:1];
+    [enc setBuffer:(__bridge id<MTLBuffer>)out->t_batch_dl_dz->gpu_buf offset:0 atIndex:2];
+    [enc setBuffer:g_metal.row_loss_buf offset:0 atIndex:3];
+    [enc setBytes:&cols length:sizeof(cols) atIndex:4];
+    [enc setBytes:&mode length:sizeof(mode) atIndex:5];
+    NSUInteger tg = MIN(g_metal.pso_output_delta_loss.maxTotalThreadsPerThreadgroup, (NSUInteger)batch_size);
+    [enc dispatchThreads:MTLSizeMake((NSUInteger)batch_size, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [enc endEncoding];
+
+    if (pnet->loss_type == LOSS_MSE)
+        encode_activation_derivative(cmd, out, batch_size);
+}
+
+//-----------------------------------------------------------
+// Encode the backward pass. On entry the output layer's t_batch_dl_dz holds
+// -dL/dz. For each layer, from the output down to layer 1:
+//   1. hidden layers: undo dropout, then the activation derivative
+//   2. dW += dl_dz^T * A_prev and bias_grad += column sums of dl_dz
+//   3. dl_dz_prev = dl_dz * W (not for layer 1, whose input needs none)
+//-----------------------------------------------------------
+static void encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_size)
+{
+    for (int li = pnet->layer_count - 1; li >= 1; li--) {
         PLayer layer      = &pnet->layers[li];
         PLayer prev_layer = &pnet->layers[li - 1];
-
         int nodes      = layer->node_count;
         int prev_nodes = prev_layer->node_count;
+        NSUInteger count = (NSUInteger)batch_size * nodes;
 
-        id<MTLBuffer> dl_dz_buf  = (__bridge id<MTLBuffer>)layer->t_batch_dl_dz->gpu_buf;
-        id<MTLBuffer> A_buf      = (__bridge id<MTLBuffer>)layer->t_batch_values->gpu_buf;
-        id<MTLBuffer> Z_buf      = (__bridge id<MTLBuffer>)layer->t_batch_z->gpu_buf;
-        id<MTLBuffer> A_prev_buf = (__bridge id<MTLBuffer>)prev_layer->t_batch_values->gpu_buf;
-        id<MTLBuffer> W_buf      = (__bridge id<MTLBuffer>)layer->t_weights->gpu_buf;
-        id<MTLBuffer> dW_buf     = (__bridge id<MTLBuffer>)layer->t_gradients->gpu_buf;
-        id<MTLBuffer> db_buf     = (__bridge id<MTLBuffer>)layer->t_bias_grad->gpu_buf;
+        id<MTLBuffer> dl_dz  = (__bridge id<MTLBuffer>)layer->t_batch_dl_dz->gpu_buf;
+        id<MTLBuffer> A_prev = (__bridge id<MTLBuffer>)prev_layer->t_batch_values->gpu_buf;
 
-        NSUInteger elem_count = (NSUInteger)(batch_size * nodes);
-
-        // --- Apply activation derivative ---
-        // The output layer's derivative is already in its delta (applied by
-        // ann_mse_output_delta() for MSE; cross-entropy with softmax needs none).
-        // Only hidden layers get the activation derivative applied here.
-        int is_output_layer = (li == layer_count - 1);
-        int skip_output_derivative = is_output_layer;
-        if (!skip_output_derivative) {
-            id<MTLComputePipelineState> pso_d = pso_for_deriv(layer->activation);
-            id<MTLBuffer> mask_buf = gpu_dropout_mask(pnet, layer, batch_size);
-            if (pso_d || mask_buf) {
-                id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-
-                // Undo dropout: mask the gradient and restore pre-dropout activations
-                if (mask_buf) {
-                    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                    [enc setComputePipelineState:g_metal.pso_dropout_backward];
-                    [enc setBuffer:dl_dz_buf offset:0 atIndex:0];
-                    [enc setBuffer:A_buf     offset:0 atIndex:1];
-                    [enc setBuffer:mask_buf  offset:0 atIndex:2];
-                    NSUInteger tg = MIN(g_metal.pso_dropout_backward.maxTotalThreadsPerThreadgroup, elem_count);
-                    [enc dispatchThreads:MTLSizeMake(elem_count, 1, 1)
-                        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-                    [enc endEncoding];
-                }
-
-                if (pso_d) {
-                    // Use Z (pre-activation) for ReLU/LeakyReLU/GELU, A (post-activation) for others
-                    id<MTLBuffer> src_buf = (layer->activation == ACTIVATION_RELU ||
-                                             layer->activation == ACTIVATION_LEAKY_RELU ||
-                                             layer->activation == ACTIVATION_GELU)
-                                            ? Z_buf : A_buf;
-                    dispatch_binary_elementwise(cmd, pso_d, dl_dz_buf, src_buf, elem_count);
-                }
-                [cmd commit];
-                [cmd waitUntilCompleted];
+        if (li < pnet->layer_count - 1) {
+            id<MTLBuffer> mask = gpu_dropout_mask(pnet, layer, batch_size);
+            if (mask) {
+                id<MTLBuffer> bufs[3] = { dl_dz, (__bridge id<MTLBuffer>)layer->t_batch_values->gpu_buf, mask };
+                encode_1d(cmd, g_metal.pso_dropout_backward, bufs, 3, NULL, 0, count);
             }
+            encode_activation_derivative(cmd, layer, batch_size);
         }
 
-        // --- dW += dl_dz^T * A_prev  (GEMM transA) ---
-        // dl_dz: [batch x nodes], A_prev: [batch x prev_nodes]
-        // dl_dz^T: [nodes x batch], result dW: [nodes x prev_nodes]
+        // dW += dl_dz^T * A_prev  ([nodes x batch] * [batch x prev_nodes])
+        encode_gemm(cmd, dl_dz, batch_size, nodes, YES, A_prev, batch_size, prev_nodes, NO,
+                    (__bridge id<MTLBuffer>)layer->t_gradients->gpu_buf, 1.0, 1.0);
+
+        // bias_grad += column sums of dl_dz
         {
-            MPSMatrixDescriptor *dLdz_desc = [MPSMatrixDescriptor
-                matrixDescriptorWithRows:(NSUInteger)batch_size
-                                 columns:(NSUInteger)nodes
-                                rowBytes:(NSUInteger)(nodes * sizeof(float))
-                                dataType:MPSDataTypeFloat32];
-            MPSMatrixDescriptor *Ap_desc = [MPSMatrixDescriptor
-                matrixDescriptorWithRows:(NSUInteger)batch_size
-                                 columns:(NSUInteger)prev_nodes
-                                rowBytes:(NSUInteger)(prev_nodes * sizeof(float))
-                                dataType:MPSDataTypeFloat32];
-            MPSMatrixDescriptor *dW_desc = [MPSMatrixDescriptor
-                matrixDescriptorWithRows:(NSUInteger)nodes
-                                 columns:(NSUInteger)prev_nodes
-                                rowBytes:(NSUInteger)(prev_nodes * sizeof(float))
-                                dataType:MPSDataTypeFloat32];
-
-            MPSMatrix *dLdz_mat = [[MPSMatrix alloc] initWithBuffer:dl_dz_buf descriptor:dLdz_desc];
-            MPSMatrix *Ap_mat   = [[MPSMatrix alloc] initWithBuffer:A_prev_buf descriptor:Ap_desc];
-            MPSMatrix *dW_mat   = [[MPSMatrix alloc] initWithBuffer:dW_buf     descriptor:dW_desc];
-
-            // dW = dl_dz^T * A_prev (transposeLeft=YES)
-            // beta=1.0 so we accumulate (dW += ...)
-            MPSMatrixMultiplication *gemm_dW =
-                [[MPSMatrixMultiplication alloc] initWithDevice:g_metal.device
-                                                transposeLeft:YES
-                                               transposeRight:NO
-                                                   resultRows:(NSUInteger)nodes
-                                                resultColumns:(NSUInteger)prev_nodes
-                                              interiorColumns:(NSUInteger)batch_size
-                                                        alpha:1.0
-                                                         beta:1.0];
-
-            id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-            [gemm_dW encodeToCommandBuffer:cmd leftMatrix:dLdz_mat rightMatrix:Ap_mat resultMatrix:dW_mat];
-            [cmd commit];
-            [cmd waitUntilCompleted];
-        }
-
-        // --- bias_grad += col_sum(dl_dz) ---
-        {
-            id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
             id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            uint32_t bs = (uint32_t)batch_size, n = (uint32_t)nodes;
             [enc setComputePipelineState:g_metal.pso_bias_grad_sum];
-            [enc setBuffer:dl_dz_buf offset:0 atIndex:0];
-            [enc setBuffer:db_buf    offset:0 atIndex:1];
-            uint32_t bs_u32  = (uint32_t)batch_size;
-            uint32_t out_u32 = (uint32_t)nodes;
-            [enc setBytes:&bs_u32  length:sizeof(uint32_t) atIndex:2];
-            [enc setBytes:&out_u32 length:sizeof(uint32_t) atIndex:3];
+            [enc setBuffer:dl_dz offset:0 atIndex:0];
+            [enc setBuffer:(__bridge id<MTLBuffer>)layer->t_bias_grad->gpu_buf offset:0 atIndex:1];
+            [enc setBytes:&bs length:sizeof(bs) atIndex:2];
+            [enc setBytes:&n  length:sizeof(n)  atIndex:3];
             NSUInteger tg = MIN(g_metal.pso_bias_grad_sum.maxTotalThreadsPerThreadgroup, (NSUInteger)nodes);
-            [enc dispatchThreads:MTLSizeMake((NSUInteger)nodes, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+            [enc dispatchThreads:MTLSizeMake((NSUInteger)nodes, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
             [enc endEncoding];
-            [cmd commit];
-            [cmd waitUntilCompleted];
         }
 
-        // --- Propagate: dl_dz_prev = dl_dz * W ---
-        // (Skip for input layer since it has no t_batch_dl_dz)
-        if (li > 1) {
-            id<MTLBuffer> dl_dz_prev_buf = (__bridge id<MTLBuffer>)prev_layer->t_batch_dl_dz->gpu_buf;
-
-            MPSMatrixDescriptor *dLdz_desc = [MPSMatrixDescriptor
-                matrixDescriptorWithRows:(NSUInteger)batch_size
-                                 columns:(NSUInteger)nodes
-                                rowBytes:(NSUInteger)(nodes * sizeof(float))
-                                dataType:MPSDataTypeFloat32];
-            MPSMatrixDescriptor *W_desc = [MPSMatrixDescriptor
-                matrixDescriptorWithRows:(NSUInteger)nodes
-                                 columns:(NSUInteger)prev_nodes
-                                rowBytes:(NSUInteger)(prev_nodes * sizeof(float))
-                                dataType:MPSDataTypeFloat32];
-            MPSMatrixDescriptor *prev_desc = [MPSMatrixDescriptor
-                matrixDescriptorWithRows:(NSUInteger)batch_size
-                                 columns:(NSUInteger)prev_nodes
-                                rowBytes:(NSUInteger)(prev_nodes * sizeof(float))
-                                dataType:MPSDataTypeFloat32];
-
-            MPSMatrix *dLdz_mat  = [[MPSMatrix alloc] initWithBuffer:dl_dz_buf      descriptor:dLdz_desc];
-            MPSMatrix *W_mat     = [[MPSMatrix alloc] initWithBuffer:W_buf           descriptor:W_desc];
-            MPSMatrix *prev_mat  = [[MPSMatrix alloc] initWithBuffer:dl_dz_prev_buf  descriptor:prev_desc];
-
-            // dl_dz_prev = dl_dz * W (no transpose)
-            MPSMatrixMultiplication *gemm_prop =
-                [[MPSMatrixMultiplication alloc] initWithDevice:g_metal.device
-                                                transposeLeft:NO
-                                               transposeRight:NO
-                                                   resultRows:(NSUInteger)batch_size
-                                                resultColumns:(NSUInteger)prev_nodes
-                                              interiorColumns:(NSUInteger)nodes
-                                                        alpha:1.0
-                                                         beta:0.0];
-
-            id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-            [gemm_prop encodeToCommandBuffer:cmd leftMatrix:dLdz_mat rightMatrix:W_mat resultMatrix:prev_mat];
-            [cmd commit];
-            [cmd waitUntilCompleted];
-        }
+        // dl_dz_prev = dl_dz * W  ([batch x nodes] * [nodes x prev_nodes])
+        if (li > 1)
+            encode_gemm(cmd, dl_dz, batch_size, nodes, NO,
+                        (__bridge id<MTLBuffer>)layer->t_weights->gpu_buf, nodes, prev_nodes, NO,
+                        (__bridge id<MTLBuffer>)prev_layer->t_batch_dl_dz->gpu_buf, 1.0, 0.0);
     }
-    return 1;
 }
 
 //-----------------------------------------------------------
-// gpu_dispatch_elementwise()
-// Dispatch an element-wise 1-buffer kernel (for regularization/clip).
+// Encode gradient clipping, the optimizer update and L1/L2 regularization for
+// every parameter, as the CPU optimizers do. pnet->train_iteration must
+// already count this batch (Adam's bias correction).
 //-----------------------------------------------------------
-static void gpu_dispatch_elementwise1(id<MTLComputePipelineState> pso,
-                                      id<MTLBuffer> buf,
-                                      NSUInteger count,
-                                      float param,
-                                      int param_idx)
+static void encode_optimizer(id<MTLCommandBuffer> cmd, PNetwork pnet)
 {
-    id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-    [enc setComputePipelineState:pso];
-    [enc setBuffer:buf offset:0 atIndex:0];
-    [enc setBytes:&param length:sizeof(float) atIndex:(NSUInteger)param_idx];
-    NSUInteger tg = MIN(pso.maxTotalThreadsPerThreadgroup, count);
-    [enc dispatchThreads:MTLSizeMake(count, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding];
-    [cmd commit];
-    [cmd waitUntilCompleted];
-}
-
-//-----------------------------------------------------------
-// gpu_optimizer_step()
-// Dispatches the appropriate optimizer kernel for each layer.
-// Applies gradient clipping before update and regularization after.
-//-----------------------------------------------------------
-static void gpu_optimizer_step(PNetwork pnet)
-{
-    Optimizer_type opt = pnet->optimizer;
-    float lr      = (float)pnet->learning_rate;
-    float beta1   = 0.9f;
-    float beta2   = 0.999f;
-    float eps     = 1e-8f;
-    float beta_m  = 0.9f;  // momentum beta
-
-    // Adam bias correction scalars
+    float lr = (float)pnet->learning_rate;
+    float beta1 = 0.9f, beta2 = 0.999f, eps = 1e-8f, beta = 0.9f;
     float bc1 = 0.0f, bc2 = 0.0f;
-    if (opt == OPT_ADAM) {
+    if (pnet->optimizer == OPT_ADAM) {
         float t = (float)pnet->train_iteration;
         bc1 = 1.0f / (1.0f - powf(beta1, t));
         bc2 = 1.0f / (1.0f - powf(beta2, t));
@@ -1232,230 +1127,72 @@ static void gpu_optimizer_step(PNetwork pnet)
 
     for (int layer = 1; layer < pnet->layer_count; layer++) {
         PLayer l = &pnet->layers[layer];
+        for (int p = 0; p < l->param_count; p++) {
+            Layer_param *param = &l->params[p];
+            NSUInteger count = (NSUInteger)(param->value->rows * param->value->cols);
+            id<MTLBuffer> w = (__bridge id<MTLBuffer>)param->value->gpu_buf;
+            id<MTLBuffer> g = (__bridge id<MTLBuffer>)param->grad->gpu_buf;
+            id<MTLBuffer> m = param->m ? (__bridge id<MTLBuffer>)param->m->gpu_buf : nil;
+            id<MTLBuffer> v = param->v ? (__bridge id<MTLBuffer>)param->v->gpu_buf : nil;
 
-        id<MTLBuffer> W_buf  = (__bridge id<MTLBuffer>)l->t_weights->gpu_buf;
-        id<MTLBuffer> g_buf  = (__bridge id<MTLBuffer>)l->t_gradients->gpu_buf;
-        id<MTLBuffer> b_buf  = (__bridge id<MTLBuffer>)l->t_bias->gpu_buf;
-        id<MTLBuffer> bg_buf = (__bridge id<MTLBuffer>)l->t_bias_grad->gpu_buf;
-
-        NSUInteger w_count = (NSUInteger)(l->t_weights->rows * l->t_weights->cols);
-        NSUInteger b_count = (NSUInteger)(l->t_bias->cols);
-
-        // Optional gradient clipping
-        if (pnet->max_gradient > 0.0f) {
-            float mg = (float)pnet->max_gradient;
-            gpu_dispatch_elementwise1(g_metal.pso_gradient_clip, g_buf,  w_count, mg, 1);
-            gpu_dispatch_elementwise1(g_metal.pso_gradient_clip, bg_buf, b_count, mg, 1);
-        }
-
-        switch (opt) {
-          case OPT_SGD: {
-            // Weights
-            id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-            [enc setComputePipelineState:g_metal.pso_sgd_update];
-            [enc setBuffer:W_buf offset:0 atIndex:0];
-            [enc setBuffer:g_buf offset:0 atIndex:1];
-            [enc setBytes:&lr length:sizeof(float) atIndex:2];
-            NSUInteger tg = MIN(g_metal.pso_sgd_update.maxTotalThreadsPerThreadgroup, w_count);
-            [enc dispatchThreads:MTLSizeMake(w_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-            [enc endEncoding];
-            // Biases
-            id<MTLComputeCommandEncoder> enc2 = [cmd computeCommandEncoder];
-            [enc2 setComputePipelineState:g_metal.pso_sgd_update];
-            [enc2 setBuffer:b_buf  offset:0 atIndex:0];
-            [enc2 setBuffer:bg_buf offset:0 atIndex:1];
-            [enc2 setBytes:&lr length:sizeof(float) atIndex:2];
-            NSUInteger tg2 = MIN(g_metal.pso_sgd_update.maxTotalThreadsPerThreadgroup, b_count);
-            [enc2 dispatchThreads:MTLSizeMake(b_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg2, 1, 1)];
-            [enc2 endEncoding];
-            [cmd commit];
-            [cmd waitUntilCompleted];
-            break;
-          }
-
-          case OPT_MOMENTUM: {
-            id<MTLBuffer> m_buf  = (__bridge id<MTLBuffer>)l->t_m->gpu_buf;
-            id<MTLBuffer> bm_buf = (__bridge id<MTLBuffer>)l->t_bias_m->gpu_buf;
-            // Weights
-            {
-                id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                [enc setComputePipelineState:g_metal.pso_momentum_update];
-                [enc setBuffer:W_buf  offset:0 atIndex:0];
-                [enc setBuffer:g_buf  offset:0 atIndex:1];
-                [enc setBuffer:m_buf  offset:0 atIndex:2];
-                [enc setBytes:&lr      length:sizeof(float) atIndex:3];
-                [enc setBytes:&beta_m  length:sizeof(float) atIndex:4];
-                NSUInteger tg = MIN(g_metal.pso_momentum_update.maxTotalThreadsPerThreadgroup, w_count);
-                [enc dispatchThreads:MTLSizeMake(w_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-                [enc endEncoding];
-                [cmd commit]; [cmd waitUntilCompleted];
+            if (pnet->max_gradient > 0.0f) {
+                float mg = (float)pnet->max_gradient;
+                encode_1d(cmd, g_metal.pso_gradient_clip, &g, 1, &mg, 1, count);
             }
-            // Biases
-            {
-                id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                [enc setComputePipelineState:g_metal.pso_momentum_update];
-                [enc setBuffer:b_buf  offset:0 atIndex:0];
-                [enc setBuffer:bg_buf offset:0 atIndex:1];
-                [enc setBuffer:bm_buf offset:0 atIndex:2];
-                [enc setBytes:&lr      length:sizeof(float) atIndex:3];
-                [enc setBytes:&beta_m  length:sizeof(float) atIndex:4];
-                NSUInteger tg = MIN(g_metal.pso_momentum_update.maxTotalThreadsPerThreadgroup, b_count);
-                [enc dispatchThreads:MTLSizeMake(b_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-                [enc endEncoding];
-                [cmd commit]; [cmd waitUntilCompleted];
-            }
-            break;
-          }
 
-          case OPT_ADAGRAD: {
-            id<MTLBuffer> v_buf  = (__bridge id<MTLBuffer>)l->t_v->gpu_buf;
-            id<MTLBuffer> bv_buf = (__bridge id<MTLBuffer>)l->t_bias_v->gpu_buf;
-            // Weights
-            {
-                id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                [enc setComputePipelineState:g_metal.pso_adagrad_update];
-                [enc setBuffer:W_buf  offset:0 atIndex:0];
-                [enc setBuffer:g_buf  offset:0 atIndex:1];
-                [enc setBuffer:v_buf  offset:0 atIndex:2];
-                [enc setBytes:&lr  length:sizeof(float) atIndex:3];
-                [enc setBytes:&eps length:sizeof(float) atIndex:4];
-                NSUInteger tg = MIN(g_metal.pso_adagrad_update.maxTotalThreadsPerThreadgroup, w_count);
-                [enc dispatchThreads:MTLSizeMake(w_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-                [enc endEncoding];
-                [cmd commit]; [cmd waitUntilCompleted];
+            switch (pnet->optimizer) {
+            case OPT_SGD: {
+                id<MTLBuffer> bufs[2] = { w, g };
+                encode_1d(cmd, g_metal.pso_sgd_update, bufs, 2, &lr, 1, count);
+                break;
             }
-            // Biases
-            {
-                id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                [enc setComputePipelineState:g_metal.pso_adagrad_update];
-                [enc setBuffer:b_buf  offset:0 atIndex:0];
-                [enc setBuffer:bg_buf offset:0 atIndex:1];
-                [enc setBuffer:bv_buf offset:0 atIndex:2];
-                [enc setBytes:&lr  length:sizeof(float) atIndex:3];
-                [enc setBytes:&eps length:sizeof(float) atIndex:4];
-                NSUInteger tg = MIN(g_metal.pso_adagrad_update.maxTotalThreadsPerThreadgroup, b_count);
-                [enc dispatchThreads:MTLSizeMake(b_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-                [enc endEncoding];
-                [cmd commit]; [cmd waitUntilCompleted];
+            case OPT_MOMENTUM: {
+                id<MTLBuffer> bufs[3] = { w, g, m };
+                float c[2] = { lr, beta };
+                encode_1d(cmd, g_metal.pso_momentum_update, bufs, 3, c, 2, count);
+                break;
             }
-            break;
-          }
+            case OPT_ADAGRAD: {
+                id<MTLBuffer> bufs[3] = { w, g, v };
+                float c[2] = { lr, eps };
+                encode_1d(cmd, g_metal.pso_adagrad_update, bufs, 3, c, 2, count);
+                break;
+            }
+            case OPT_RMSPROP: {
+                id<MTLBuffer> bufs[3] = { w, g, v };
+                float c[3] = { lr, beta, eps };
+                encode_1d(cmd, g_metal.pso_rmsprop_update, bufs, 3, c, 3, count);
+                break;
+            }
+            case OPT_ADAM: {
+                id<MTLBuffer> bufs[4] = { w, g, m, v };
+                float c[6] = { lr, beta1, beta2, eps, bc1, bc2 };
+                encode_1d(cmd, g_metal.pso_adam_update, bufs, 4, c, 6, count);
+                break;
+            }
+            default:
+                break;
+            }
 
-          case OPT_RMSPROP: {
-            id<MTLBuffer> v_buf  = (__bridge id<MTLBuffer>)l->t_v->gpu_buf;
-            id<MTLBuffer> bv_buf = (__bridge id<MTLBuffer>)l->t_bias_v->gpu_buf;
-            float beta_rms = 0.9f;
-            // Weights
-            {
-                id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                [enc setComputePipelineState:g_metal.pso_rmsprop_update];
-                [enc setBuffer:W_buf  offset:0 atIndex:0];
-                [enc setBuffer:g_buf  offset:0 atIndex:1];
-                [enc setBuffer:v_buf  offset:0 atIndex:2];
-                [enc setBytes:&lr       length:sizeof(float) atIndex:3];
-                [enc setBytes:&beta_rms length:sizeof(float) atIndex:4];
-                [enc setBytes:&eps      length:sizeof(float) atIndex:5];
-                NSUInteger tg = MIN(g_metal.pso_rmsprop_update.maxTotalThreadsPerThreadgroup, w_count);
-                [enc dispatchThreads:MTLSizeMake(w_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-                [enc endEncoding];
-                [cmd commit]; [cmd waitUntilCompleted];
+            if (!param->regularize)
+                continue;
+            if (pnet->l2_lambda > 0.0f) {
+                float decay = 1.0f - (float)(pnet->learning_rate * pnet->l2_lambda);
+                encode_1d(cmd, g_metal.pso_l2_regularize, &w, 1, &decay, 1, count);
             }
-            // Biases
-            {
-                id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                [enc setComputePipelineState:g_metal.pso_rmsprop_update];
-                [enc setBuffer:b_buf  offset:0 atIndex:0];
-                [enc setBuffer:bg_buf offset:0 atIndex:1];
-                [enc setBuffer:bv_buf offset:0 atIndex:2];
-                [enc setBytes:&lr       length:sizeof(float) atIndex:3];
-                [enc setBytes:&beta_rms length:sizeof(float) atIndex:4];
-                [enc setBytes:&eps      length:sizeof(float) atIndex:5];
-                NSUInteger tg = MIN(g_metal.pso_rmsprop_update.maxTotalThreadsPerThreadgroup, b_count);
-                [enc dispatchThreads:MTLSizeMake(b_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-                [enc endEncoding];
-                [cmd commit]; [cmd waitUntilCompleted];
+            if (pnet->l1_lambda > 0.0f) {
+                float delta = (float)(pnet->learning_rate * pnet->l1_lambda);
+                encode_1d(cmd, g_metal.pso_l1_regularize, &w, 1, &delta, 1, count);
             }
-            break;
-          }
-
-          case OPT_ADAM: {
-            id<MTLBuffer> m_buf  = (__bridge id<MTLBuffer>)l->t_m->gpu_buf;
-            id<MTLBuffer> v_buf  = (__bridge id<MTLBuffer>)l->t_v->gpu_buf;
-            id<MTLBuffer> bm_buf = (__bridge id<MTLBuffer>)l->t_bias_m->gpu_buf;
-            id<MTLBuffer> bv_buf = (__bridge id<MTLBuffer>)l->t_bias_v->gpu_buf;
-            // Weights
-            {
-                id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                [enc setComputePipelineState:g_metal.pso_adam_update];
-                [enc setBuffer:W_buf  offset:0 atIndex:0];
-                [enc setBuffer:g_buf  offset:0 atIndex:1];
-                [enc setBuffer:m_buf  offset:0 atIndex:2];
-                [enc setBuffer:v_buf  offset:0 atIndex:3];
-                [enc setBytes:&lr    length:sizeof(float) atIndex:4];
-                [enc setBytes:&beta1 length:sizeof(float) atIndex:5];
-                [enc setBytes:&beta2 length:sizeof(float) atIndex:6];
-                [enc setBytes:&eps   length:sizeof(float) atIndex:7];
-                [enc setBytes:&bc1   length:sizeof(float) atIndex:8];
-                [enc setBytes:&bc2   length:sizeof(float) atIndex:9];
-                NSUInteger tg = MIN(g_metal.pso_adam_update.maxTotalThreadsPerThreadgroup, w_count);
-                [enc dispatchThreads:MTLSizeMake(w_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-                [enc endEncoding];
-                [cmd commit]; [cmd waitUntilCompleted];
-            }
-            // Biases
-            {
-                id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                [enc setComputePipelineState:g_metal.pso_adam_update];
-                [enc setBuffer:b_buf  offset:0 atIndex:0];
-                [enc setBuffer:bg_buf offset:0 atIndex:1];
-                [enc setBuffer:bm_buf offset:0 atIndex:2];
-                [enc setBuffer:bv_buf offset:0 atIndex:3];
-                [enc setBytes:&lr    length:sizeof(float) atIndex:4];
-                [enc setBytes:&beta1 length:sizeof(float) atIndex:5];
-                [enc setBytes:&beta2 length:sizeof(float) atIndex:6];
-                [enc setBytes:&eps   length:sizeof(float) atIndex:7];
-                [enc setBytes:&bc1   length:sizeof(float) atIndex:8];
-                [enc setBytes:&bc2   length:sizeof(float) atIndex:9];
-                NSUInteger tg = MIN(g_metal.pso_adam_update.maxTotalThreadsPerThreadgroup, b_count);
-                [enc dispatchThreads:MTLSizeMake(b_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-                [enc endEncoding];
-                [cmd commit]; [cmd waitUntilCompleted];
-            }
-            break;
-          }
-
-          default:
-            break;
-        }
-
-        // Apply L2 regularization to weights
-        if (pnet->l2_lambda > 0.0f) {
-            float decay = 1.0f - (float)(pnet->learning_rate * pnet->l2_lambda);
-            gpu_dispatch_elementwise1(g_metal.pso_l2_regularize, W_buf, w_count, decay, 1);
-        }
-
-        // Apply L1 regularization to weights
-        if (pnet->l1_lambda > 0.0f) {
-            float delta = (float)(pnet->learning_rate * pnet->l1_lambda);
-            gpu_dispatch_elementwise1(g_metal.pso_l1_regularize, W_buf, w_count, delta, 1);
         }
     }
 }
 
 //-----------------------------------------------------------
 // metal_sync_weights()
-// Download all layer weights and biases from GPU to CPU.
-// Call after ann_train_network() completes to make the trained
-// weights available for ann_predict(), ann_save_network(), etc.
+// Copy every parameter and its optimizer state from the GPU to the CPU, so
+// ann_predict(), ann_save_network() and CPU (online) training see the latest
+// values.
 //-----------------------------------------------------------
 static void metal_sync_weights(PNetwork pnet)
 {
@@ -1463,25 +1200,14 @@ static void metal_sync_weights(PNetwork pnet)
 
     for (int layer = 1; layer < pnet->layer_count; layer++) {
         PLayer l = &pnet->layers[layer];
-
-        if (l->t_weights && l->t_weights->gpu_buf) {
-            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)l->t_weights->gpu_buf;
-            size_t bytes = (size_t)(l->t_weights->rows * l->t_weights->cols) * sizeof(real);
-            memcpy(l->t_weights->values, [buf contents], bytes);
-        }
-        if (l->t_bias && l->t_bias->gpu_buf) {
-            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)l->t_bias->gpu_buf;
-            size_t bytes = (size_t)(l->t_bias->cols) * sizeof(real);
-            memcpy(l->t_bias->values, [buf contents], bytes);
-        }
-
-        // Optimizer state, so CPU (online) training continues where the GPU stopped
-        PTensor state[4] = { l->t_m, l->t_v, l->t_bias_m, l->t_bias_v };
-        for (int i = 0; i < 4; i++) {
-            if (state[i] && state[i]->gpu_buf) {
-                id<MTLBuffer> buf = (__bridge id<MTLBuffer>)state[i]->gpu_buf;
-                memcpy(state[i]->values, [buf contents],
-                       (size_t)(state[i]->rows * state[i]->cols) * sizeof(real));
+        for (int p = 0; p < l->param_count; p++) {
+            PTensor state[3] = { l->params[p].value, l->params[p].m, l->params[p].v };
+            for (int i = 0; i < 3; i++) {
+                if (state[i] && state[i]->gpu_buf) {
+                    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)state[i]->gpu_buf;
+                    memcpy(state[i]->values, [buf contents],
+                           (size_t)(state[i]->rows * state[i]->cols) * sizeof(real));
+                }
             }
         }
     }
@@ -1489,20 +1215,10 @@ static void metal_sync_weights(PNetwork pnet)
 
 //-----------------------------------------------------------
 // metal_train_batch()
-// Top-level GPU training hook called from ann_train_network().
-//
-// Steps:
-//   1. Lazy-alloc training buffers on first call
-//   2. Zero gradient buffers (CPU memset on shared memory)
-//   3. Copy batch inputs to layer[0] GPU buffer
-//   4. GPU forward pass (saving pre-activations)
-//   5. Compute delta = T - Y and loss on CPU (reads shared mem)
-//   6. Write delta to output layer t_batch_dl_dz GPU buf
-//   7. GPU backward pass
-//   8. Increment train_iteration (for Adam bias correction)
-//   9. GPU optimizer step
-//
-// Returns 1 if GPU handled the batch, 0 to fall back to CPU.
+// Top-level GPU training hook called from ann_train_network(). The batch
+// inputs are in layers[0].t_batch_values and the dropout masks are drawn.
+// Returns 1 when the GPU trained the batch (loss in *loss_out), 0 to fall
+// back to the CPU.
 //-----------------------------------------------------------
 static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, real *loss_out)
 {
@@ -1530,83 +1246,66 @@ static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_siz
         if (!gpu_alloc_training_buffers(pnet, batch_size)) return 0;
     }
 
-    // --- Step 2: Zero gradient buffers (CPU memset on shared memory — no kernel needed) ---
-    for (int layer = 1; layer < pnet->layer_count; layer++) {
-        PLayer l = &pnet->layers[layer];
-        if (l->t_gradients && l->t_gradients->gpu_buf) {
-            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)l->t_gradients->gpu_buf;
-            memset([buf contents], 0, (size_t)(l->t_gradients->rows * l->t_gradients->cols) * sizeof(real));
-        }
-        if (l->t_bias_grad && l->t_bias_grad->gpu_buf) {
-            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)l->t_bias_grad->gpu_buf;
-            memset([buf contents], 0, (size_t)(l->t_bias_grad->cols) * sizeof(real));
-        }
-    }
+    // Inputs and targets go into shared buffers before anything is encoded
+    size_t target_bytes = (size_t)batch_size * output_nodes * sizeof(float);
+    g_metal.targets_buf  = gpu_scratch(g_metal.targets_buf, target_bytes);
+    g_metal.row_loss_buf = gpu_scratch(g_metal.row_loss_buf, (size_t)batch_size * sizeof(float));
+    id<MTLBuffer> in_buf = (__bridge id<MTLBuffer>)pnet->layers[0].t_batch_values->gpu_buf;
+    if (!g_metal.targets_buf || !g_metal.row_loss_buf || ![in_buf contents]) return 0;
+    memcpy([in_buf contents], pnet->layers[0].t_batch_values->values, (size_t)batch_size * input_nodes * sizeof(float));
+    memcpy([g_metal.targets_buf contents], batch_targets->values, target_bytes);
 
-    // --- Step 3: Copy batch inputs to GPU (CPU writes to shared buffer) ---
+    id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
+
+    // Zero the gradients
     {
-        id<MTLBuffer> in_buf = (__bridge id<MTLBuffer>)pnet->layers[0].t_batch_values->gpu_buf;
-        size_t nbytes = (size_t)(batch_size * input_nodes) * sizeof(real);
-        if (!in_buf || ![in_buf contents]) return 0;
-        memcpy([in_buf contents], pnet->layers[0].t_batch_values->values, nbytes);
-    }
-
-    // --- Step 4: GPU forward pass ---
-    if (!gpu_forward_training(pnet, batch_size)) return 0;
-
-    // --- Step 5: Compute delta and loss on CPU (reads output from shared memory) ---
-    {
-        id<MTLBuffer> Y_buf = (__bridge id<MTLBuffer>)
-            pnet->layers[output_layer_idx].t_batch_values->gpu_buf;
-        id<MTLBuffer> delta_buf = (__bridge id<MTLBuffer>)
-            pnet->layers[output_layer_idx].t_batch_dl_dz->gpu_buf;
-
-        if (!Y_buf || !delta_buf) return 0;
-        float *Y     = (float *)[Y_buf     contents];
-        float *delta = (float *)[delta_buf contents];
-        float *T     = batch_targets->values;
-
-        real total_loss = 0.0f;
-        for (int b = 0; b < batch_size; b++) {
-            int offset = b * output_nodes;
-            for (int n = 0; n < output_nodes; n++) {
-                float y = Y[offset + n];
-                float t = T[offset + n];
-                delta[offset + n] = t - y;
-
-                if (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY) {
-                    total_loss += ann_cross_entropy_term(
-                        pnet->layers[output_layer_idx].activation, t, y);
-                } else {
-                    float diff = y - t;
-                    total_loss += diff * diff;
-                }
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        for (int layer = 1; layer < pnet->layer_count; layer++) {
+            PLayer l = &pnet->layers[layer];
+            for (int p = 0; p < l->param_count; p++) {
+                PTensor g = l->params[p].grad;
+                [blit fillBuffer:(__bridge id<MTLBuffer>)g->gpu_buf
+                           range:NSMakeRange(0, (NSUInteger)(g->rows * g->cols) * sizeof(float))
+                           value:0];
             }
         }
-        if (pnet->loss_type == LOSS_MSE)
-            total_loss /= (real)(batch_size * output_nodes);
-        else
-            total_loss /= (real)batch_size;
-
-        // MSE needs the output activation's derivative (same code as the CPU path)
-        if (pnet->loss_type == LOSS_MSE) {
-            id<MTLBuffer> Z_buf = (__bridge id<MTLBuffer>)
-                pnet->layers[output_layer_idx].t_batch_z->gpu_buf;
-            ann_mse_output_delta(pnet->layers[output_layer_idx].activation, delta, Y,
-                                 (const float *)[Z_buf contents], batch_size, output_nodes);
-        }
-
-        if (loss_out) *loss_out = total_loss;
+        [blit endEncoding];
     }
 
-    // --- Step 7: GPU backward pass (delta already in output delta_buf) ---
-    if (!gpu_backward_pass(pnet, batch_size)) return 0;
+    // Forward pass, saving pre-activations; dropout on hidden layers
+    for (int layer = 1; layer < pnet->layer_count; layer++) {
+        PLayer dst = &pnet->layers[layer];
+        id<MTLBuffer> mask = layer < output_layer_idx ? gpu_dropout_mask(pnet, dst, batch_size) : nil;
+        encode_dense_forward(cmd, dst, pnet->layers[layer - 1].node_count, batch_size,
+                             (__bridge id<MTLBuffer>)pnet->layers[layer - 1].t_batch_values->gpu_buf,
+                             (__bridge id<MTLBuffer>)dst->t_batch_values->gpu_buf,
+                             (__bridge id<MTLBuffer>)dst->t_batch_z->gpu_buf, mask);
+    }
 
-    // --- Step 8: Increment train_iteration (Adam bias correction) ---
+    encode_output_delta_loss(cmd, pnet, batch_size);
+    encode_backward(cmd, pnet, batch_size);
+
+    // Adam's bias correction counts this batch
     pnet->train_iteration++;
+    encode_optimizer(cmd, pnet);
 
-    // --- Step 9: GPU optimizer step ---
-    gpu_optimizer_step(pnet);
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    if (cmd.status != MTLCommandBufferStatusCompleted) {
+        pnet->train_iteration--;
+        return 0;
+    }
+
+    // Loss: averaged the same way as the CPU path
+    const float *row_loss = (const float *)[g_metal.row_loss_buf contents];
+    real total_loss = 0.0f;
+    for (int b = 0; b < batch_size; b++)
+        total_loss += row_loss[b];
+    if (pnet->loss_type == LOSS_MSE)
+        total_loss /= (real)(batch_size * output_nodes);
+    else
+        total_loss /= (real)batch_size;
+    if (loss_out) *loss_out = total_loss;
 
     return 1;
 }

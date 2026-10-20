@@ -1184,6 +1184,30 @@ ANN_API int ann_get_layer_shape(const PNetwork pnet, int layer, int *channels, i
 ANN_API int ann_get_layer_settings(const PNetwork pnet, int layer, int *size, int *stride, int *padding);
 
 /**
+ * Set where a network's progress output goes (training progress, loading
+ * messages, ann_print_props, ...).
+ * 
+ * The default writes to stdout. Errors are reported separately, through the
+ * error log callback (see ann_set_error_log_callback).
+ * 
+ * @param pnet Network to configure
+ * @param print_func Function receiving each piece of text, or NULL to silence the network
+ * 
+ * @see ann_get_print_function()
+ */
+ANN_API void ann_set_print_function(PNetwork pnet, Output_func print_func);
+
+/**
+ * Get a network's progress output function (NULL when it is silenced).
+ * 
+ * Save it before ann_set_print_function(pnet, NULL) to restore output later.
+ * 
+ * @param pnet Network to query
+ * @return The print function, or NULL
+ */
+ANN_API Output_func ann_get_print_function(const PNetwork pnet);
+
+/**
  * Print network properties and configuration to stdout.
  * 
  * Displays: network topology, optimizer, loss function, mini-batch size, etc.

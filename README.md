@@ -167,6 +167,8 @@ ann_print_confusion_matrix | print formatted confusion matrix
 ann_class_prediction | determine predicted class from output activations
 ann_print_props | print network properties and configuration
 ann_print_outputs | print output layer activations (debug)
+ann_set_print_function | send a network's progress output to a function, or silence it with NULL
+ann_get_print_function | get a network's progress output function
 ann_strerror | convert error code to human-readable message
 ann_set_error_log_callback | install error logging callback
 ann_get_error_log_callback | get current error callback

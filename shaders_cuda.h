@@ -52,6 +52,7 @@ __global__ void cuda_activation_relu(float *buf, int n);
 __global__ void cuda_activation_leaky_relu(float *buf, int n);
 __global__ void cuda_activation_tanh(float *buf, int n);
 __global__ void cuda_activation_softsign(float *buf, int n);
+__global__ void cuda_activation_gelu(float *buf, int n);
 
 // Row-wise softmax (one thread per row)
 __global__ void cuda_softmax_rows(float *buf, int rows, int cols);
@@ -62,6 +63,7 @@ __global__ void cuda_deriv_relu(float *dl_dz, const float *z, int n);
 __global__ void cuda_deriv_leaky_relu(float *dl_dz, const float *z, int n);
 __global__ void cuda_deriv_tanh(float *dl_dz, const float *a, int n);
 __global__ void cuda_deriv_softsign(float *dl_dz, const float *a, int n);
+__global__ void cuda_deriv_gelu(float *dl_dz, const float *z, int n);
 
 // Bias gradient reduction: bias_grad[n] += sum_b dl_dz[b*nodes + n]  (one thread per node)
 __global__ void cuda_bias_grad_sum(const float *dl_dz, float *bias_grad, int batch_size, int nodes);

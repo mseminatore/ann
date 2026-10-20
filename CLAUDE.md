@@ -58,7 +58,7 @@ Test files define `void test_main(int argc, char *argv[])` and use the `MODULE(.
 ## Architecture
 
 - **Module dependencies**: `ann.c` → `tensor.c`; `ann_hypertune.c` → `ann.c`; `json.c` provides the ONNX export/import serialization. `tensor` supports only rank-1/rank-2 (vectors/matrices), no rank-3.
-- **Network construction is layered and order-sensitive**: create with `ann_make_network(optimizer, loss)`, then `ann_add_layer()` per layer — input layer uses `ACTIVATION_NULL`, hidden layers a nonlinearity, output `ACTIVATION_SOFTMAX` for classification. The optimizer (`OPT_ADAM` recommended, also SGD/Momentum/AdaGrad/RMSProp), loss (`LOSS_MSE`, `LOSS_CATEGORICAL_CROSS_ENTROPY`), and per-layer activation are chosen via enums at these call sites.
+- **Network construction is layered and order-sensitive**: create with `ann_make_network(optimizer, loss)`, then `ann_add_layer()` per layer — input layer uses `ACTIVATION_NULL`, hidden layers a nonlinearity, output `ACTIVATION_SOFTMAX` for classification. The optimizer (`OPT_ADAM` recommended, also SGD/Momentum/AdaGrad/RMSProp), loss (`LOSS_MSE`, `LOSS_CATEGORICAL_CROSS_ENTROPY`; `LOSS_BINARY_CROSS_ENTROPY` is an alias that gives BCE with a sigmoid output), and per-layer activation are chosen via enums at these call sites.
 - **Two training paths**: `ann_train_network()` for full batch/epoch training (resets optimizer state and weights), versus the online API `ann_train_begin()` / `ann_train_step()` / `ann_train_end()` which **preserves optimizer state and weights** — use it for streaming, fine-tuning a loaded model, or single-sample updates. `ann_predict()` is safe mid-online-training (dropout auto-disabled).
 - **Model persistence**: `.nna` (text), `.nnb` (binary), and ONNX JSON via `ann_export_onnx`/`ann_import_onnx`.
 
@@ -66,7 +66,7 @@ Test files define `void test_main(int argc, char *argv[])` and use the `MODULE(.
 
 - ANSI C for portability (Windows/macOS/Linux). Platform-specific code is guarded by `#ifdef _WIN32`.
 - `real` typedef is the scalar type — `float` by default; switch to `double` in `tensor.h`.
-- Public functions are prefixed `ann_*` (runtime) or `tensor_*` (math).
+- Public functions are prefixed `ann_*` (runtime) or `tensor_*` (math). Mark every public declaration with `ANN_API`: the shared library is built with hidden visibility, so unmarked functions are not exported (and the `../pyann` CFFI bindings rely on that surface). New enum values go at the end of their enum, since saved models and pyann store the integer values.
 - All public functions return error codes (`ERR_OK`, `ERR_NULL_PTR`, `ERR_ALLOC`, `ERR_INVALID`, `ERR_IO`, `ERR_FAIL`). Use the `CHECK_OK(...)` / `CHECK_NULL(...)` macros to propagate failures; install an `ErrorLogCallback` via `ann_set_error_log_callback` for custom logging. `ann_strerror(code)` gives a readable message.
 - Tensors are row-major: element at `data[row * stride + col]`.
 - Pair every `tensor_create*()` with `tensor_free()` and `ann_make_network()` with `ann_free_network()`. Data from `ann_load_csv()` must be freed by the caller with `free()`.

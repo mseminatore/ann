@@ -41,6 +41,8 @@
 #	else
 #		define ANN_API
 #	endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#	define ANN_API __attribute__((visibility("default")))
 #else
 #	define ANN_API
 #endif

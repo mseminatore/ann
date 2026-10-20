@@ -337,10 +337,33 @@ static real softsign(real x)
 	return (real)(x / (1.0 + fabs(x)));
 }
 
+//---------------------------------
+// compute the GELU activation (tanh approximation, as in GPT/BERT)
+// gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+// The approximation is used everywhere (CPU, GPU, ONNX) so all paths agree.
+//---------------------------------
+#define GELU_C ((real)0.7978845608)		// sqrt(2/pi)
+#define GELU_K ((real)0.044715)
+
+static real gelu(real x)
+{
+	return (real)0.5 * x * ((real)1.0 + (real)tanh(GELU_C * (x + GELU_K * x * x * x)));
+}
+
+//---------------------------------
+// derivative of gelu() with respect to its input z
+//---------------------------------
+static real gelu_derivative(real z)
+{
+	real t = (real)tanh(GELU_C * (z + GELU_K * z * z * z));
+	return (real)0.5 * ((real)1.0 + t) +
+		(real)0.5 * z * ((real)1.0 - t * t) * GELU_C * ((real)1.0 + (real)3.0 * GELU_K * z * z);
+}
+
 //------------------------------
 // Forward declarations
 //------------------------------
-static void record_history(PNetwork pnet, real loss, real learning_rate);
+static void record_history(PNetwork pnet, real loss, real learning_rate, real val_loss);
 
 //------------------------------
 // compute the softmax
@@ -404,6 +427,7 @@ static void init_weights(PNetwork pnet)
 			{
 			case ACTIVATION_RELU:
 			case ACTIVATION_LEAKY_RELU:
+			case ACTIVATION_GELU:
 				init_type = WEIGHT_INIT_HE;
 				break;
 			case ACTIVATION_SIGMOID:
@@ -769,6 +793,10 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 				for (int i = 0; i < total; i++)
 					Y->values[i] = Y->values[i] / ((real)1.0 + (real)fabs(Y->values[i]));
 				break;
+			case ACTIVATION_GELU:
+				for (int i = 0; i < total; i++)
+					Y->values[i] = gelu(Y->values[i]);
+				break;
 			default:
 				break;
 			}
@@ -830,6 +858,33 @@ real ann_cross_entropy_term(Activation_type output_act, real t, real y)
 }
 
 //-------------------------------------------
+// Sum of one sample's loss terms over its outputs. Callers divide by
+// rows * outputs for MSE, or by rows for cross-entropy.
+//-------------------------------------------
+static real sample_loss(const PNetwork pnet, const real *t, const real *y, int nodes)
+{
+	Activation_type output_act = pnet->layers[pnet->layer_count - 1].activation;
+	real sum = (real)0.0;
+
+	for (int n = 0; n < nodes; n++)
+	{
+		if (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY)
+		{
+			// Cross-entropy (binary for sigmoid outputs)
+			sum += ann_cross_entropy_term(output_act, t[n], y[n]);
+		}
+		else
+		{
+			// MSE: sum((y - t)^2)
+			real diff = y[n] - t[n];
+			sum += diff * diff;
+		}
+	}
+
+	return sum;
+}
+
+//-------------------------------------------
 // Turn the MSE output error delta = T - Y into the gradient with respect to
 // the output pre-activations, -dL/dz, by applying the output activation's
 // derivative. Needed for MSE with a nonlinear output; cross-entropy with
@@ -873,6 +928,11 @@ void ann_mse_output_delta(Activation_type act, real *delta, const real *Y, const
 		for (int i = 0; i < total; i++)
 			if (Z[i] <= (real)0.0)
 				delta[i] *= (real)0.01;
+		break;
+
+	case ACTIVATION_GELU:
+		for (int i = 0; i < total; i++)
+			delta[i] *= gelu_derivative(Z[i]);
 		break;
 
 	case ACTIVATION_SOFTMAX:
@@ -923,25 +983,12 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 		
 		for (int n = 0; n < out_nodes; n++)
 		{
-			real y = Y->values[out_offset + n];
-			real t = targets->values[target_offset + n];
-			
 			// delta = t - y (matches original convention for gradient descent)
-			delta->values[out_offset + n] = t - y;
-			
-			// Accumulate loss (cross-entropy or MSE based on loss function)
-			if (pnet->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY)
-			{
-				// Cross-entropy (binary for sigmoid outputs)
-				total_loss += ann_cross_entropy_term(layer->activation, t, y);
-			}
-			else
-			{
-				// MSE: sum((y - t)^2)
-				real diff = y - t;
-				total_loss += diff * diff;
-			}
+			delta->values[out_offset + n] = targets->values[target_offset + n] - Y->values[out_offset + n];
 		}
+
+		// Accumulate loss (cross-entropy or MSE based on loss function)
+		total_loss += sample_loss(pnet, targets->values + target_offset, Y->values + out_offset, out_nodes);
 	}
 	
 	// Average loss over batch
@@ -1201,6 +1248,38 @@ static void back_propagate_softsign_batched(PNetwork pnet, int batch_size, int l
 }
 
 //-------------------------------------------
+// Batched hidden layer backpropagation for GELU
+//-------------------------------------------
+static void back_propagate_gelu_batched(PNetwork pnet, int batch_size, int layer_idx)
+{
+	PLayer layer = &pnet->layers[layer_idx];
+	PLayer prev_layer = &pnet->layers[layer_idx - 1];
+	
+	int nodes = layer->node_count;
+	
+	PTensor dl_dz = layer->t_batch_dl_dz;
+	PTensor Z = layer->t_batch_z;  // Pre-activation values
+	PTensor A_prev = prev_layer->t_batch_values;
+	
+	// Apply dropout mask to gradient (if dropout was used in forward pass)
+	apply_dropout_mask_to_gradient(layer, batch_size);
+	
+	// Apply GELU derivative: dL/dz *= gelu'(z)
+	int total = batch_size * nodes;
+	for (int i = 0; i < total; i++)
+		dl_dz->values[i] *= gelu_derivative(Z->values[i]);
+	
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	
+	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
+	
+	if (layer_idx > 1)
+	{
+		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+	}
+}
+
+//-------------------------------------------
 // Batched backpropagation through all layers
 // Returns total loss for the batch
 //-------------------------------------------
@@ -1232,6 +1311,9 @@ static real back_propagate_batched(PNetwork pnet, int batch_size, PTensor target
 			break;
 		case ACTIVATION_SOFTSIGN:
 			back_propagate_softsign_batched(pnet, batch_size, layer);
+			break;
+		case ACTIVATION_GELU:
+			back_propagate_gelu_batched(pnet, batch_size, layer);
 			break;
 		default:
 			// Default to sigmoid behavior
@@ -1692,6 +1774,10 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		pnet->layers[cur_layer].activation_func = softsign;
 		break;
 
+	case ACTIVATION_GELU:
+		pnet->layers[cur_layer].activation_func = gelu;
+		break;
+
 	case ACTIVATION_NULL:
 		pnet->layers[cur_layer].activation_func = no_activation;
 		break;
@@ -1931,6 +2017,15 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->lr_history		= NULL;
 	pnet->history_count		= 0;
 	pnet->history_capacity	= 0;
+	pnet->val_loss_history	= NULL;
+
+	// Validation and early stopping (disabled by default)
+	pnet->val_inputs		= NULL;
+	pnet->val_outputs		= NULL;
+	pnet->es_patience		= 0;
+	pnet->es_min_delta		= (real)0.0;
+	pnet->es_restore_best	= 0;
+	pnet->best_epoch		= 0;
 
 	switch(opt)
 	{
@@ -1985,6 +2080,35 @@ static int check_loss_output(PNetwork pnet, const char *function_name)
 	return 0;
 }
 
+//-----------------------------------------------
+// Copy every layer's weights and biases to or from one flat buffer, used to
+// keep the best epoch's parameters for early stopping. Pass NULL as buf to
+// get the number of reals needed.
+//-----------------------------------------------
+static size_t copy_parameters(PNetwork pnet, real *buf, int restore)
+{
+	size_t offset = 0;
+
+	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	{
+		PTensor params[2];
+		params[0] = pnet->layers[layer].t_weights;
+		params[1] = pnet->layers[layer].t_bias;
+
+		for (int i = 0; i < 2; i++)
+		{
+			size_t count = (size_t)params[i]->rows * params[i]->cols;
+			if (buf && restore)
+				memcpy(params[i]->values, buf + offset, count * sizeof(real));
+			else if (buf)
+				memcpy(buf + offset, params[i]->values, count * sizeof(real));
+			offset += count;
+		}
+	}
+
+	return offset;
+}
+
 real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 {
 	if (!pnet)
@@ -2004,6 +2128,14 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 
 	if (!check_loss_output(pnet, "ann_train_network"))
 		return 0.0;
+
+	if (pnet->val_inputs &&
+		(pnet->val_inputs->cols != pnet->layers[0].node_count ||
+		 pnet->val_outputs->cols != pnet->layers[pnet->layer_count - 1].node_count))
+	{
+		invoke_error_callback(ERR_INVALID, "ann_train_network");
+		return 0.0;
+	}
 
 	ann_printf(pnet,	"\n%sTraining ANN%s\n"
 						"------------\n", COLOR(ANSI_BOLD_CYAN), RESET());
@@ -2060,6 +2192,22 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	{
 		invoke_error_callback(ERR_ALLOC, "ann_train_network");
 		return 0.0;
+	}
+
+	// Early stopping state; best_params holds the best epoch's weights
+	real best_loss = (real)0.0;
+	unsigned epochs_since_best = 0;
+	real *best_params = NULL;
+	pnet->best_epoch = 0;
+	if (pnet->es_patience > 0 && pnet->es_restore_best)
+	{
+		best_params = malloc(copy_parameters(pnet, NULL, 0) * sizeof(real));
+		if (!best_params)
+		{
+			tensor_free(batch_targets);
+			invoke_error_callback(ERR_ALLOC, "ann_train_network");
+			return 0.0;
+		}
 	}
 
 #ifdef USE_GPU
@@ -2160,14 +2308,52 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		}
 		progress[progress_len] = '\0';
 
-		ann_printf(pnet, "%sEpoch %u/%u%s\n[%s%s%s] - loss: %s%3.2g%s - LR: %s%3.2g%s\n",
+		// Validation loss (-1 when there is no validation set). ann_predict_batch
+		// uses the GPU weights while GPU training keeps them current.
+		real val_loss = (real)-1.0;
+		if (pnet->val_inputs)
+			val_loss = ann_evaluate_loss(pnet, pnet->val_inputs, pnet->val_outputs);
+
+		char val_text[64] = "";
+		if (val_loss >= (real)0.0)
+			sprintf(val_text, " - val_loss: %s%3.2g%s", COLOR(ANSI_YELLOW), val_loss, RESET());
+
+		ann_printf(pnet, "%sEpoch %u/%u%s\n[%s%s%s] - loss: %s%3.2g%s%s - LR: %s%3.2g%s\n",
 			COLOR(ANSI_BOLD_WHITE), epoch, pnet->epochLimit, RESET(),
 			COLOR(ANSI_GREEN), progress, RESET(),
-			COLOR(ANSI_YELLOW), loss, RESET(),
+			COLOR(ANSI_YELLOW), loss, RESET(), val_text,
 			COLOR(ANSI_BLUE), pnet->learning_rate, RESET());
 		
 		// Record training history for learning curve
-		record_history(pnet, loss, pnet->learning_rate);
+		record_history(pnet, loss, pnet->learning_rate, val_loss);
+
+		// Early stopping monitors the validation loss, or the training loss without one
+		if (pnet->es_patience > 0)
+		{
+			real monitored = val_loss >= (real)0.0 ? val_loss : loss;
+			if (pnet->best_epoch == 0 || monitored < best_loss - pnet->es_min_delta)
+			{
+				best_loss = monitored;
+				pnet->best_epoch = epoch;
+				epochs_since_best = 0;
+
+				if (best_params)
+				{
+#ifdef USE_GPU
+					// GPU training updates only the GPU copy until it is synced
+					if (use_gpu_training)
+						g_gpu_backend->sync_weights(pnet);
+#endif
+					copy_parameters(pnet, best_params, 0);
+				}
+			}
+			else if (++epochs_since_best >= pnet->es_patience)
+			{
+				ann_printf(pnet, "%sEarly stopping%s: no improvement for %u epochs, best epoch %u\n",
+					COLOR(ANSI_BOLD_GREEN), RESET(), pnet->es_patience, pnet->best_epoch);
+				converged = 1;
+			}
+		}
 
 		if (loss < pnet->convergence_epsilon)
 		{
@@ -2195,6 +2381,17 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	else if (pnet->gpu_stale)
 		gpu_refresh(pnet);
 #endif
+
+	// Go back to the best epoch's weights if later epochs were worse
+	if (best_params && pnet->best_epoch != epoch)
+	{
+		copy_parameters(pnet, best_params, 1);
+		ann_printf(pnet, "Restored weights from epoch %u\n", pnet->best_epoch);
+#ifdef USE_GPU
+		gpu_refresh(pnet);
+#endif
+	}
+	free(best_params);
 	
 	// Disable training mode (for dropout)
 	pnet->is_training = 0;
@@ -2382,6 +2579,50 @@ real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTen
 }
 
 //------------------------------------
+// Average loss over a dataset
+//------------------------------------
+real ann_evaluate_loss(const PNetwork pnet, const PTensor inputs, const PTensor outputs)
+{
+	if (!pnet || !inputs || !outputs || pnet->layer_count < 2)
+		return (real)-1.0;
+
+	int out_nodes = pnet->layers[pnet->layer_count - 1].node_count;
+	if (inputs->rows <= 0 || inputs->rows != outputs->rows ||
+		inputs->cols != pnet->layers[0].node_count || outputs->cols != out_nodes)
+	{
+		return (real)-1.0;
+	}
+
+	// Predict in chunks so a GPU backend can evaluate many rows per dispatch
+	enum { EVAL_CHUNK = 256 };
+	real *pred = malloc(EVAL_CHUNK * out_nodes * sizeof(real));
+	if (!pred)
+	{
+		invoke_error_callback(ERR_ALLOC, "ann_evaluate_loss");
+		return (real)-1.0;
+	}
+
+	real total = (real)0.0;
+	for (int start = 0; start < inputs->rows; start += EVAL_CHUNK)
+	{
+		int count = inputs->rows - start < EVAL_CHUNK ? inputs->rows - start : EVAL_CHUNK;
+		if (ann_predict_batch(pnet, &inputs->values[start * inputs->cols], pred, count) != ERR_OK)
+		{
+			free(pred);
+			return (real)-1.0;
+		}
+
+		for (int i = 0; i < count; i++)
+			total += sample_loss(pnet, &outputs->values[(start + i) * out_nodes], pred + i * out_nodes, out_nodes);
+	}
+	free(pred);
+
+	if (pnet->loss_type == LOSS_MSE)
+		return total / (real)(inputs->rows * out_nodes);
+	return total / (real)inputs->rows;
+}
+
+//------------------------------------
 // Compute binary confusion matrix and MCC
 //------------------------------------
 real ann_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs,
@@ -2557,6 +2798,49 @@ void ann_set_epoch_limit(PNetwork pnet, unsigned limit)
 		return;
 
 	pnet->epochLimit = limit;
+}
+
+//------------------------------
+// set the validation dataset
+//------------------------------
+int ann_set_validation_data(PNetwork pnet, PTensor inputs, PTensor outputs)
+{
+	if (!pnet || (!inputs != !outputs))
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_set_validation_data");
+		return ERR_NULL_PTR;
+	}
+
+	if (inputs && (inputs->rows <= 0 || inputs->rows != outputs->rows))
+	{
+		invoke_error_callback(ERR_INVALID, "ann_set_validation_data");
+		return ERR_INVALID;
+	}
+
+	pnet->val_inputs = inputs;
+	pnet->val_outputs = outputs;
+	return ERR_OK;
+}
+
+//------------------------------
+// configure early stopping
+//------------------------------
+void ann_set_early_stopping(PNetwork pnet, unsigned patience, real min_delta, int restore_best)
+{
+	if (!pnet)
+		return;
+
+	pnet->es_patience = patience;
+	pnet->es_min_delta = min_delta < (real)0.0 ? (real)0.0 : min_delta;
+	pnet->es_restore_best = restore_best;
+}
+
+//------------------------------
+// best epoch of the last training run
+//------------------------------
+unsigned ann_get_best_epoch(const PNetwork pnet)
+{
+	return pnet ? pnet->best_epoch : 0;
 }
 
 //------------------------------
@@ -2769,6 +3053,7 @@ void ann_free_network(PNetwork pnet)
 	// Free training history
 	free(pnet->loss_history);
 	free(pnet->lr_history);
+	free(pnet->val_loss_history);
 
 	// free network
 	free(pnet);
@@ -3256,6 +3541,7 @@ void ann_print_props(const PNetwork pnet)
 			ann_printf(pnet, "-");
 		ann_printf(pnet, "%d", pnet->layers[i].node_count);
 	}
+	
 	ann_printf(pnet, "%s\n", RESET());
 
 	ann_printf(pnet, "%s      Optimizer:%s %s%s%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_MAGENTA), optimizers[pnet->optimizer], RESET());
@@ -3275,6 +3561,7 @@ static const char* onnx_activation_op(Activation_type act)
 		case ACTIVATION_TANH:       return "Tanh";
 		case ACTIVATION_SOFTSIGN:   return "Softsign";
 		case ACTIVATION_SOFTMAX:    return "Softmax";
+		case ACTIVATION_GELU:       return "Gelu";
 		case ACTIVATION_NULL:
 		default:                    return NULL;
 	}
@@ -3286,6 +3573,7 @@ static const char* onnx_activation_op(Activation_type act)
 static void write_json_float_array(FILE *fptr, const real *values, int count)
 {
 	fprintf(fptr, "[");
+
 	for (int i = 0; i < count; i++)
 	{
 		if (i > 0) fprintf(fptr, ", ");
@@ -3295,6 +3583,7 @@ static void write_json_float_array(FILE *fptr, const real *values, int count)
 		else
 			fprintf(fptr, "%.8g", v);
 	}
+	
 	fprintf(fptr, "]");
 }
 
@@ -3304,11 +3593,13 @@ static void write_json_float_array(FILE *fptr, const real *values, int count)
 static void write_json_int_array(FILE *fptr, const int *values, int count)
 {
 	fprintf(fptr, "[");
+
 	for (int i = 0; i < count; i++)
 	{
 		if (i > 0) fprintf(fptr, ", ");
 		fprintf(fptr, "%d", values[i]);
 	}
+
 	fprintf(fptr, "]");
 }
 
@@ -3341,8 +3632,15 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 
 	// Start JSON object
 	fprintf(fptr, "{\n");
-	fprintf(fptr, "  \"ir_version\": 8,\n");
-	fprintf(fptr, "  \"opset_import\": [{\"version\": 17}],\n");
+	// Gelu first appears in opset 20 (IR version 9); other models keep opset 17
+	int uses_gelu = 0;
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		if (pnet->layers[layer].activation == ACTIVATION_GELU)
+			uses_gelu = 1;
+	}
+	fprintf(fptr, "  \"ir_version\": %d,\n", uses_gelu ? 9 : 8);
+	fprintf(fptr, "  \"opset_import\": [{\"version\": %d}],\n", uses_gelu ? 20 : 17);
 	fprintf(fptr, "  \"producer_name\": \"ann-library\",\n");
 	fprintf(fptr, "  \"producer_version\": \"1.0\",\n");
 	fprintf(fptr, "  \"graph\": {\n");
@@ -3449,6 +3747,13 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 				fprintf(fptr, ",\n");
 				fprintf(fptr, "        \"attribute\": [{\"name\": \"axis\", \"type\": 2, \"i\": -1}]\n");
 			}
+			// Gelu defaults to the exact erf form; libann uses the tanh approximation.
+			// String attributes are protobuf bytes, so JSON holds base64("tanh").
+			else if (next_act == ACTIVATION_GELU)
+			{
+				fprintf(fptr, ",\n");
+				fprintf(fptr, "        \"attribute\": [{\"name\": \"approximate\", \"type\": 3, \"s\": \"dGFuaA==\"}]\n");
+			}
 			else
 			{
 				fprintf(fptr, "\n");
@@ -3510,6 +3815,7 @@ static Activation_type onnx_op_to_activation(const char *op_type)
 	if (strcmp(op_type, "Tanh") == 0) return ACTIVATION_TANH;
 	if (strcmp(op_type, "Softsign") == 0) return ACTIVATION_SOFTSIGN;
 	if (strcmp(op_type, "Softmax") == 0) return ACTIVATION_SOFTMAX;
+	if (strcmp(op_type, "Gelu") == 0) return ACTIVATION_GELU;
 	return ACTIVATION_NULL;
 }
 
@@ -3769,6 +4075,7 @@ static const char *get_activation_name(Activation_type act)
 	case ACTIVATION_LEAKY_RELU: return "LeakyReLU";
 	case ACTIVATION_SOFTMAX:    return "Softmax";
 	case ACTIVATION_SOFTSIGN:   return "Softsign";
+	case ACTIVATION_GELU:       return "GELU";
 	default:                    return NULL;
 	}
 }
@@ -3911,7 +4218,7 @@ int ann_export_pikchr(const PNetwork pnet, const char *filename)
 //------------------------------
 // Record epoch in training history
 //------------------------------
-static void record_history(PNetwork pnet, real loss, real learning_rate)
+static void record_history(PNetwork pnet, real loss, real learning_rate, real val_loss)
 {
 	// Check if we need to allocate or expand history
 	if (pnet->history_count >= pnet->history_capacity)
@@ -3923,23 +4230,29 @@ static void record_history(PNetwork pnet, real loss, real learning_rate)
 		if (pnet->history_count >= MAX_HISTORY_SIZE)
 			return;  // History full, stop recording
 		
+		// Store each buffer as soon as it grows: a failed realloc leaves the
+		// old buffer valid, so nothing is lost or freed twice
 		real *new_loss = (real *)realloc(pnet->loss_history, new_capacity * sizeof(real));
-		real *new_lr = (real *)realloc(pnet->lr_history, new_capacity * sizeof(real));
-		
-		if (!new_loss || !new_lr)
-		{
-			free(new_loss);
-			free(new_lr);
+		if (!new_loss)
 			return;  // Allocation failed, skip recording
-		}
-		
 		pnet->loss_history = new_loss;
+
+		real *new_lr = (real *)realloc(pnet->lr_history, new_capacity * sizeof(real));
+		if (!new_lr)
+			return;
 		pnet->lr_history = new_lr;
+
+		real *new_val = (real *)realloc(pnet->val_loss_history, new_capacity * sizeof(real));
+		if (!new_val)
+			return;
+		pnet->val_loss_history = new_val;
+
 		pnet->history_capacity = new_capacity;
 	}
 	
 	pnet->loss_history[pnet->history_count] = loss;
 	pnet->lr_history[pnet->history_count] = learning_rate;
+	pnet->val_loss_history[pnet->history_count] = val_loss;
 	pnet->history_count++;
 }
 
@@ -3953,8 +4266,10 @@ void ann_clear_history(PNetwork pnet)
 	
 	free(pnet->loss_history);
 	free(pnet->lr_history);
+	free(pnet->val_loss_history);
 	pnet->loss_history = NULL;
 	pnet->lr_history = NULL;
+	pnet->val_loss_history = NULL;
 	pnet->history_count = 0;
 	pnet->history_capacity = 0;
 }
@@ -3983,13 +4298,26 @@ int ann_export_learning_curve(const PNetwork pnet, const char *filename)
 		return ERR_IO;
 	}
 
+	// Add a val_loss column only when some epoch measured one
+	int has_val = 0;
+	for (unsigned i = 0; i < pnet->history_count; i++)
+	{
+		if (pnet->val_loss_history[i] >= (real)0.0)
+			has_val = 1;
+	}
+
 	// Write header
-	fprintf(fptr, "epoch,loss,learning_rate\n");
+	fprintf(fptr, has_val ? "epoch,loss,learning_rate,val_loss\n" : "epoch,loss,learning_rate\n");
 
 	// Write data
 	for (unsigned i = 0; i < pnet->history_count; i++)
 	{
-		fprintf(fptr, "%u,%g,%g\n", i + 1, pnet->loss_history[i], pnet->lr_history[i]);
+		fprintf(fptr, "%u,%g,%g", i + 1, pnet->loss_history[i], pnet->lr_history[i]);
+		if (has_val && pnet->val_loss_history[i] >= (real)0.0)
+			fprintf(fptr, ",%g", pnet->val_loss_history[i]);
+		else if (has_val)
+			fputc(',', fptr);
+		fputc('\n', fptr);
 	}
 
 	fclose(fptr);

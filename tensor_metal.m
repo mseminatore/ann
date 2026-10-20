@@ -64,6 +64,7 @@ typedef struct {
     id<MTLComputePipelineState> pso_leaky_relu;
     id<MTLComputePipelineState> pso_tanh;
     id<MTLComputePipelineState> pso_softsign;
+    id<MTLComputePipelineState> pso_gelu;
     id<MTLComputePipelineState> pso_softmax;
     id<MTLComputePipelineState> pso_bias_add;
     // Training: activation derivative kernels
@@ -72,6 +73,7 @@ typedef struct {
     id<MTLComputePipelineState> pso_deriv_leaky_relu;
     id<MTLComputePipelineState> pso_deriv_tanh;
     id<MTLComputePipelineState> pso_deriv_softsign;
+    id<MTLComputePipelineState> pso_deriv_gelu;
     // Training: gradient ops
     id<MTLComputePipelineState> pso_bias_grad_sum;
     id<MTLComputePipelineState> pso_gradient_clip;
@@ -163,6 +165,10 @@ int tensor_metal_init(void)
         "kernel void activation_softsign(\n"
         "    device float *buf [[buffer(0)]], uint gid [[thread_position_in_grid]]) {\n"
         "    float x = buf[gid]; buf[gid] = x / (1.0f + fabs(x)); }\n"
+        "kernel void activation_gelu(\n"
+        "    device float *buf [[buffer(0)]], uint gid [[thread_position_in_grid]]) {\n"
+        "    float x = buf[gid];\n"
+        "    buf[gid] = 0.5f * x * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x))); }\n"
         "kernel void softmax_rows(\n"
         "    device float *buf [[buffer(0)]],\n"
         "    constant uint &cols [[buffer(1)]],\n"
@@ -206,6 +212,14 @@ int tensor_metal_init(void)
         "    device const float *a [[buffer(1)]],\n"
         "    uint gid [[thread_position_in_grid]]) {\n"
         "    float d = 1.0f - fabs(a[gid]); dl_dz[gid] *= d * d; }\n"
+        "kernel void deriv_gelu(\n"
+        "    device float *dl_dz [[buffer(0)]],\n"
+        "    device const float *z [[buffer(1)]],\n"
+        "    uint gid [[thread_position_in_grid]]) {\n"
+        "    float x = z[gid];\n"
+        "    float t = tanh(0.7978845608f * (x + 0.044715f * x * x * x));\n"
+        "    dl_dz[gid] *= 0.5f * (1.0f + t) +\n"
+        "        0.5f * x * (1.0f - t * t) * 0.7978845608f * (1.0f + 3.0f * 0.044715f * x * x); }\n"
         // ----------------------------------------------------------------
         // bias_grad_sum: column-reduce [batch x out] -> [out]
         // Each thread handles one output column.
@@ -332,12 +346,13 @@ int tensor_metal_init(void)
     g_metal.pso_leaky_relu = make_pso(g_metal.library, "activation_leaky_relu");
     g_metal.pso_tanh       = make_pso(g_metal.library, "activation_tanh");
     g_metal.pso_softsign   = make_pso(g_metal.library, "activation_softsign");
+    g_metal.pso_gelu       = make_pso(g_metal.library, "activation_gelu");
     g_metal.pso_softmax    = make_pso(g_metal.library, "softmax_rows");
     g_metal.pso_bias_add   = make_pso(g_metal.library, "bias_add");
 
     if (!g_metal.pso_sigmoid || !g_metal.pso_relu || !g_metal.pso_leaky_relu ||
         !g_metal.pso_tanh    || !g_metal.pso_softsign || !g_metal.pso_softmax ||
-        !g_metal.pso_bias_add)
+        !g_metal.pso_gelu    || !g_metal.pso_bias_add)
         return 0;
 
     // Build PSOs for training kernels
@@ -346,6 +361,7 @@ int tensor_metal_init(void)
     g_metal.pso_deriv_leaky_relu = make_pso(g_metal.library, "deriv_leaky_relu");
     g_metal.pso_deriv_tanh       = make_pso(g_metal.library, "deriv_tanh");
     g_metal.pso_deriv_softsign   = make_pso(g_metal.library, "deriv_softsign");
+    g_metal.pso_deriv_gelu       = make_pso(g_metal.library, "deriv_gelu");
     g_metal.pso_bias_grad_sum    = make_pso(g_metal.library, "bias_grad_sum");
     g_metal.pso_gradient_clip    = make_pso(g_metal.library, "gradient_clip");
     g_metal.pso_sgd_update       = make_pso(g_metal.library, "sgd_update");
@@ -360,7 +376,8 @@ int tensor_metal_init(void)
 
     if (!g_metal.pso_deriv_sigmoid || !g_metal.pso_deriv_relu   ||
         !g_metal.pso_deriv_leaky_relu || !g_metal.pso_deriv_tanh ||
-        !g_metal.pso_deriv_softsign || !g_metal.pso_bias_grad_sum ||
+        !g_metal.pso_deriv_softsign || !g_metal.pso_deriv_gelu ||
+        !g_metal.pso_bias_grad_sum  ||
         !g_metal.pso_gradient_clip  || !g_metal.pso_sgd_update   ||
         !g_metal.pso_momentum_update || !g_metal.pso_adagrad_update ||
         !g_metal.pso_rmsprop_update || !g_metal.pso_adam_update  ||
@@ -513,6 +530,7 @@ static id<MTLComputePipelineState> pso_for_activation(Activation_type act)
         case ACTIVATION_LEAKY_RELU: return g_metal.pso_leaky_relu;
         case ACTIVATION_TANH:       return g_metal.pso_tanh;
         case ACTIVATION_SOFTSIGN:   return g_metal.pso_softsign;
+        case ACTIVATION_GELU:       return g_metal.pso_gelu;
         default: return nil;  // ACTIVATION_NULL, ACTIVATION_SOFTMAX handled separately
     }
 }
@@ -895,6 +913,7 @@ static id<MTLComputePipelineState> pso_for_deriv(Activation_type act)
         case ACTIVATION_LEAKY_RELU: return g_metal.pso_deriv_leaky_relu;
         case ACTIVATION_TANH:       return g_metal.pso_deriv_tanh;
         case ACTIVATION_SOFTSIGN:   return g_metal.pso_deriv_softsign;
+        case ACTIVATION_GELU:       return g_metal.pso_deriv_gelu;
         default: return nil;
     }
 }
@@ -1049,9 +1068,10 @@ static int gpu_backward_pass(PNetwork pnet, int batch_size)
                 }
 
                 if (pso_d) {
-                    // Use Z (pre-activation) for ReLU/LeakyReLU, A (post-activation) for others
+                    // Use Z (pre-activation) for ReLU/LeakyReLU/GELU, A (post-activation) for others
                     id<MTLBuffer> src_buf = (layer->activation == ACTIVATION_RELU ||
-                                             layer->activation == ACTIVATION_LEAKY_RELU)
+                                             layer->activation == ACTIVATION_LEAKY_RELU ||
+                                             layer->activation == ACTIVATION_GELU)
                                             ? Z_buf : A_buf;
                     dispatch_binary_elementwise(cmd, pso_d, dl_dz_buf, src_buf, elem_count);
                 }

@@ -84,6 +84,17 @@ extern "C" __global__ void cuda_activation_softsign(float *buf, int n)
     }
 }
 
+// GELU (tanh approximation): 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+extern "C" __global__ void cuda_activation_gelu(float *buf, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        float x = buf[i];
+        buf[i] = 0.5f * x * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
+    }
+}
+
 extern "C" __global__ void cuda_softmax_rows(float *buf, int rows, int cols)
 {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
@@ -145,6 +156,19 @@ extern "C" __global__ void cuda_deriv_softsign(float *dl_dz, const float *a, int
     {
         float d = 1.0f - fabsf(a[i]);
         dl_dz[i] *= d * d;
+    }
+}
+
+// GELU derivative (tanh approximation), evaluated at the pre-activation z
+extern "C" __global__ void cuda_deriv_gelu(float *dl_dz, const float *z, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        float x = z[i];
+        float t = tanhf(0.7978845608f * (x + 0.044715f * x * x * x));
+        dl_dz[i] *= 0.5f * (1.0f + t) +
+            0.5f * x * (1.0f - t * t) * 0.7978845608f * (1.0f + 3.0f * 0.044715f * x * x);
     }
 }
 

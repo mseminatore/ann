@@ -85,6 +85,22 @@ static PNetwork gc_make_dropout_net(void)
     return net;
 }
 
+// GELU hidden layers (derivative uses the pre-activation)
+static PNetwork gc_make_gelu_net(void)
+{
+    PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+    if (!net) return NULL;
+
+    ann_add_layer(net, 2, LAYER_INPUT,  ACTIVATION_NULL);
+    ann_add_layer(net, 8, LAYER_HIDDEN, ACTIVATION_GELU);
+    ann_add_layer(net, 6, LAYER_HIDDEN, ACTIVATION_GELU);
+    ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+    ann_set_learning_rate(net, 0.05f);
+    ann_set_convergence(net, 1e-6f);  // run every epoch
+    ann_set_epoch_limit(net, 30);
+    return net;
+}
+
 static int gc_tensors_close(PTensor a, PTensor b, real tol)
 {
     if (!a || !b) return a == b;
@@ -179,6 +195,56 @@ static void run_gpu_consistency_tests(void)
 
     ann_free_network(cpu_net);
     ann_free_network(gpu_net);
+
+    // ========================================================================
+    SUITE("GPU GELU and Early Stopping");
+    // ========================================================================
+
+    cpu_net = gc_make_gelu_net();
+    gpu_net = gc_make_gelu_net();
+    ann_gpu_upload_network(gpu_net);
+    srand(77);
+    gc_train(cpu_net);
+    srand(77);
+    gc_train(gpu_net);
+    TESTEX("GPU GELU training matches CPU GELU training", gc_nets_close(cpu_net, gpu_net, 1e-3f, 0));
+    TESTEX("After GPU GELU training, the GPU copy matches the CPU weights",
+           gc_gpu_matches_cpu(gpu_net));
+    ann_free_network(cpu_net);
+    ann_free_network(gpu_net);
+
+    // Validation on flipped targets gets worse as training fits XOR, so
+    // early stopping triggers and restores an earlier epoch's weights
+    {
+        real flipped[] = {1, 0, 0, 1};
+        PTensor vin  = tensor_create_from_array(4, 2, gc_xor_in);
+        PTensor vout = tensor_create_from_array(4, 1, flipped);
+
+        cpu_net = gc_make_net(0.0f);
+        gpu_net = gc_make_net(0.0f);
+        ann_set_epoch_limit(cpu_net, 300);
+        ann_set_epoch_limit(gpu_net, 300);
+        ann_set_validation_data(cpu_net, vin, vout);
+        ann_set_validation_data(gpu_net, vin, vout);
+        ann_set_early_stopping(cpu_net, 5, 0.0f, 1);
+        ann_set_early_stopping(gpu_net, 5, 0.0f, 1);
+        ann_gpu_upload_network(gpu_net);
+
+        srand(5);
+        gc_train(cpu_net);
+        srand(5);
+        gc_train(gpu_net);
+        TESTEX("GPU early stopping picks the same best epoch as the CPU",
+               ann_get_best_epoch(cpu_net) == ann_get_best_epoch(gpu_net) &&
+               cpu_net->history_count == gpu_net->history_count);
+        TESTEX("GPU restored weights match the CPU's", gc_nets_close(cpu_net, gpu_net, 1e-3f, 0));
+        TESTEX("After restoring, the GPU copy matches the CPU weights", gc_gpu_matches_cpu(gpu_net));
+
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+        tensor_free(vin);
+        tensor_free(vout);
+    }
 
     // ========================================================================
     SUITE("GPU/CPU Weight Consistency - Online Training");

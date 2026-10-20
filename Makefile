@@ -38,8 +38,9 @@ $(LIBANN): $(LIB_OBJS)
 LIBANN_SO = libann.so
 SHARED_OBJS = ann.pic.o tensor.pic.o json.pic.o ann_hypertune.pic.o
 
+# export only ANN_API-marked functions
 %.pic.o: %.c $(DEPS)
-	$(CC) -c -fPIC $(CFLAGS) -o $@ $<
+	$(CC) -c -fPIC -fvisibility=hidden -DANN_BUILDING_DLL $(CFLAGS) -o $@ $<
 
 shared: $(LIBANN_SO)
 

@@ -114,15 +114,17 @@ typedef enum {
 	ACTIVATION_LEAKY_RELU,
 	ACTIVATION_TANH,
 	ACTIVATION_SOFTSIGN,
-	ACTIVATION_SOFTMAX 
+	ACTIVATION_SOFTMAX,
+	ACTIVATION_GELU						// tanh approximation; appended to keep saved model values stable
 } Activation_type;
 
 //------------------------------
 // Loss function types
 //------------------------------
 typedef enum {
-	LOSS_MSE,
-	LOSS_CATEGORICAL_CROSS_ENTROPY,
+	LOSS_MSE,							// regression; use ACTIVATION_NULL on the output for unbounded targets
+	LOSS_CATEGORICAL_CROSS_ENTROPY,		// softmax output: one class per sample; sigmoid output: binary/multi-label
+	LOSS_BINARY_CROSS_ENTROPY = LOSS_CATEGORICAL_CROSS_ENTROPY,	// alias: use with a sigmoid output
 	LOSS_DEFAULT = LOSS_MSE
 } Loss_type;
 
@@ -256,6 +258,15 @@ struct Network
 	real *lr_history;					// learning rate at each epoch
 	unsigned history_count;				// number of epochs recorded
 	unsigned history_capacity;			// allocated capacity
+	real *val_loss_history;				// validation loss at each epoch (-1 = not measured)
+
+	// Validation and early stopping
+	PTensor val_inputs;					// validation inputs (borrowed, not owned)
+	PTensor val_outputs;				// validation targets (borrowed, not owned)
+	unsigned es_patience;				// epochs without improvement before stopping (0 = disabled)
+	real es_min_delta;					// minimum loss decrease that counts as an improvement
+	int es_restore_best;				// restore the best epoch's weights when training ends
+	unsigned best_epoch;				// epoch with the lowest monitored loss in the last run (0 = none)
 };
 
 //------------------------------
@@ -431,6 +442,8 @@ ANN_API int ann_export_pikchr(const PNetwork pnet, const char *filename);
  * Export training history as CSV for learning curve visualization.
  * 
  * Writes epoch, loss, and learning rate data collected during training.
+ * When a validation set was used, a val_loss column is added (empty for
+ * epochs trained without one).
  * Use external tools (gnuplot, matplotlib, Excel) to plot the curve.
  * 
  * @param pnet Network with training history (must have been trained)
@@ -670,6 +683,22 @@ ANN_API int ann_class_prediction(const real *outputs, int classes);
 ANN_API real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTensor outputs);
 
 /**
+ * Evaluate the network's loss on a dataset.
+ * 
+ * Uses the network's loss function (MSE, or cross-entropy) averaged the same
+ * way as the training loss, so the two are directly comparable.
+ * Dropout is not applied.
+ * 
+ * @param pnet Network to evaluate (must not be NULL)
+ * @param inputs Input data (rows x input_size matrix)
+ * @param outputs Expected outputs (rows x output_size matrix)
+ * @return Average loss, or -1.0 on error
+ * 
+ * @see ann_set_validation_data()
+ */
+ANN_API real ann_evaluate_loss(const PNetwork pnet, const PTensor inputs, const PTensor outputs);
+
+/**
  * Compute binary confusion matrix and Matthews Correlation Coefficient.
  * 
  * For binary classification problems (2 output classes).
@@ -822,6 +851,49 @@ ANN_API void ann_set_batch_size(PNetwork pnet, unsigned batch_size);
  * @param limit Maximum number of epochs
  */
 ANN_API void ann_set_epoch_limit(PNetwork pnet, unsigned limit);
+
+/**
+ * Set a validation dataset that ann_train_network() evaluates after every epoch.
+ * 
+ * The validation loss is printed with each epoch, recorded in the training
+ * history (see ann_export_learning_curve()), and monitored by early stopping.
+ * The tensors are borrowed, not copied: keep them alive while training and
+ * free them yourself. Pass NULL for both to clear the validation set.
+ * 
+ * @param pnet Network to configure
+ * @param inputs Validation inputs (rows x input_size matrix), or NULL
+ * @param outputs Validation targets (rows x output_size matrix), or NULL
+ * @return ERR_OK, ERR_NULL_PTR if pnet is NULL or only one tensor is NULL,
+ *         or ERR_INVALID if the row counts differ or are zero
+ * 
+ * @see ann_set_early_stopping(), ann_evaluate_loss()
+ */
+ANN_API int ann_set_validation_data(PNetwork pnet, PTensor inputs, PTensor outputs);
+
+/**
+ * Stop training when the monitored loss stops improving.
+ * 
+ * The validation loss is monitored when a validation set is configured,
+ * otherwise the training loss. Training stops once `patience` epochs pass
+ * without the loss dropping by more than `min_delta` below its best value.
+ * 
+ * @param pnet Network to configure
+ * @param patience Epochs to wait for an improvement (0 = disabled, the default)
+ * @param min_delta Minimum decrease that counts as an improvement (e.g. 0 or 1e-4)
+ * @param restore_best Nonzero to restore the weights from the best epoch when
+ *        training ends (whether it stopped early or reached the epoch limit)
+ * 
+ * @see ann_set_validation_data(), ann_get_best_epoch()
+ */
+ANN_API void ann_set_early_stopping(PNetwork pnet, unsigned patience, real min_delta, int restore_best);
+
+/**
+ * Get the epoch with the lowest monitored loss in the last ann_train_network() run.
+ * 
+ * @param pnet Trained network
+ * @return 1-based epoch number, or 0 if early stopping was disabled or pnet is NULL
+ */
+ANN_API unsigned ann_get_best_epoch(const PNetwork pnet);
 
 // ============================================================================
 // LEARNING RATE SCHEDULERS

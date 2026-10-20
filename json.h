@@ -10,6 +10,7 @@
 #define JSON_H
 
 #include <stddef.h>
+#include "tensor.h"  // for ANN_API
 
 //------------------------------
 // JSON value types
@@ -62,7 +63,7 @@ struct JsonPair {
  * @param out Pointer to receive parsed value
  * @return 0 on success, -1 on parse error
  */
-int json_parse(const char *json, JsonValue *out);
+ANN_API int json_parse(const char *json, JsonValue *out);
 
 /**
  * Parse JSON from a file.
@@ -71,14 +72,14 @@ int json_parse(const char *json, JsonValue *out);
  * @param out Pointer to receive parsed value
  * @return 0 on success, -1 on error
  */
-int json_parse_file(const char *filename, JsonValue *out);
+ANN_API int json_parse_file(const char *filename, JsonValue *out);
 
 /**
  * Free a JSON value and all nested values.
  * 
  * @param val JSON value to free
  */
-void json_free(JsonValue *val);
+ANN_API void json_free(JsonValue *val);
 
 //------------------------------
 // Accessor functions
@@ -91,7 +92,7 @@ void json_free(JsonValue *val);
  * @param key Member key to find
  * @return Pointer to member value, or NULL if not found
  */
-JsonValue *json_get(const JsonValue *obj, const char *key);
+ANN_API JsonValue *json_get(const JsonValue *obj, const char *key);
 
 /**
  * Get array element by index.
@@ -100,7 +101,7 @@ JsonValue *json_get(const JsonValue *obj, const char *key);
  * @param index Element index
  * @return Pointer to element, or NULL if out of bounds
  */
-JsonValue *json_at(const JsonValue *arr, size_t index);
+ANN_API JsonValue *json_at(const JsonValue *arr, size_t index);
 
 /**
  * Get string value.
@@ -108,7 +109,7 @@ JsonValue *json_at(const JsonValue *arr, size_t index);
  * @param val JSON value (must be JSON_STRING)
  * @return String pointer, or NULL if not a string
  */
-const char *json_string(const JsonValue *val);
+ANN_API const char *json_string(const JsonValue *val);
 
 /**
  * Get number value.
@@ -117,7 +118,7 @@ const char *json_string(const JsonValue *val);
  * @param out Pointer to receive number
  * @return 0 on success, -1 if not a number
  */
-int json_number(const JsonValue *val, double *out);
+ANN_API int json_number(const JsonValue *val, double *out);
 
 /**
  * Get integer value.
@@ -126,7 +127,7 @@ int json_number(const JsonValue *val, double *out);
  * @param out Pointer to receive integer
  * @return 0 on success, -1 if not a number
  */
-int json_int(const JsonValue *val, int *out);
+ANN_API int json_int(const JsonValue *val, int *out);
 
 /**
  * Get boolean value.
@@ -135,7 +136,7 @@ int json_int(const JsonValue *val, int *out);
  * @param out Pointer to receive boolean (0 or 1)
  * @return 0 on success, -1 if not a boolean
  */
-int json_bool(const JsonValue *val, int *out);
+ANN_API int json_bool(const JsonValue *val, int *out);
 
 /**
  * Get array length.
@@ -143,7 +144,7 @@ int json_bool(const JsonValue *val, int *out);
  * @param val JSON value (must be JSON_ARRAY)
  * @return Array length, or 0 if not an array
  */
-size_t json_array_length(const JsonValue *val);
+ANN_API size_t json_array_length(const JsonValue *val);
 
 /**
  * Check if value is null.
@@ -151,6 +152,6 @@ size_t json_array_length(const JsonValue *val);
  * @param val JSON value
  * @return 1 if null, 0 otherwise
  */
-int json_is_null(const JsonValue *val);
+ANN_API int json_is_null(const JsonValue *val);
 
 #endif /* JSON_H */

@@ -364,7 +364,7 @@ ANN_API int hypertune_count_grid_trials(const HyperparamSpace *space);
  * @param loss_type Loss function to use
  * @return Newly created network, or NULL on error
  */
-PNetwork hypertune_create_network(
+ANN_API PNetwork hypertune_create_network(
     const HypertuneResult *result,
     int input_size,
     int output_size,
@@ -376,7 +376,7 @@ PNetwork hypertune_create_network(
  * Default scoring function using accuracy.
  * Can be used directly or as a template for custom scorers.
  */
-real hypertune_score_accuracy(
+ANN_API real hypertune_score_accuracy(
     PNetwork trained_net,
     PTensor val_inputs,
     PTensor val_outputs,

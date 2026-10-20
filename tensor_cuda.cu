@@ -322,6 +322,7 @@ static void cuda_launch_activation(Activation_type act, float *buf, int batch, i
         case ACTIVATION_LEAKY_RELU: cuda_activation_leaky_relu<<<cuda_blocks(n), CUDA_THREADS>>>(buf, n); break;
         case ACTIVATION_TANH:       cuda_activation_tanh<<<cuda_blocks(n), CUDA_THREADS>>>(buf, n); break;
         case ACTIVATION_SOFTSIGN:   cuda_activation_softsign<<<cuda_blocks(n), CUDA_THREADS>>>(buf, n); break;
+        case ACTIVATION_GELU:       cuda_activation_gelu<<<cuda_blocks(n), CUDA_THREADS>>>(buf, n); break;
         case ACTIVATION_SOFTMAX:    cuda_softmax_rows<<<cuda_blocks(batch), CUDA_THREADS>>>(buf, batch, cols); break;
         case ACTIVATION_NULL:
         default:                    break;
@@ -330,7 +331,7 @@ static void cuda_launch_activation(Activation_type act, float *buf, int batch, i
 
 //-----------------------------------------------------------
 // Launch the activation-derivative kernel: dl_dz[i] *= f'(...).
-// ReLU/LeakyReLU use the pre-activation Z; the others use the post-activation A.
+// ReLU/LeakyReLU/GELU use the pre-activation Z; the others use the post-activation A.
 //-----------------------------------------------------------
 static void cuda_launch_deriv(Activation_type act, float *dl_dz,
                               const float *a, const float *z, int n)
@@ -342,6 +343,7 @@ static void cuda_launch_deriv(Activation_type act, float *dl_dz,
         case ACTIVATION_LEAKY_RELU: cuda_deriv_leaky_relu<<<cuda_blocks(n), CUDA_THREADS>>>(dl_dz, z, n); break;
         case ACTIVATION_TANH:       cuda_deriv_tanh<<<cuda_blocks(n), CUDA_THREADS>>>(dl_dz, a, n); break;
         case ACTIVATION_SOFTSIGN:   cuda_deriv_softsign<<<cuda_blocks(n), CUDA_THREADS>>>(dl_dz, a, n); break;
+        case ACTIVATION_GELU:       cuda_deriv_gelu<<<cuda_blocks(n), CUDA_THREADS>>>(dl_dz, z, n); break;
         default:                    break;
     }
 }

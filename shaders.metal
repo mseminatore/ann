@@ -94,6 +94,18 @@ kernel void activation_softsign(
 }
 
 //-----------------------------------------------------------
+// GELU activation (tanh approximation):
+// f(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+//-----------------------------------------------------------
+kernel void activation_gelu(
+    device float *buf [[buffer(0)]],
+    uint gid          [[thread_position_in_grid]])
+{
+    float x = buf[gid];
+    buf[gid] = 0.5f * x * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x)));
+}
+
+//-----------------------------------------------------------
 // Softmax: numerically stable per-row softmax
 // Each row of length `cols` is processed by one thread.
 // One thread per row is dispatched — no shared memory needed.
@@ -172,6 +184,18 @@ kernel void deriv_softsign(
     float abs_a = fabs(a[gid]);
     float denom = (1.0f - abs_a);
     dl_dz[gid] *= denom * denom;
+}
+
+// GELU derivative (tanh approximation), evaluated at the pre-activation z
+kernel void deriv_gelu(
+    device float *dl_dz   [[buffer(0)]],
+    device const float *z [[buffer(1)]],
+    uint gid              [[thread_position_in_grid]])
+{
+    float x = z[gid];
+    float t = tanh(0.7978845608f * (x + 0.044715f * x * x * x));
+    dl_dz[gid] *= 0.5f * (1.0f + t) +
+        0.5f * x * (1.0f - t * t) * 0.7978845608f * (1.0f + 3.0f * 0.044715f * x * x);
 }
 
 //-----------------------------------------------------------

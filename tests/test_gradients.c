@@ -149,6 +149,7 @@ void test_main(int argc, char *argv[])
     TESTEX("Leaky ReLU hidden layers", (gc_check(ACTIVATION_LEAKY_RELU) <= 1.0f));
     TESTEX("Tanh hidden layers",       (gc_check(ACTIVATION_TANH)       <= 1.0f));
     TESTEX("Softsign hidden layers",   (gc_check(ACTIVATION_SOFTSIGN)   <= 1.0f));
+    TESTEX("GELU hidden layers",       (gc_check(ACTIVATION_GELU)       <= 1.0f));
 
     SUITE("Output Layer Gradients");
     TESTEX("MSE with sigmoid output",    (gc_check_output(ACTIVATION_SIGMOID,    LOSS_MSE) <= 1.0f));
@@ -156,9 +157,13 @@ void test_main(int argc, char *argv[])
     TESTEX("MSE with softsign output",   (gc_check_output(ACTIVATION_SOFTSIGN,   LOSS_MSE) <= 1.0f));
     TESTEX("MSE with ReLU output",       (gc_check_output(ACTIVATION_RELU,       LOSS_MSE) <= 1.0f));
     TESTEX("MSE with leaky ReLU output", (gc_check_output(ACTIVATION_LEAKY_RELU, LOSS_MSE) <= 1.0f));
+    TESTEX("MSE with GELU output",       (gc_check_output(ACTIVATION_GELU,       LOSS_MSE) <= 1.0f));
+    TESTEX("MSE with linear output",     (gc_check_output(ACTIVATION_NULL,       LOSS_MSE) <= 1.0f));
     TESTEX("MSE with softmax output",    (gc_check_output(ACTIVATION_SOFTMAX,    LOSS_MSE) <= 1.0f));
     TESTEX("Cross-entropy with softmax output",
            (gc_check_output(ACTIVATION_SOFTMAX, LOSS_CATEGORICAL_CROSS_ENTROPY) <= 1.0f));
     TESTEX("Binary cross-entropy with sigmoid output",
            (gc_check_output(ACTIVATION_SIGMOID, LOSS_CATEGORICAL_CROSS_ENTROPY) <= 1.0f));
+    TESTEX("LOSS_BINARY_CROSS_ENTROPY alias with sigmoid output",
+           (gc_check_output(ACTIVATION_SIGMOID, LOSS_BINARY_CROSS_ENTROPY) <= 1.0f));
 }

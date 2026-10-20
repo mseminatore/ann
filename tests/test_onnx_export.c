@@ -171,6 +171,36 @@ void test_main(int argc, char *argv[]) {
     remove_file(test_file);
     ann_free_network(net);
 
+    // Test with GELU: needs opset 20 and the tanh approximation attribute
+    net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_GELU);
+    ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_NULL);
+    result = ann_export_onnx(net, test_file);
+    TESTEX("Export with GELU succeeds", (result == ERR_OK));
+    TESTEX("File contains Gelu op", file_contains(test_file, "\"op_type\": \"Gelu\""));
+    TESTEX("Gelu uses opset 20", file_contains(test_file, "\"version\": 20"));
+    TESTEX("Gelu has tanh approximate attribute", file_contains(test_file, "\"approximate\""));
+    {
+        PNetwork back = ann_import_onnx(test_file);
+        TESTEX("Gelu model imports", back != NULL);
+        TESTEX("Imported hidden layer is GELU",
+               back && ann_get_layer_activation(back, 1) == ACTIVATION_GELU);
+        if (back) ann_free_network(back);
+    }
+    remove_file(test_file);
+    ann_free_network(net);
+
+    // Models without GELU keep opset 17
+    net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_RELU);
+    ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_NULL);
+    ann_export_onnx(net, test_file);
+    TESTEX("Models without GELU keep opset 17", file_contains(test_file, "\"version\": 17"));
+    remove_file(test_file);
+    ann_free_network(net);
+
     // Test with no activation (null)
     net = ann_make_network(OPT_SGD, LOSS_MSE);
     ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);

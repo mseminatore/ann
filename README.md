@@ -88,7 +88,17 @@ using several types of gradient descent and backpropagation methods. The
 
 The module supports both **Mean-Squared Error** and 
 **Categorical Cross Entropy** for loss functions. This option is set when a 
-network is created via `ann_make_network()`.
+network is created via `ann_make_network()`. The output activation picks the
+task:
+
+Task | Loss | Output activation
+---- | ---- | -----------------
+Multi-class classification (one class per sample) | `LOSS_CATEGORICAL_CROSS_ENTROPY` | `ACTIVATION_SOFTMAX`
+Binary or multi-label classification | `LOSS_BINARY_CROSS_ENTROPY` | `ACTIVATION_SIGMOID`
+Regression (unbounded targets) | `LOSS_MSE` | `ACTIVATION_NULL` (linear)
+
+`LOSS_BINARY_CROSS_ENTROPY` is an alias of `LOSS_CATEGORICAL_CROSS_ENTROPY`:
+with a sigmoid output the library computes binary cross-entropy per output.
 
 For training, the module provides **Stochastic Gradient Descent**,
 **Momentum**, **AdaGrad**, **RMSProp**, and **Adam** optimizers. This option 
@@ -97,7 +107,10 @@ recommended as the default** for most use cases due to its adaptive per-paramete
 learning rates and stable convergence.
 
 The layer activation types currently supported are **None**, **Sigmoid**, 
-**Softmax**, **ReLU**, **LeakyReLU**, **Tanh**, and **Softsign**.
+**Softmax**, **ReLU**, **LeakyReLU**, **Tanh**, **Softsign**, and **GELU**.
+GELU uses the tanh approximation on every path (CPU, Metal, CUDA) and exports
+to ONNX as `Gelu` with `approximate="tanh"`, which requires opset 20; models
+without GELU still export with opset 17.
 
 For performance, mini-batch support is provided. Batch size can be configured, 
 along with other hyper-parameters, either directly via the network object or 
@@ -124,10 +137,14 @@ ann_train_end | end an online/incremental training session
 ann_predict | predict an output using a previously trained network
 ann_set_convergence | set the convergence threshold (optional)
 ann_evaluate_accuracy | evaluate accuracy of trained network using test data
+ann_evaluate_loss | evaluate the network's loss on a dataset
 ann_set_learning_rate | override the default learning rate
 ann_set_loss_function | set the loss function
 ann_set_batch_size | set the mini-batch size
 ann_set_epoch_limit | set the maximum number of epochs
+ann_set_validation_data | set a validation set evaluated after each epoch
+ann_set_early_stopping | stop when the monitored loss stops improving
+ann_get_best_epoch | get the best epoch of the last training run
 ann_set_lr_scheduler | set learning rate scheduler callback
 ann_set_gradient_clip | set gradient clipping threshold
 ann_set_weight_decay | set L2 regularization (weight decay) coefficient
@@ -181,6 +198,24 @@ real my_scheduler(unsigned epoch, real base_lr, void *data) {
 }
 ann_set_lr_scheduler(net, my_scheduler, NULL);
 ```
+
+## Validation and Early Stopping
+
+Give `ann_train_network()` a validation set and it reports `val_loss` after
+every epoch. Early stopping then ends training once the validation loss has
+not improved for `patience` epochs, and can restore the best epoch's weights:
+
+```c
+ann_set_validation_data(net, val_inputs, val_outputs);  // borrowed, not copied
+ann_set_early_stopping(net, 10, 1e-4f, 1);  // patience, min_delta, restore_best
+ann_set_epoch_limit(net, 500);              // an upper bound, rarely reached
+
+ann_train_network(net, inputs, outputs, rows);
+printf("best epoch: %u\n", ann_get_best_epoch(net));
+```
+
+Without a validation set, early stopping monitors the training loss.
+`ann_evaluate_loss()` computes the same loss on any dataset.
 
 ## Dropout Regularization
 
@@ -269,6 +304,8 @@ epoch,loss,learning_rate
 2,0.1823,0.001
 ...
 ```
+
+When a validation set was used, a `val_loss` column is added.
 
 Plot with gnuplot, Python matplotlib, or Excel to diagnose training issues.
 
@@ -694,6 +731,11 @@ make shared
 ```
 
 This produces `libann.dll` (Windows), `libann.so` (Linux), or `libann.dylib` (macOS).
+
+Only functions marked `ANN_API` are exported from the shared library on every
+platform (`__declspec(dllexport)` on Windows, default visibility with
+`-fvisibility=hidden` on gcc/clang), so the exported symbols are exactly the
+public API.
 
 When linking against the DLL from external code, define `ANN_USING_DLL` to enable proper import declarations:
 ```c

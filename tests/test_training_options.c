@@ -1,6 +1,7 @@
 //-----------------------------------------------------------
 // Training options: learning-rate schedulers, weight initialization,
-// per-layer dropout, training mode, and the confusion matrix printout.
+// per-layer dropout, training mode, the confusion matrix printout, and
+// validation with early stopping.
 //-----------------------------------------------------------
 
 #include <stdio.h>
@@ -44,6 +45,22 @@ static int all_zero(PTensor t)
     for (int i = 0; i < t->rows * t->cols; i++)
         if (t->values[i] != 0.0f) return 0;
     return 1;
+}
+
+static void silent_print(const char *msg) { (void)msg; }
+
+// 1 -> 1 linear regression net with weight w and zero bias
+static PNetwork make_linear_net(real w)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(net, 1, LAYER_INPUT,  ACTIVATION_NULL);
+    ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_NULL);
+    net->layers[0].t_weights->values[0] = w;
+    net->layers[0].t_bias->values[0] = 0.0f;
+    net->weights_set = 1;
+    net->print_func = silent_print;
+    ann_set_batch_size(net, 4);
+    return net;
 }
 
 // Captures everything a network prints
@@ -263,5 +280,91 @@ void test_main(int argc, char *argv[])
         tensor_free(in);
         tensor_free(out);
         ann_free_network(net);
+    }
+
+    SUITE("Validation and Early Stopping");
+    {
+        real xs[] = {1, 2, 3, 4};
+        real ys[] = {1, 2, 3, 4};      // training target: y = x
+        real neg[] = {-1, -2, -3, -4}; // validation target: y = -x
+        PTensor x = tensor_create_from_array(4, 1, xs);
+        PTensor y = tensor_create_from_array(4, 1, ys);
+        PTensor yv = tensor_create_from_array(4, 1, neg);
+        PTensor y3 = tensor_create_from_array(3, 1, ys);
+
+        PNetwork net = make_linear_net(2.0f);
+
+        // y = 2x against y = x: squared errors 1, 4, 9, 16 -> mean 7.5
+        TESTEX("Evaluate loss is the MSE", near(ann_evaluate_loss(net, x, y), 7.5, 1e-5));
+        TESTEX("Evaluate loss rejects mismatched rows", ann_evaluate_loss(net, x, y3) < 0.0f);
+
+        TESTEX("Validation rejects one NULL tensor", ann_set_validation_data(net, x, NULL) == ERR_NULL_PTR);
+        TESTEX("Validation rejects mismatched rows", ann_set_validation_data(net, x, y3) == ERR_INVALID);
+        TESTEX("Validation accepts matching tensors", ann_set_validation_data(net, x, yv) == ERR_OK);
+        TESTEX("Validation clears with NULLs", ann_set_validation_data(net, NULL, NULL) == ERR_OK);
+        TESTEX("Best epoch is 0 before training", ann_get_best_epoch(net) == 0);
+        ann_free_network(net);
+
+        // A learning rate of 0 never improves the training loss, so training
+        // stops after the first epoch plus `patience` more
+        net = make_linear_net(2.0f);
+        ann_set_learning_rate(net, 0.0f);
+        ann_set_epoch_limit(net, 100);
+        ann_set_early_stopping(net, 3, 0.0f, 0);
+        ann_train_network(net, x, y, 4);
+        TESTEX("Stops after patience epochs without improvement", net->history_count == 4);
+        TESTEX("Best epoch is the first", ann_get_best_epoch(net) == 1);
+        ann_free_network(net);
+
+        // Starting at w = -1 fits the validation set perfectly; training
+        // toward y = x makes validation worse every epoch, so the best epoch
+        // is the first and its weights are restored
+        net = make_linear_net(-1.0f);
+        ann_set_learning_rate(net, 0.01f);
+        ann_set_epoch_limit(net, 50);
+        ann_set_validation_data(net, x, yv);
+        ann_set_early_stopping(net, 3, 0.0f, 1);
+        ann_train_network(net, x, y, 4);
+        TESTEX("Stops early on rising validation loss", net->history_count == 4);
+        TESTEX("Validation loss is recorded", net->val_loss_history[0] >= 0.0f &&
+               net->val_loss_history[3] > net->val_loss_history[0]);
+        TESTEX("Best epoch is the first", ann_get_best_epoch(net) == 1);
+        TESTEX("Best weights are restored",
+               near(ann_evaluate_loss(net, x, yv), net->val_loss_history[0], 1e-5));
+
+        // The learning curve gains a val_loss column
+        const char *csv = "test_val_curve.csv";
+        char line[128] = "";
+        TESTEX("Learning curve exports", ann_export_learning_curve(net, csv) == ERR_OK);
+        FILE *f = fopen(csv, "r");
+        if (f)
+        {
+            if (!fgets(line, sizeof(line), f)) line[0] = '\0';
+            fclose(f);
+        }
+        remove(csv);
+        TESTEX("Learning curve has a val_loss column", strstr(line, ",val_loss") != NULL);
+        ann_free_network(net);
+
+        // Without a validation set the CSV keeps its original columns
+        net = make_linear_net(2.0f);
+        ann_set_epoch_limit(net, 2);
+        ann_train_network(net, x, y, 4);
+        ann_export_learning_curve(net, csv);
+        line[0] = '\0';
+        f = fopen(csv, "r");
+        if (f)
+        {
+            if (!fgets(line, sizeof(line), f)) line[0] = '\0';
+            fclose(f);
+        }
+        remove(csv);
+        TESTEX("Learning curve without validation is unchanged", strcmp(line, "epoch,loss,learning_rate\n") == 0);
+        ann_free_network(net);
+
+        tensor_free(x);
+        tensor_free(y);
+        tensor_free(yv);
+        tensor_free(y3);
     }
 }

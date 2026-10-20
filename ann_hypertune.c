@@ -60,7 +60,7 @@ static const char *optimizer_names[] = {
 };
 
 static const char *activation_names[] = {
-    "NULL", "SIGMOID", "RELU", "LEAKY_RELU", "TANH", "SOFTSIGN", "SOFTMAX"
+    "NULL", "SIGMOID", "RELU", "LEAKY_RELU", "TANH", "SOFTSIGN", "SOFTMAX", "GELU"
 };
 
 static const char *topology_names[] = {

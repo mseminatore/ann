@@ -2234,6 +2234,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		
 		// iterate over all sets of inputs in this epoch/minibatch
 		loss = (real)0.0;
+		real epoch_loss = (real)0.0;	// sum of batch losses; the epoch reports their mean
 
 		// Progress bar buffer (avoid per-batch console I/O)
 		char progress[64];
@@ -2302,11 +2303,14 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 				pnet->optimize_func(pnet);
 			}
 
+			epoch_loss += loss;
+
 			// Progress indicator: buffer instead of per-batch I/O
 			if (batch % progress_step == 0 && progress_len < 60)
 				progress[progress_len++] = '=';
 		}
 		progress[progress_len] = '\0';
+		loss = epoch_loss / (real)batch_count;
 
 		// Validation loss (-1 when there is no validation set). ann_predict_batch
 		// uses the GPU weights while GPU training keeps them current.

@@ -21,6 +21,7 @@ ann_export_onnx(pnet, "model.onnx.json");
 - Supported activations map to ONNX ops: `Sigmoid`, `Relu`, `LeakyRelu`, `Tanh`, `Softsign`, `Softmax`, `Gelu`
 - Opset 17, or opset 20 when the network uses GELU (`Gelu` with `approximate="tanh"`)
 - `producer_name` is `ann-library`; `producer_version` is `1.1`
+- Floats are written with 9 significant digits, so weights round-trip exactly
 
 ### Export Limitations
 
@@ -40,10 +41,24 @@ if (pnet) {
 
 ### Import Capabilities
 
-- Loads network topology from weight tensor dimensions
-- Restores weights and biases from initializers
-- Maps ONNX activation ops back to libann activations
-- Imported networks are ready for inference (or continued training)
+The importer reads the graph as a single chain of nodes starting at its input
+(`[batch, n]` or `[batch, C, H, W]`) and turns each node into a layer:
+
+ONNX node | libann layer
+--------- | ------------
+`MatMul` (+ `Add` of a bias) | dense layer (weights `[in, out]`)
+`Gemm` | dense layer (`transB = 1` as written by PyTorch's `Linear`, or `transB = 0`; `alpha = beta = 1`)
+`Conv` | conv layer (square kernel, equal strides and pads, no dilation or groups; bias optional)
+`MaxPool` | max pooling layer (square window, equal strides, no padding, `ceil_mode = 0`)
+`Flatten` (axis 1) | flatten layer (libann's own `flatten_input_N` nodes are skipped)
+`Relu`, `LeakyRelu` (alpha 0.01), `Sigmoid`, `Tanh`, `Softsign`, `Softmax`, `Gelu` (`approximate="tanh"`) | the activation of the layer before it
+
+- Reads libann's JSON and the JSON written by protobuf's printer
+  (`json_format.MessageToJson`): lowerCamelCase or snake_case field names,
+  int64 values as strings, and weights in `float_data` or `raw_data`
+  (base64 little-endian float32)
+- Imported networks are ready for inference (or continued training); a libann
+  export imports with the same layers and identical predictions
 
 ### Files from older libann versions
 
@@ -59,12 +74,13 @@ ann_export_onnx(net, "model.onnx.json");                // 1.1 file
 
 ### Import Limitations
 
-- **Only reads libann-exported JSON** - not general ONNX files
-- Dense networks only: files with `Conv`, `MaxPool` or `Flatten` are rejected
-- Requires specific naming: `weight_0`, `bias_0`, `activation_0`, etc.
+- Reads JSON, not binary `.onnx` files: convert with `json_format.MessageToJson(onnx.load("model.onnx"))`
+- Anything libann can't reproduce exactly is rejected with `NULL` and an error
+  callback message: branching graphs, other ops (e.g. `AveragePool`, `Reshape`,
+  `BatchNormalization`), dilated or grouped convolutions, padded or `ceil_mode`
+  pooling, the exact (erf) `Gelu`, or an activation after a pool/flatten layer
 - Does not restore: optimizer state, learning rate, dropout rates, training history
 - Imported networks default to `OPT_ADAM` and `LOSS_MSE`
-- Unsupported ONNX operations will cause import to fail with error callback
 
 ### Round-Trip Example
 

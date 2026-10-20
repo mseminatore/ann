@@ -4,6 +4,7 @@
 #include <math.h>
 #include "testy/test.h"
 #include "ann.h"
+#include "json.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -321,6 +322,73 @@ void test_main(int argc, char *argv[]) {
     // ========================================================================
     // NaN/Inf HANDLING TESTS
     // ========================================================================
+    SUITE("ONNX Weight Layout");
+    COMMENT("weight_N must be [in, out] for ONNX MatMul; 1.0 files stored libann's [out, in]...");
+    {
+        // 2 inputs -> 3 outputs, W[out][in] = 10 * out + in
+        const char *layout_file = "test_layout.onnx.json";
+        net = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net, 2, LAYER_INPUT, ACTIVATION_NULL);
+        ann_add_layer(net, 3, LAYER_OUTPUT, ACTIVATION_NULL);
+        for (int o = 0; o < 3; o++)
+            for (int i = 0; i < 2; i++)
+                net->layers[1].t_weights->values[o * 2 + i] = (real)(10 * o + i);
+        ann_export_onnx(net, layout_file);
+        TESTEX("Export is marked producer_version 1.1", file_contains(layout_file, "\"producer_version\": \"1.1\""));
+
+        // Row-major [in=2, out=3]: row i holds W[0][i], W[1][i], W[2][i]
+        const double expected[6] = {0, 10, 20, 1, 11, 21};
+        int layout_ok = 0;
+        JsonValue root;
+        if (json_parse_file(layout_file, &root) == 0) {
+            JsonValue *w = json_at(json_get(json_get(&root, "graph"), "initializer"), 0);
+            JsonValue *dims = json_get(w, "dims");
+            JsonValue *data = json_get(w, "float_data");
+            int d0 = 0, d1 = 0;
+            json_int(json_at(dims, 0), &d0);
+            json_int(json_at(dims, 1), &d1);
+            layout_ok = d0 == 2 && d1 == 3 && json_array_length(data) == 6;
+            for (int k = 0; layout_ok && k < 6; k++) {
+                double v = -1;
+                json_number(json_at(data, k), &v);
+                layout_ok = (v == expected[k]);
+            }
+            json_free(&root);
+        }
+        TESTEX("weight_0 is written transposed as [in, out]", layout_ok);
+
+        PNetwork back = ann_import_onnx(layout_file);
+        int same = back != NULL;
+        for (int k = 0; same && k < 6; k++)
+            same = back->layers[1].t_weights->values[k] == net->layers[1].t_weights->values[k];
+        TESTEX("Import transposes the weights back", same);
+        ann_free_network(back);
+        remove(layout_file);
+
+        // A 1.0 file stored the [out, in] data under dims [in, out]; it must still load
+        FILE *f = fopen(layout_file, "w");
+        if (f) {
+            fputs("{\"ir_version\": 8, \"opset_import\": [{\"version\": 17}],\n"
+                  " \"producer_name\": \"ann-library\", \"producer_version\": \"1.0\",\n"
+                  " \"graph\": {\"name\": \"ann_model\",\n"
+                  "  \"initializer\": [\n"
+                  "   {\"name\": \"weight_0\", \"data_type\": 1, \"dims\": [2, 3], \"float_data\": [0, 1, 10, 11, 20, 21]},\n"
+                  "   {\"name\": \"bias_0\", \"data_type\": 1, \"dims\": [3], \"float_data\": [0, 0, 0]}],\n"
+                  "  \"node\": [\n"
+                  "   {\"op_type\": \"MatMul\", \"name\": \"matmul_0\", \"input\": [\"input\", \"weight_0\"], \"output\": [\"matmul_0_out\"]},\n"
+                  "   {\"op_type\": \"Add\", \"name\": \"add_0\", \"input\": [\"matmul_0_out\", \"bias_0\"], \"output\": [\"add_0_out\"]}]}}\n", f);
+            fclose(f);
+        }
+        back = ann_import_onnx(layout_file);
+        same = back != NULL;
+        for (int k = 0; same && k < 6; k++)
+            same = back->layers[1].t_weights->values[k] == net->layers[1].t_weights->values[k];
+        TESTEX("Legacy 1.0 file imports without transposing", same);
+        ann_free_network(back);
+        remove(layout_file);
+        ann_free_network(net);
+    }
+
     SUITE("ONNX Export NaN/Inf Handling");
     COMMENT("Testing that NaN/Inf values are serialized as valid JSON...");
 

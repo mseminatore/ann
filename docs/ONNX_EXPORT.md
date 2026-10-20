@@ -10,10 +10,14 @@ ann_export_onnx(pnet, "model.onnx.json");
 
 ### Format Details
 
-- Outputs JSON (not binary protobuf) - convert externally if needed
+- Outputs JSON (not binary protobuf) - see [Converting to binary ONNX](#converting-to-binary-onnx)
 - Each layer becomes: `MatMul` → `Add` → `Activation` nodes
+- `weight_N` has dims `[in_nodes, out_nodes]`, the layout ONNX `MatMul` expects
+  (libann stores weights as `[out, in]` internally and transposes them on export)
 - Input shape: `[batch, input_size]` with dynamic batch dimension
-- Supported activations map to ONNX ops: `Sigmoid`, `Relu`, `LeakyRelu`, `Tanh`, `Softsign`, `Softmax`
+- Supported activations map to ONNX ops: `Sigmoid`, `Relu`, `LeakyRelu`, `Tanh`, `Softsign`, `Softmax`, `Gelu`
+- Opset 17, or opset 20 when the network uses GELU (`Gelu` with `approximate="tanh"`)
+- `producer_name` is `ann-library`; `producer_version` is `1.1`
 
 ### Export Limitations
 
@@ -38,6 +42,18 @@ if (pnet) {
 - Maps ONNX activation ops back to libann activations
 - Imported networks are ready for inference (or continued training)
 
+### Files from older libann versions
+
+Exports with `producer_version` `1.0` (libann before this fix) wrote the weight
+data without transposing it, so other ONNX runtimes computed wrong results
+from them. `ann_import_onnx()` recognizes these files and still loads them
+correctly; re-export them to get a file other runtimes can use:
+
+```c
+PNetwork net = ann_import_onnx("old_model.onnx.json");  // 1.0 file
+ann_export_onnx(net, "model.onnx.json");                // 1.1 file
+```
+
 ### Import Limitations
 
 - **Only reads libann-exported JSON** - not general ONNX files
@@ -60,4 +76,21 @@ ann_export_onnx(net1, "model.onnx.json");
 // Later: import and use
 PNetwork net2 = ann_import_onnx("model.onnx.json");
 real accuracy = ann_evaluate_accuracy(net2, x_test, y_test);
+```
+
+## Converting to binary ONNX
+
+The JSON is the protobuf JSON form of an ONNX `ModelProto`, so the `onnx`
+Python package can convert it and run it, for example with onnxruntime:
+
+```python
+import onnx, onnxruntime as ort
+from google.protobuf import json_format
+
+model = json_format.Parse(open("model.onnx.json").read(), onnx.ModelProto())
+onnx.checker.check_model(model)
+onnx.save(model, "model.onnx")
+
+session = ort.InferenceSession("model.onnx")
+outputs = session.run(None, {session.get_inputs()[0].name: x})  # x: float32 [batch, input_size]
 ```

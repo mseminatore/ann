@@ -195,6 +195,10 @@ static ErrorLogCallback g_error_log_callback = NULL;
 //------------------------------------------------
 // define the text and binary file format versions
 //------------------------------------------------
+// ONNX producer identity; version 1.0 files hold untransposed weights
+#define ONNX_PRODUCER_NAME		"ann-library"
+#define ONNX_PRODUCER_VERSION	"1.1"
+
 // model file format versions (see save_network)
 static const int ANN_FORMAT_V1 = 1;
 static const int ANN_FORMAT_V2 = 2;
@@ -3349,6 +3353,15 @@ static const char* onnx_activation_op(Activation_type act)
 //-----------------------------------------------
 // Helper: write JSON float array (tensor values)
 //-----------------------------------------------
+static void write_json_float(FILE *fptr, real value)
+{
+	double v = (double)value;
+	if (isnan(v) || isinf(v))
+		fprintf(fptr, "0.0");
+	else
+		fprintf(fptr, "%.8g", v);
+}
+
 static void write_json_float_array(FILE *fptr, const real *values, int count)
 {
 	fprintf(fptr, "[");
@@ -3356,13 +3369,29 @@ static void write_json_float_array(FILE *fptr, const real *values, int count)
 	for (int i = 0; i < count; i++)
 	{
 		if (i > 0) fprintf(fptr, ", ");
-		double v = (double)values[i];
-		if (isnan(v) || isinf(v))
-			fprintf(fptr, "0.0");
-		else
-			fprintf(fptr, "%.8g", v);
+		write_json_float(fptr, values[i]);
 	}
 	
+	fprintf(fptr, "]");
+}
+
+//-----------------------------------------------
+// Helper: write a row-major [rows x cols] matrix transposed, as the
+// row-major [cols x rows] data of a JSON float array
+//-----------------------------------------------
+static void write_json_float_array_transposed(FILE *fptr, const real *values, int rows, int cols)
+{
+	fprintf(fptr, "[");
+
+	for (int c = 0; c < cols; c++)
+	{
+		for (int r = 0; r < rows; r++)
+		{
+			if (c > 0 || r > 0) fprintf(fptr, ", ");
+			write_json_float(fptr, values[r * cols + c]);
+		}
+	}
+
 	fprintf(fptr, "]");
 }
 
@@ -3395,8 +3424,8 @@ static void dense_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, 
 	int next_nodes = cur->node_count;
 	int curr_nodes = pnet->layers[layer - 1].node_count;
 
-	// Weights: shape is [curr_nodes, next_nodes] stored row-major
-	// ONNX MatMul: input [batch, curr_nodes] @ weights [curr_nodes, next_nodes] -> [batch, next_nodes]
+	// ONNX MatMul: input [batch, curr_nodes] @ weights [curr_nodes, next_nodes] -> [batch, next_nodes].
+	// libann stores W as [next_nodes x curr_nodes], so it is written transposed.
 	if (!*first) fprintf(fptr, ",\n");
 	*first = 0;
 
@@ -3408,7 +3437,7 @@ static void dense_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, 
 	write_json_int_array(fptr, w_dims, 2);
 	fprintf(fptr, ",\n");
 	fprintf(fptr, "        \"float_data\": ");
-	write_json_float_array(fptr, cur->t_weights->values, curr_nodes * next_nodes);
+	write_json_float_array_transposed(fptr, cur->t_weights->values, next_nodes, curr_nodes);
 	fprintf(fptr, "\n");
 	fprintf(fptr, "      }");
 
@@ -3496,8 +3525,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	}
 	fprintf(fptr, "  \"ir_version\": %d,\n", uses_gelu ? 9 : 8);
 	fprintf(fptr, "  \"opset_import\": [{\"version\": %d}],\n", uses_gelu ? 20 : 17);
-	fprintf(fptr, "  \"producer_name\": \"ann-library\",\n");
-	fprintf(fptr, "  \"producer_version\": \"1.0\",\n");
+	fprintf(fptr, "  \"producer_name\": \"%s\",\n", ONNX_PRODUCER_NAME);
+	fprintf(fptr, "  \"producer_version\": \"%s\",\n", ONNX_PRODUCER_VERSION);
 	fprintf(fptr, "  \"graph\": {\n");
 	fprintf(fptr, "    \"name\": \"ann_model\",\n");
 
@@ -3805,6 +3834,13 @@ PNetwork ann_import_onnx(const char *filename)
 	}
 	ann_add_layer(pnet, layer_sizes[num_weights], LAYER_OUTPUT, activations[num_weights]);
 
+	// Weights are stored [in, out] as ONNX MatMul expects; ann-library 1.0
+	// exports wrote libann's [out, in] data without transposing it
+	const char *producer = json_string(json_get(&root, "producer_name"));
+	const char *producer_version = json_string(json_get(&root, "producer_version"));
+	int legacy_layout = producer && producer_version &&
+	                    strcmp(producer, ONNX_PRODUCER_NAME) == 0 && strcmp(producer_version, "1.0") == 0;
+
 	// Load weights and biases from initializers
 	for (size_t layer = 0; layer < num_weights; layer++)
 	{
@@ -3823,13 +3859,16 @@ PNetwork ann_import_onnx(const char *filename)
 				JsonValue *float_data = json_get(init, "float_data");
 				if (float_data && float_data->type == JSON_ARRAY)
 				{
-					PTensor weights = pnet->layers[layer + 1].t_weights;	// weight_N produces layer N+1
+					PTensor weights = pnet->layers[layer + 1].t_weights;	// weight_N produces layer N+1, [out x in]
 					size_t count = json_array_length(float_data);
 					for (size_t j = 0; j < count && j < (size_t)(weights->rows * weights->cols); j++)
 					{
 						double val;
 						json_number(json_at(float_data, j), &val);
-						weights->values[j] = (real)val;
+
+						// element j of the [in x out] ONNX matrix is W[j % out][j / out]
+						size_t dst = legacy_layout ? j : (j % weights->rows) * weights->cols + j / weights->rows;
+						weights->values[dst] = (real)val;
 					}
 				}
 			}

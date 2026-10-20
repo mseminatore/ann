@@ -155,6 +155,8 @@ ann_get_layer_count | get the number of layers in the network
 ann_get_layer_nodes | get the number of nodes in a layer
 ann_get_layer_activation | get the activation type of a layer
 ann_get_layer_kind | get what a layer computes (`LAYER_KIND_DENSE`, `_CONV2D`, `_MAXPOOL2D`, `_FLATTEN`)
+ann_get_layer_shape | get a layer's output shape (channels, height, width)
+ann_get_layer_settings | get a conv/pool layer's kernel or pool size, stride and padding
 ann_export_onnx | export trained network to ONNX JSON format
 ann_import_onnx | import network from ONNX JSON file
 ann_export_pikchr | export network architecture as PIKCHR diagram

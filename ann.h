@@ -1159,6 +1159,31 @@ ANN_API Activation_type ann_get_layer_activation(const PNetwork pnet, int layer)
 ANN_API Layer_kind ann_get_layer_kind(const PNetwork pnet, int layer);
 
 /**
+ * Get a layer's output shape (channels, height, width).
+ * 
+ * Dense and flatten layers report (nodes, 1, 1).
+ * 
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @param channels, height, width Receive the shape (must not be NULL)
+ * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for a bad layer index
+ */
+ANN_API int ann_get_layer_shape(const PNetwork pnet, int layer, int *channels, int *height, int *width);
+
+/**
+ * Get a convolution or pooling layer's window settings.
+ * 
+ * Conv2D: kernel size, stride and padding. MaxPool2D: pool size, stride and 0.
+ * Other layers report 0 for all three.
+ * 
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @param size, stride, padding Receive the settings (must not be NULL)
+ * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for a bad layer index
+ */
+ANN_API int ann_get_layer_settings(const PNetwork pnet, int layer, int *size, int *stride, int *padding);
+
+/**
  * Print network properties and configuration to stdout.
  * 
  * Displays: network topology, optimizer, loss function, mini-batch size, etc.

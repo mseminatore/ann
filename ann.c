@@ -3286,6 +3286,48 @@ Layer_kind ann_get_layer_kind(const PNetwork pnet, int layer)
 }
 
 //------------------------------
+// get a layer's output shape
+//------------------------------
+int ann_get_layer_shape(const PNetwork pnet, int layer, int *channels, int *height, int *width)
+{
+	if (!pnet || !channels || !height || !width)
+		return ERR_NULL_PTR;
+	if (layer < 0 || layer >= pnet->layer_count)
+		return ERR_INVALID;
+
+	*channels = pnet->layers[layer].shape.c;
+	*height = pnet->layers[layer].shape.h;
+	*width = pnet->layers[layer].shape.w;
+	return ERR_OK;
+}
+
+//------------------------------
+// get a conv or pooling layer's window settings
+//------------------------------
+int ann_get_layer_settings(const PNetwork pnet, int layer, int *size, int *stride, int *padding)
+{
+	if (!pnet || !size || !stride || !padding)
+		return ERR_NULL_PTR;
+	if (layer < 0 || layer >= pnet->layer_count)
+		return ERR_INVALID;
+
+	const Layer *cur = &pnet->layers[layer];
+	*size = *stride = *padding = 0;
+	if (cur->kind == LAYER_KIND_CONV2D)
+	{
+		*size = cur->config[CONV_KERNEL];
+		*stride = cur->config[CONV_STRIDE];
+		*padding = cur->config[CONV_PADDING];
+	}
+	else if (cur->kind == LAYER_KIND_MAXPOOL2D)
+	{
+		*size = cur->config[POOL_SIZE];
+		*stride = cur->config[POOL_STRIDE];
+	}
+	return ERR_OK;
+}
+
+//------------------------------
 // set the loss function
 //------------------------------
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)

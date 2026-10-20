@@ -267,6 +267,21 @@ void test_main(int argc, char *argv[])
                net->layers[3].shape.h == 1 && ann_get_layer_kind(net, 3) == LAYER_KIND_FLATTEN);
         TESTEX("Dense after flatten reads 12 inputs", ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX) == ERR_OK &&
                net->layers[4].t_weights->cols == 12);
+        {
+            int c, h, w, k, st, p;
+            TESTEX("ann_get_layer_shape reports the conv output 3x4x4",
+                   ann_get_layer_shape(net, 1, &c, &h, &w) == ERR_OK && c == 3 && h == 4 && w == 4);
+            TESTEX("and dense layers as (nodes, 1, 1)",
+                   ann_get_layer_shape(net, 4, &c, &h, &w) == ERR_OK && c == 2 && h == 1 && w == 1);
+            TESTEX("ann_get_layer_settings reports conv kernel 3, stride 1, padding 0",
+                   ann_get_layer_settings(net, 1, &k, &st, &p) == ERR_OK && k == 3 && st == 1 && p == 0);
+            TESTEX("pool size 2, stride 2", ann_get_layer_settings(net, 2, &k, &st, &p) == ERR_OK &&
+                   k == 2 && st == 2 && p == 0);
+            TESTEX("and zeros for dense layers", ann_get_layer_settings(net, 4, &k, &st, &p) == ERR_OK &&
+                   k == 0 && st == 0 && p == 0);
+            TESTEX("Getters reject a bad index or NULL", ann_get_layer_shape(net, 9, &c, &h, &w) == ERR_INVALID &&
+                   ann_get_layer_settings(net, 1, NULL, &st, &p) == ERR_NULL_PTR);
+        }
         ann_free_network(net);
 
         net = ann_make_network(OPT_ADAM, LOSS_MSE);

@@ -38,7 +38,7 @@ static PNetwork fp_make_net(Activation_type hidden_act, Activation_type output_a
     ann_add_layer(net, 2, LAYER_OUTPUT, output_act);
 
     for (int l = 0; l < net->layer_count - 1; l++) {
-        PTensor w = net->layers[l].t_weights, b = net->layers[l].t_bias;
+        PTensor w = net->layers[l + 1].t_weights, b = net->layers[l + 1].t_bias;
         for (int i = 0; i < w->rows * w->cols; i++)
             w->values[i] = 0.8f * (real)sin(1.3 * i + l);
         for (int i = 0; i < b->cols; i++)
@@ -55,7 +55,7 @@ static void fp_reference(PNetwork net, const real *x, double *out)
     for (int i = 0; i < n; i++) a[i] = x[i];
 
     for (int l = 0; l < net->layer_count - 1; l++) {
-        PTensor w = net->layers[l].t_weights, b = net->layers[l].t_bias;
+        PTensor w = net->layers[l + 1].t_weights, b = net->layers[l + 1].t_bias;
         Activation_type act = net->layers[l + 1].activation;
         int m = net->layers[l + 1].node_count;
 

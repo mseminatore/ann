@@ -59,7 +59,7 @@ static PNetwork gc_make_net(Activation_type act, Activation_type out_act, Loss_t
     // no pre-activation sits within GC_EPS of ReLU's kink at zero
     ann_train_begin(net);
     for (int l = 0; l < net->layer_count - 1; l++) {
-        PTensor w = net->layers[l].t_weights, b = net->layers[l].t_bias;
+        PTensor w = net->layers[l + 1].t_weights, b = net->layers[l + 1].t_bias;
         for (int i = 0; i < w->rows * w->cols; i++)
             w->values[i] = 0.6f * (real)sin(1.7 * i + 0.9 * l + 0.4);
         for (int i = 0; i < b->cols; i++)
@@ -79,7 +79,7 @@ static real gc_check_net(Activation_type act, Activation_type out_act, Loss_type
     real numeric[64];
     int count = 0;
     for (int l = 0; l < net->layer_count - 1; l++) {
-        PTensor params[2] = { net->layers[l].t_weights, net->layers[l].t_bias };
+        PTensor params[2] = { net->layers[l + 1].t_weights, net->layers[l + 1].t_bias };
         for (int k = 0; k < 2; k++) {
             for (int i = 0; i < params[k]->rows * params[k]->cols; i++) {
                 real saved = params[k]->values[i];
@@ -97,7 +97,7 @@ static real gc_check_net(Activation_type act, Activation_type out_act, Loss_type
     real before[64];
     int n = 0;
     for (int l = 0; l < net->layer_count - 1; l++) {
-        PTensor params[2] = { net->layers[l].t_weights, net->layers[l].t_bias };
+        PTensor params[2] = { net->layers[l + 1].t_weights, net->layers[l + 1].t_bias };
         for (int k = 0; k < 2; k++)
             for (int i = 0; i < params[k]->rows * params[k]->cols; i++)
                 before[n++] = params[k]->values[i];
@@ -108,7 +108,7 @@ static real gc_check_net(Activation_type act, Activation_type out_act, Loss_type
     real worst = 0.0f;
     n = 0;
     for (int l = 0; l < net->layer_count - 1; l++) {
-        PTensor params[2] = { net->layers[l].t_weights, net->layers[l].t_bias };
+        PTensor params[2] = { net->layers[l + 1].t_weights, net->layers[l + 1].t_bias };
         for (int k = 0; k < 2; k++) {
             for (int i = 0; i < params[k]->rows * params[k]->cols; i++, n++) {
                 real analytic = (params[k]->values[i] - before[n]) / GC_LR;

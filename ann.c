@@ -85,11 +85,11 @@ ANN_API void ann_gpu_sync_weights(PNetwork pnet)
 }
 
 #ifdef USE_GPU
-// Weights are on the GPU (dispatch checks layer 0, which every backend uploads)
+// Weights are on the GPU (dispatch checks layer 1's weights, which every backend uploads)
 static int gpu_uploaded(const PNetwork pnet)
 {
-    return g_gpu_backend && pnet->layer_count > 0 &&
-           pnet->layers[0].t_weights && pnet->layers[0].t_weights->gpu_buf;
+    return g_gpu_backend && pnet->layer_count > 1 &&
+           pnet->layers[1].t_weights && pnet->layers[1].t_weights->gpu_buf;
 }
 
 // The GPU copy may be used for inference: uploaded and as new as the CPU weights
@@ -449,8 +449,8 @@ static void init_weights(PNetwork pnet)
 			// He initialization: std = sqrt(2 / fan_in)
 			{
 				real std = (real)sqrt(2.0 / fan_in);
-				tensor_random_normal(pnet->layers[layer - 1].t_weights, (real)0.0, std);
-				tensor_fill(pnet->layers[layer - 1].t_bias, (real)0.0);
+				tensor_random_normal(pnet->layers[layer].t_weights, (real)0.0, std);
+				tensor_fill(pnet->layers[layer].t_bias, (real)0.0);
 			}
 			break;
 
@@ -458,16 +458,16 @@ static void init_weights(PNetwork pnet)
 			// Xavier/Glorot initialization: std = sqrt(2 / (fan_in + fan_out))
 			{
 				real std = (real)sqrt(2.0 / (fan_in + fan_out));
-				tensor_random_normal(pnet->layers[layer - 1].t_weights, (real)0.0, std);
-				tensor_fill(pnet->layers[layer - 1].t_bias, (real)0.0);
+				tensor_random_normal(pnet->layers[layer].t_weights, (real)0.0, std);
+				tensor_fill(pnet->layers[layer].t_bias, (real)0.0);
 			}
 			break;
 
 		default:
 		case WEIGHT_INIT_UNIFORM:
 			// Original uniform initialization
-			tensor_random_uniform(pnet->layers[layer - 1].t_bias, (real)-pnet->weight_limit, (real)pnet->weight_limit);
-			tensor_random_uniform(pnet->layers[layer - 1].t_weights, (real)-pnet->weight_limit, (real)pnet->weight_limit);
+			tensor_random_uniform(pnet->layers[layer].t_bias, (real)-pnet->weight_limit, (real)pnet->weight_limit);
+			tensor_random_uniform(pnet->layers[layer].t_weights, (real)-pnet->weight_limit, (real)pnet->weight_limit);
 			break;
 		}
 	}
@@ -605,17 +605,19 @@ static void eval_network(PNetwork pnet)
 	}
 #endif
 
-	// loop over the non-output layers
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	// loop over the non-input layers; each owns the weights that produce it
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
+		PLayer cur = &pnet->layers[layer];
+
 		// y = Wx + b
-		tensor_matvec(Tensor_NoTranspose, (real)1.0, pnet->layers[layer].t_weights, (real)0.0, pnet->layers[layer].t_values, pnet->layers[layer + 1].t_values);
-		tensor_add(pnet->layers[layer + 1].t_values, pnet->layers[layer].t_bias);
+		tensor_matvec(Tensor_NoTranspose, (real)1.0, cur->t_weights, (real)0.0, pnet->layers[layer - 1].t_values, cur->t_values);
+		tensor_add(cur->t_values, cur->t_bias);
 
 		// apply activation function to values
-		for (int i = 0; i < pnet->layers[layer + 1].node_count; i++)
+		for (int i = 0; i < cur->node_count; i++)
 		{
-			pnet->layers[layer + 1].t_values->values[i] = pnet->layers[layer + 1].activation_func(pnet->layers[layer + 1].t_values->values[i]);
+			cur->t_values->values[i] = cur->activation_func(cur->t_values->values[i]);
 		}
 	}
 
@@ -739,14 +741,14 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 	if (!pnet)
 		return;
 
-	// Loop over non-output layers (weights connect layer i to layer i+1)
+	// Loop over non-input layers (each owns the weights from the layer below)
 	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
 	{
 		PTensor X = pnet->layers[layer].t_batch_values;      // [batch × in_nodes]
-		PTensor W = pnet->layers[layer].t_weights;           // [out_nodes × in_nodes]
+		PTensor W = pnet->layers[layer + 1].t_weights;       // [out_nodes × in_nodes]
 		PTensor Y = pnet->layers[layer + 1].t_batch_values;  // [batch × out_nodes]
 		PTensor Z = pnet->layers[layer + 1].t_batch_z;       // [batch × out_nodes]
-		PTensor bias = pnet->layers[layer].t_bias;           // [out_nodes × 1]
+		PTensor bias = pnet->layers[layer + 1].t_bias;       // [out_nodes × 1]
 		int out_nodes = pnet->layers[layer + 1].node_count;
 
 		// Y = X * W^T (gemm with B transposed)
@@ -1006,15 +1008,15 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 	// Gradient: dW += delta^T * A_prev
 	// delta is [batch × out], A_prev is [batch × in]
 	// delta^T is [out × batch], result is [out × in]
-	tensor_gemm_transA((real)1.0, delta, A_prev, (real)1.0, prev_layer->t_gradients);
+	tensor_gemm_transA((real)1.0, delta, A_prev, (real)1.0, layer->t_gradients);
 	
 	// Bias gradient: sum of delta columns
-	accumulate_bias_gradient(prev_layer->t_bias_grad, delta, batch_size, out_nodes);
+	accumulate_bias_gradient(layer->t_bias_grad, delta, batch_size, out_nodes);
 	
 	// Propagate to previous layer: dl_dz_prev = delta * W
 	// delta is [batch × out], W is [out × in]
 	// Result is [batch × in]
-	tensor_gemm((real)1.0, delta, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+	tensor_gemm((real)1.0, delta, layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
 	
 	return total_loss;
 }
@@ -1077,15 +1079,15 @@ static void back_propagate_sigmoid_batched(PNetwork pnet, int batch_size, int la
 	}
 	
 	// Gradient: dW += dl_dz^T * A_prev
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, layer->t_gradients);
 	
 	// Bias gradient: sum of dl_dz columns
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
+	accumulate_bias_gradient(layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	// Propagate: dl_dz_prev = dl_dz * W
 	if (layer_idx > 1)  // Don't propagate to input layer
 	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+		tensor_gemm((real)1.0, dl_dz, layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
 	}
 }
 
@@ -1118,15 +1120,15 @@ static void back_propagate_relu_batched(PNetwork pnet, int batch_size, int layer
 	}
 	
 	// Gradient: dW += dl_dz^T * A_prev
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, layer->t_gradients);
 	
 	// Bias gradient
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
+	accumulate_bias_gradient(layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	// Propagate
 	if (layer_idx > 1)
 	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+		tensor_gemm((real)1.0, dl_dz, layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
 	}
 }
 
@@ -1158,13 +1160,13 @@ static void back_propagate_leaky_relu_batched(PNetwork pnet, int batch_size, int
 		}
 	}
 	
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, layer->t_gradients);
 	
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
+	accumulate_bias_gradient(layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	if (layer_idx > 1)
 	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+		tensor_gemm((real)1.0, dl_dz, layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
 	}
 }
 
@@ -1197,13 +1199,13 @@ static void back_propagate_tanh_batched(PNetwork pnet, int batch_size, int layer
 		}
 	}
 	
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, layer->t_gradients);
 	
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
+	accumulate_bias_gradient(layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	if (layer_idx > 1)
 	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+		tensor_gemm((real)1.0, dl_dz, layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
 	}
 }
 
@@ -1237,13 +1239,13 @@ static void back_propagate_softsign_batched(PNetwork pnet, int batch_size, int l
 		}
 	}
 	
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, layer->t_gradients);
 	
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
+	accumulate_bias_gradient(layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	if (layer_idx > 1)
 	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+		tensor_gemm((real)1.0, dl_dz, layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
 	}
 }
 
@@ -1269,13 +1271,13 @@ static void back_propagate_gelu_batched(PNetwork pnet, int batch_size, int layer
 	for (int i = 0; i < total; i++)
 		dl_dz->values[i] *= gelu_derivative(Z->values[i]);
 	
-	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, prev_layer->t_gradients);
+	tensor_gemm_transA((real)1.0, dl_dz, A_prev, (real)1.0, layer->t_gradients);
 	
-	accumulate_bias_gradient(prev_layer->t_bias_grad, dl_dz, batch_size, nodes);
+	accumulate_bias_gradient(layer->t_bias_grad, dl_dz, batch_size, nodes);
 	
 	if (layer_idx > 1)
 	{
-		tensor_gemm((real)1.0, dl_dz, prev_layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
+		tensor_gemm((real)1.0, dl_dz, layer->t_weights, (real)0.0, prev_layer->t_batch_dl_dz);
 	}
 }
 
@@ -1409,7 +1411,7 @@ static void clip_gradients(PNetwork pnet)
 	if (pnet->max_gradient <= (real)0.0)
 		return;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		tensor_clip(pnet->layers[layer].t_gradients, -pnet->max_gradient, pnet->max_gradient);
 		tensor_clip(pnet->layers[layer].t_bias_grad, -pnet->max_gradient, pnet->max_gradient);
@@ -1431,7 +1433,7 @@ static void apply_regularization(PNetwork pnet)
 	if (l2 <= (real)0.0 && l1 <= (real)0.0)
 		return;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PTensor W = pnet->layers[layer].t_weights;
 		int size = W->rows * W->cols;
@@ -1472,7 +1474,7 @@ static void optimize_sgd(PNetwork pnet)
 {
 	clip_gradients(pnet);
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		// W = W + n * gradients
 		tensor_axpy(pnet->learning_rate, pnet->layers[layer].t_gradients, pnet->layers[layer].t_weights);
@@ -1500,7 +1502,7 @@ static void optimize_momentum(PNetwork pnet)
 
 	real beta = (real)0.9, one_minus_beta = (real)0.1;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		// momentum = beta * m + one_minus_beta * gradients
 		tensor_axpby(one_minus_beta, pnet->layers[layer].t_gradients, beta, pnet->layers[layer].t_m);
@@ -1531,7 +1533,7 @@ static void optimize_adagrad(PNetwork pnet)
 
 	real epsilon = (real)1e-8;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PTensor g = pnet->layers[layer].t_gradients;
 		PTensor v = pnet->layers[layer].t_v;
@@ -1579,7 +1581,7 @@ static void optimize_rmsprop(PNetwork pnet)
 	real one_minus_beta = (real)0.1;
 	real epsilon = (real)1e-8;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PTensor g = pnet->layers[layer].t_gradients;
 		PTensor v = pnet->layers[layer].t_v;
@@ -1633,7 +1635,7 @@ static void optimize_adam(PNetwork pnet)
 	real bias_correction1 = (real)1.0 / ((real)1.0 - (real)pow(beta1, pnet->train_iteration));
 	real bias_correction2 = (real)1.0 / ((real)1.0 - (real)pow(beta2, pnet->train_iteration));
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PTensor g = pnet->layers[layer].t_gradients;
 		PTensor m = pnet->layers[layer].t_m;
@@ -1690,6 +1692,50 @@ static void optimize_adam(PNetwork pnet)
 	apply_regularization(pnet);
 }
 
+//------------------------------
+// free a layer's parameters, gradients and optimizer state
+//------------------------------
+static void free_layer_params(PLayer layer)
+{
+	PTensor *params[] = {
+		&layer->t_weights, &layer->t_gradients, &layer->t_m, &layer->t_v,
+		&layer->t_bias, &layer->t_bias_grad, &layer->t_bias_m, &layer->t_bias_v
+	};
+
+	for (size_t i = 0; i < sizeof(params) / sizeof(params[0]); i++)
+	{
+		tensor_free(*params[i]);
+		*params[i] = NULL;
+	}
+}
+
+//------------------------------
+// allocate a dense layer's weights [nodes x in_nodes], bias [1 x nodes],
+// their gradients and optimizer state; frees everything on failure
+//------------------------------
+static int alloc_dense_params(PLayer layer, int in_nodes)
+{
+	int nodes = layer->node_count;
+
+	layer->t_weights	= tensor_zeros(nodes, in_nodes);
+	layer->t_gradients	= tensor_zeros(nodes, in_nodes);
+	layer->t_m			= tensor_zeros(nodes, in_nodes);
+	layer->t_v			= tensor_zeros(nodes, in_nodes);
+	layer->t_bias		= tensor_zeros(1, nodes);
+	layer->t_bias_grad	= tensor_zeros(1, nodes);
+	layer->t_bias_m		= tensor_zeros(1, nodes);
+	layer->t_bias_v		= tensor_zeros(1, nodes);
+
+	if (!layer->t_weights || !layer->t_gradients || !layer->t_m || !layer->t_v ||
+		!layer->t_bias || !layer->t_bias_grad || !layer->t_bias_m || !layer->t_bias_v)
+	{
+		free_layer_params(layer);
+		return ERR_ALLOC;
+	}
+
+	return ERR_OK;
+}
+
 //[]---------------------------------------------[]
 //	Public ANN library interfaces
 //[]---------------------------------------------[]
@@ -1727,25 +1773,8 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 
 		pnet->layers = layer;
 		
-		// Initialize the newly allocated layers to NULL
-		for (int i = old_size; i < pnet->layer_size; i++)
-		{
-			pnet->layers[i].t_m 		= NULL;
-			pnet->layers[i].t_v 		= NULL;
-			pnet->layers[i].t_values 	= NULL;
-			pnet->layers[i].t_weights 	= NULL;
-			pnet->layers[i].t_gradients = NULL;
-			pnet->layers[i].t_dl_dz		= NULL;
-			pnet->layers[i].t_bias		= NULL;
-			pnet->layers[i].t_bias_grad	= NULL;
-			pnet->layers[i].t_bias_m	= NULL;
-			pnet->layers[i].t_bias_v	= NULL;
-			pnet->layers[i].t_batch_values	= NULL;
-			pnet->layers[i].t_batch_dl_dz	= NULL;
-			pnet->layers[i].t_batch_z		= NULL;
-			pnet->layers[i].dropout_rate	= (real)0.0;
-			pnet->layers[i].t_dropout_mask	= NULL;
-		}
+		// Initialize the newly allocated layers: every tensor NULL, dropout off
+		memset(&pnet->layers[old_size], 0, (pnet->layer_size - old_size) * sizeof(Layer));
 	}
 
 	int cur_layer = pnet->layer_count - 1;
@@ -1788,6 +1817,7 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		break;
 
 	default:
+		pnet->layer_count--;
 		invoke_error_callback(ERR_INVALID, "ann_add_layer");
 		return ERR_INVALID;
 	}
@@ -1806,137 +1836,14 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	}
 	pnet->layers[cur_layer].node_count	= node_count;
 
-	// create the tensors
-	if (cur_layer > 0)
+	// create the parameters that produce this layer from the one below
+	if (cur_layer > 0 && alloc_dense_params(&pnet->layers[cur_layer], pnet->layers[cur_layer - 1].node_count) != ERR_OK)
 	{
-		// weights should not already be allocated
-		if (pnet->layers[cur_layer - 1].t_weights != NULL)
-		{
-			invoke_error_callback(ERR_INVALID, "ann_add_layer");
-			return ERR_INVALID;
-		}
-		pnet->layers[cur_layer - 1].t_weights	= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-		if (pnet->layers[cur_layer - 1].t_weights == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		pnet->layers[cur_layer - 1].t_v			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-		if (pnet->layers[cur_layer - 1].t_v == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		pnet->layers[cur_layer - 1].t_m			= tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-		if (pnet->layers[cur_layer - 1].t_m == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_v = NULL;
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		pnet->layers[cur_layer - 1].t_gradients = tensor_zeros(node_count, pnet->layers[cur_layer - 1].node_count);
-		if (pnet->layers[cur_layer - 1].t_gradients == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_m);
-			tensor_free(pnet->layers[cur_layer - 1].t_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_m = NULL;
-			pnet->layers[cur_layer - 1].t_v = NULL;
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		pnet->layers[cur_layer - 1].t_dl_dz		= tensor_zeros(1, pnet->layers[cur_layer - 1].node_count);
-		if (pnet->layers[cur_layer - 1].t_dl_dz == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_gradients);
-			tensor_free(pnet->layers[cur_layer - 1].t_m);
-			tensor_free(pnet->layers[cur_layer - 1].t_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_gradients = NULL;
-			pnet->layers[cur_layer - 1].t_m = NULL;
-			pnet->layers[cur_layer - 1].t_v = NULL;
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		pnet->layers[cur_layer - 1].t_bias		= tensor_zeros(1, node_count);
-		if (pnet->layers[cur_layer - 1].t_bias == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_dl_dz);
-			tensor_free(pnet->layers[cur_layer - 1].t_gradients);
-			tensor_free(pnet->layers[cur_layer - 1].t_m);
-			tensor_free(pnet->layers[cur_layer - 1].t_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_dl_dz = NULL;
-			pnet->layers[cur_layer - 1].t_gradients = NULL;
-			pnet->layers[cur_layer - 1].t_m = NULL;
-			pnet->layers[cur_layer - 1].t_v = NULL;
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
-
-		// Allocate bias accumulators for adaptive optimizers
-		pnet->layers[cur_layer - 1].t_bias_grad	= tensor_zeros(1, node_count);
-		pnet->layers[cur_layer - 1].t_bias_m	= tensor_zeros(1, node_count);
-		pnet->layers[cur_layer - 1].t_bias_v	= tensor_zeros(1, node_count);
-		if (pnet->layers[cur_layer - 1].t_bias_grad == NULL ||
-			pnet->layers[cur_layer - 1].t_bias_m == NULL ||
-			pnet->layers[cur_layer - 1].t_bias_v == NULL)
-		{
-			tensor_free(pnet->layers[cur_layer - 1].t_bias_grad);
-			tensor_free(pnet->layers[cur_layer - 1].t_bias_m);
-			tensor_free(pnet->layers[cur_layer - 1].t_bias_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_bias);
-			tensor_free(pnet->layers[cur_layer - 1].t_dl_dz);
-			tensor_free(pnet->layers[cur_layer - 1].t_gradients);
-			tensor_free(pnet->layers[cur_layer - 1].t_m);
-			tensor_free(pnet->layers[cur_layer - 1].t_v);
-			tensor_free(pnet->layers[cur_layer - 1].t_weights);
-			tensor_free(pnet->layers[cur_layer].t_values);
-			pnet->layers[cur_layer - 1].t_bias_grad = NULL;
-			pnet->layers[cur_layer - 1].t_bias_m = NULL;
-			pnet->layers[cur_layer - 1].t_bias_v = NULL;
-			pnet->layers[cur_layer - 1].t_bias = NULL;
-			pnet->layers[cur_layer - 1].t_dl_dz = NULL;
-			pnet->layers[cur_layer - 1].t_gradients = NULL;
-			pnet->layers[cur_layer - 1].t_m = NULL;
-			pnet->layers[cur_layer - 1].t_v = NULL;
-			pnet->layers[cur_layer - 1].t_weights = NULL;
-			pnet->layers[cur_layer].t_values = NULL;
-			pnet->layer_count--;
-			invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-			return ERR_ALLOC;
-		}
+		tensor_free(pnet->layers[cur_layer].t_values);
+		pnet->layers[cur_layer].t_values = NULL;
+		pnet->layer_count--;
+		invoke_error_callback(ERR_ALLOC, "ann_add_layer");
+		return ERR_ALLOC;
 	}
 
 	return ERR_OK;
@@ -1969,24 +1876,8 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->weight_limit	= R_MAX;
 	pnet->init_bias		= (real)1.0;
 
-	for (int i = 0; i < pnet->layer_size; i++)
-	{
-		pnet->layers[i].t_m 		= NULL;
-		pnet->layers[i].t_v 		= NULL;
-		pnet->layers[i].t_values 	= NULL;
-		pnet->layers[i].t_weights 	= NULL;
-		pnet->layers[i].t_gradients = NULL;
-		pnet->layers[i].t_dl_dz		= NULL;
-		pnet->layers[i].t_bias		= NULL;
-		pnet->layers[i].t_bias_grad	= NULL;
-		pnet->layers[i].t_bias_m	= NULL;
-		pnet->layers[i].t_bias_v	= NULL;
-		pnet->layers[i].t_batch_values	= NULL;
-		pnet->layers[i].t_batch_dl_dz	= NULL;
-		pnet->layers[i].t_batch_z		= NULL;
-		pnet->layers[i].dropout_rate	= (real)0.0;
-		pnet->layers[i].t_dropout_mask	= NULL;
-	}
+	// every tensor NULL, dropout off
+	memset(pnet->layers, 0, pnet->layer_size * sizeof(Layer));
 
 	for (int i = 0; i < DEFAULT_MSE_AVG; i++)
 	{
@@ -2089,7 +1980,7 @@ static size_t copy_parameters(PNetwork pnet, real *buf, int restore)
 {
 	size_t offset = 0;
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PTensor params[2];
 		params[0] = pnet->layers[layer].t_weights;
@@ -2245,7 +2136,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		for (int batch = 0; batch < batch_count; batch++)
 		{
 			// zero the gradients
-			for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+			for (int layer = 1; layer < pnet->layer_count; layer++)
 			{
 				tensor_fill(pnet->layers[layer].t_gradients, (real)0.0);
 				tensor_fill(pnet->layers[layer].t_bias_grad, (real)0.0);
@@ -2491,7 +2382,7 @@ real ann_train_step(PNetwork pnet, const real *inputs, const real *targets, int 
 	}
 
 	// Zero gradients
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		tensor_fill(pnet->layers[layer].t_gradients, (real)0.0);
 		tensor_fill(pnet->layers[layer].t_bias_grad, (real)0.0);
@@ -3030,18 +2921,7 @@ void ann_free_network(PNetwork pnet)
 		if (pnet->layers[layer].t_values)
 			tensor_free(pnet->layers[layer].t_values);
 
-		if (pnet->layers[layer].t_weights)
-		{
-			tensor_free(pnet->layers[layer].t_m);
-			tensor_free(pnet->layers[layer].t_v);
-			tensor_free(pnet->layers[layer].t_gradients);
-			tensor_free(pnet->layers[layer].t_weights);
-			tensor_free(pnet->layers[layer].t_dl_dz);
-			tensor_free(pnet->layers[layer].t_bias);
-			tensor_free(pnet->layers[layer].t_bias_grad);
-			tensor_free(pnet->layers[layer].t_bias_m);
-			tensor_free(pnet->layers[layer].t_bias_v);
-		}
+		free_layer_params(&pnet->layers[layer]);
 
 		// Free batch tensors
 		tensor_free(pnet->layers[layer].t_batch_values);
@@ -3300,7 +3180,7 @@ int ann_save_network_binary(const PNetwork pnet, const char *filename)
 	}
 
 	real w;
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		// save bias vector
 		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
@@ -3371,7 +3251,7 @@ PNetwork ann_load_network_binary(const char *filename)
 		ann_add_layer(pnet, node_count, layer_type, activation);
 	}
 
-	for (int layer = 0; layer < layer_count - 1; layer++)
+	for (int layer = 1; layer < layer_count; layer++)
 	{
 		// read bias vector
 		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
@@ -3441,7 +3321,7 @@ int ann_save_network(const PNetwork pnet, const char *filename)
 		fprintf(fptr, "%d\n", pnet->layers[layer].activation);
 	}
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		// save bias vector
 		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
@@ -3506,7 +3386,7 @@ PNetwork ann_load_network(const char *filename)
 		ann_add_layer(pnet, node_count, layer_type, activation);
 	}
 
-	for (int layer = 0; layer < layer_count - 1; layer++)
+	for (int layer = 1; layer < layer_count; layer++)
 	{
 		// read bias vector
 		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
@@ -3656,7 +3536,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
 	{
 		PLayer pL = &pnet->layers[layer];
-		int next_nodes = pnet->layers[layer + 1].node_count;
+		PLayer next = &pnet->layers[layer + 1];	// owns the weights from pL to next
+		int next_nodes = next->node_count;
 		int curr_nodes = pL->node_count;
 
 		// Weights: shape is [curr_nodes, next_nodes] stored row-major
@@ -3672,7 +3553,7 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 		write_json_int_array(fptr, w_dims, 2);
 		fprintf(fptr, ",\n");
 		fprintf(fptr, "        \"float_data\": ");
-		write_json_float_array(fptr, pL->t_weights->values, curr_nodes * next_nodes);
+		write_json_float_array(fptr, next->t_weights->values, curr_nodes * next_nodes);
 		fprintf(fptr, "\n");
 		fprintf(fptr, "      }");
 
@@ -3686,7 +3567,7 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 		write_json_int_array(fptr, b_dims, 1);
 		fprintf(fptr, ",\n");
 		fprintf(fptr, "        \"float_data\": ");
-		write_json_float_array(fptr, pL->t_bias->values, next_nodes);
+		write_json_float_array(fptr, next->t_bias->values, next_nodes);
 		fprintf(fptr, "\n");
 		fprintf(fptr, "      }");
 	}
@@ -4024,7 +3905,7 @@ PNetwork ann_import_onnx(const char *filename)
 				JsonValue *float_data = json_get(init, "float_data");
 				if (float_data && float_data->type == JSON_ARRAY)
 				{
-					PTensor weights = pnet->layers[layer].t_weights;
+					PTensor weights = pnet->layers[layer + 1].t_weights;	// weight_N produces layer N+1
 					size_t count = json_array_length(float_data);
 					for (size_t j = 0; j < count && j < (size_t)(weights->rows * weights->cols); j++)
 					{
@@ -4039,7 +3920,7 @@ PNetwork ann_import_onnx(const char *filename)
 				JsonValue *float_data = json_get(init, "float_data");
 				if (float_data && float_data->type == JSON_ARRAY)
 				{
-					PTensor bias = pnet->layers[layer].t_bias;
+					PTensor bias = pnet->layers[layer + 1].t_bias;
 					size_t count = json_array_length(float_data);
 					for (size_t j = 0; j < count && j < (size_t)bias->cols; j++)
 					{

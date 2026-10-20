@@ -563,18 +563,17 @@ static int metal_forward_pass(PNetwork pnet,
 
     for (int layer = 0; layer < layer_count - 1; layer++)
     {
-        PLayer src = &pnet->layers[layer];
-        PLayer dst = &pnet->layers[layer + 1];
+        PLayer dst = &pnet->layers[layer + 1];   // owns the weights from layer to layer + 1
 
-        if (!src->t_weights || !src->t_weights->gpu_buf ||
-            !src->t_bias    || !src->t_bias->gpu_buf)
+        if (!dst->t_weights || !dst->t_weights->gpu_buf ||
+            !dst->t_bias    || !dst->t_bias->gpu_buf)
         {
             fprintf(stderr, "[Metal] Layer %d weights/biases not on GPU\n", layer);
             return 0;
         }
 
-        id<MTLBuffer> W_buf   = (__bridge id<MTLBuffer>)src->t_weights->gpu_buf;
-        id<MTLBuffer> b_buf   = (__bridge id<MTLBuffer>)src->t_bias->gpu_buf;
+        id<MTLBuffer> W_buf   = (__bridge id<MTLBuffer>)dst->t_weights->gpu_buf;
+        id<MTLBuffer> b_buf   = (__bridge id<MTLBuffer>)dst->t_bias->gpu_buf;
         int out_nodes = dst->node_count;
 
         // Allocate output buffer for this layer: [batch_size x out_nodes]
@@ -593,9 +592,9 @@ static int metal_forward_pass(PNetwork pnet,
                             dataType:MPSDataTypeFloat32];
 
         MPSMatrixDescriptor *W_desc = [MPSMatrixDescriptor
-            matrixDescriptorWithRows:(NSUInteger)src->t_weights->rows
-                             columns:(NSUInteger)src->t_weights->cols
-                            rowBytes:(NSUInteger)(src->t_weights->cols * sizeof(float))
+            matrixDescriptorWithRows:(NSUInteger)dst->t_weights->rows
+                             columns:(NSUInteger)dst->t_weights->cols
+                            rowBytes:(NSUInteger)(dst->t_weights->cols * sizeof(float))
                             dataType:MPSDataTypeFloat32];
 
         MPSMatrixDescriptor *Y_desc = [MPSMatrixDescriptor
@@ -671,7 +670,7 @@ static int metal_upload_network(PNetwork pnet)
     g_metal.training_buffers_ready = 0;
     g_metal.training_batch_size = 0;
 
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+    for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
 
@@ -686,7 +685,7 @@ static void metal_free_network(PNetwork pnet)
 {
     if (!pnet) return;
 
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+    for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
 
@@ -716,7 +715,7 @@ static int metal_eval_single(PNetwork pnet)
         return 0;
 
     // Check that weights are on GPU
-    if (!pnet->layers[0].t_weights || !pnet->layers[0].t_weights->gpu_buf)
+    if (pnet->layer_count < 2 || !pnet->layers[1].t_weights || !pnet->layers[1].t_weights->gpu_buf)
         return 0;   // not uploaded, use CPU path
 
     int input_nodes  = pnet->layers[0].node_count;
@@ -862,7 +861,7 @@ static int gpu_alloc_training_buffers(PNetwork pnet, int batch_size)
             if (!l->t_batch_dl_dz || !gpu_ensure_shared_buf(l->t_batch_dl_dz)) return 0;
         }
 
-        if (layer < pnet->layer_count - 1) {
+        if (layer > 0) {
             // Weight-carrying layers: gradients, optimizer state
             if (!l->t_gradients || !gpu_ensure_shared_buf(l->t_gradients)) return 0;
             if (!l->t_bias_grad  || !gpu_ensure_shared_buf(l->t_bias_grad))  return 0;
@@ -932,8 +931,8 @@ static int gpu_forward_training(PNetwork pnet, int batch_size)
         PLayer dst = &pnet->layers[layer + 1];
 
         id<MTLBuffer> X_buf = (__bridge id<MTLBuffer>)src->t_batch_values->gpu_buf;
-        id<MTLBuffer> W_buf = (__bridge id<MTLBuffer>)src->t_weights->gpu_buf;
-        id<MTLBuffer> b_buf = (__bridge id<MTLBuffer>)src->t_bias->gpu_buf;
+        id<MTLBuffer> W_buf = (__bridge id<MTLBuffer>)dst->t_weights->gpu_buf;
+        id<MTLBuffer> b_buf = (__bridge id<MTLBuffer>)dst->t_bias->gpu_buf;
         id<MTLBuffer> Y_buf = (__bridge id<MTLBuffer>)dst->t_batch_values->gpu_buf;
         id<MTLBuffer> Z_buf = (__bridge id<MTLBuffer>)dst->t_batch_z->gpu_buf;
 
@@ -947,9 +946,9 @@ static int gpu_forward_training(PNetwork pnet, int batch_size)
                             rowBytes:(NSUInteger)(in_nodes * sizeof(float))
                             dataType:MPSDataTypeFloat32];
         MPSMatrixDescriptor *W_desc = [MPSMatrixDescriptor
-            matrixDescriptorWithRows:(NSUInteger)src->t_weights->rows
-                             columns:(NSUInteger)src->t_weights->cols
-                            rowBytes:(NSUInteger)(src->t_weights->cols * sizeof(float))
+            matrixDescriptorWithRows:(NSUInteger)dst->t_weights->rows
+                             columns:(NSUInteger)dst->t_weights->cols
+                            rowBytes:(NSUInteger)(dst->t_weights->cols * sizeof(float))
                             dataType:MPSDataTypeFloat32];
         MPSMatrixDescriptor *Y_desc = [MPSMatrixDescriptor
             matrixDescriptorWithRows:(NSUInteger)batch_size
@@ -1036,9 +1035,9 @@ static int gpu_backward_pass(PNetwork pnet, int batch_size)
         id<MTLBuffer> A_buf      = (__bridge id<MTLBuffer>)layer->t_batch_values->gpu_buf;
         id<MTLBuffer> Z_buf      = (__bridge id<MTLBuffer>)layer->t_batch_z->gpu_buf;
         id<MTLBuffer> A_prev_buf = (__bridge id<MTLBuffer>)prev_layer->t_batch_values->gpu_buf;
-        id<MTLBuffer> W_buf      = (__bridge id<MTLBuffer>)prev_layer->t_weights->gpu_buf;
-        id<MTLBuffer> dW_buf     = (__bridge id<MTLBuffer>)prev_layer->t_gradients->gpu_buf;
-        id<MTLBuffer> db_buf     = (__bridge id<MTLBuffer>)prev_layer->t_bias_grad->gpu_buf;
+        id<MTLBuffer> W_buf      = (__bridge id<MTLBuffer>)layer->t_weights->gpu_buf;
+        id<MTLBuffer> dW_buf     = (__bridge id<MTLBuffer>)layer->t_gradients->gpu_buf;
+        id<MTLBuffer> db_buf     = (__bridge id<MTLBuffer>)layer->t_bias_grad->gpu_buf;
 
         NSUInteger elem_count = (NSUInteger)(batch_size * nodes);
 
@@ -1231,7 +1230,7 @@ static void gpu_optimizer_step(PNetwork pnet)
         bc2 = 1.0f / (1.0f - powf(beta2, t));
     }
 
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++) {
+    for (int layer = 1; layer < pnet->layer_count; layer++) {
         PLayer l = &pnet->layers[layer];
 
         id<MTLBuffer> W_buf  = (__bridge id<MTLBuffer>)l->t_weights->gpu_buf;
@@ -1462,7 +1461,7 @@ static void metal_sync_weights(PNetwork pnet)
 {
     if (!pnet || !g_metal.initialized) return;
 
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++) {
+    for (int layer = 1; layer < pnet->layer_count; layer++) {
         PLayer l = &pnet->layers[layer];
 
         if (l->t_weights && l->t_weights->gpu_buf) {
@@ -1508,7 +1507,7 @@ static void metal_sync_weights(PNetwork pnet)
 static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, real *loss_out)
 {
     if (!pnet || !g_metal.initialized) return 0;
-    if (!pnet->layers[0].t_weights || !pnet->layers[0].t_weights->gpu_buf) return 0;
+    if (pnet->layer_count < 2 || !pnet->layers[1].t_weights || !pnet->layers[1].t_weights->gpu_buf) return 0;
     if (!pnet->layers[0].t_batch_values) return 0;
 
     // Lazy-alloc training buffers on first call (or if batch size changed)
@@ -1532,7 +1531,7 @@ static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_siz
     }
 
     // --- Step 2: Zero gradient buffers (CPU memset on shared memory — no kernel needed) ---
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++) {
+    for (int layer = 1; layer < pnet->layer_count; layer++) {
         PLayer l = &pnet->layers[layer];
         if (l->t_gradients && l->t_gradients->gpu_buf) {
             id<MTLBuffer> buf = (__bridge id<MTLBuffer>)l->t_gradients->gpu_buf;

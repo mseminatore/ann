@@ -25,8 +25,8 @@ static int weights_match(const PNetwork a, const PNetwork b, real tol)
 
     for (int layer = 0; layer < a->layer_count - 1; layer++)
     {
-        PTensor wa = a->layers[layer].t_weights, wb = b->layers[layer].t_weights;
-        PTensor ba = a->layers[layer].t_bias,    bb = b->layers[layer].t_bias;
+        PTensor wa = a->layers[layer + 1].t_weights, wb = b->layers[layer + 1].t_weights;
+        PTensor ba = a->layers[layer + 1].t_bias,    bb = b->layers[layer + 1].t_bias;
 
         if (wa->rows != wb->rows || wa->cols != wb->cols || ba->cols != bb->cols)
             return 0;
@@ -179,7 +179,7 @@ void test_main(int argc, char* argv[])
         // He/Xavier init zeroes biases; make them distinct so bias loading is verified
         for (int layer = 0; layer < original->layer_count - 1; layer++)
         {
-            PTensor bias = original->layers[layer].t_bias;
+            PTensor bias = original->layers[layer + 1].t_bias;
             for (int i = 0; i < bias->cols; i++)
                 bias->values[i] = (real)(0.1 * (layer + 1) + 0.01 * (i + 1));
         }

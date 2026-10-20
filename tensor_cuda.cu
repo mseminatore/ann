@@ -151,7 +151,7 @@ static int cuda_upload_network(PNetwork pnet)
     if (!pnet || !g_cuda.initialized)
         return ERR_NULL_PTR;
 
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+    for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
         if (l->t_weights && !cuda_upload_tensor(l->t_weights)) return ERR_FAIL;
@@ -194,9 +194,6 @@ static void cuda_free_training_buffers(PNetwork pnet)
         {
             cuda_free_one(l->t_batch_z);
             cuda_free_one(l->t_batch_dl_dz);
-        }
-        if (layer < pnet->layer_count - 1)
-        {
             cuda_free_one(l->t_gradients);
             cuda_free_one(l->t_bias_grad);
             cuda_free_one(l->t_m);
@@ -220,7 +217,7 @@ static void cuda_free_network(PNetwork pnet)
     if (!pnet)
         return;
 
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+    for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
         cuda_free_one(l->t_weights);
@@ -242,7 +239,7 @@ static void cuda_sync_weights(PNetwork pnet)
     if (!pnet || !g_cuda.initialized)
         return;
 
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+    for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
         if (l->t_weights && l->t_weights->gpu_buf)
@@ -434,8 +431,8 @@ static int cuda_forward_infer(PNetwork pnet, const real *inputs, real *outputs, 
     {
         int in_nodes  = pnet->layers[layer].node_count;
         int out_nodes = pnet->layers[layer + 1].node_count;
-        const float *W = (const float *)pnet->layers[layer].t_weights->gpu_buf;
-        const float *b = (const float *)pnet->layers[layer].t_bias->gpu_buf;
+        const float *W = (const float *)pnet->layers[layer + 1].t_weights->gpu_buf;
+        const float *b = (const float *)pnet->layers[layer + 1].t_bias->gpu_buf;
 
         // Y = X * W^T
         if (!cuda_gemm_rowmajor(0, 1, batch, out_nodes, in_nodes, 1.0f, cur, W, 0.0f, nxt))
@@ -463,7 +460,7 @@ static int cuda_eval_single(PNetwork pnet)
 {
     if (!pnet || !g_cuda.initialized)
         return 0;
-    if (!pnet->layers[0].t_weights || !pnet->layers[0].t_weights->gpu_buf)
+    if (pnet->layer_count < 2 || !pnet->layers[1].t_weights || !pnet->layers[1].t_weights->gpu_buf)
         return 0;
 
     const real *in = pnet->layers[0].t_values->values;
@@ -477,7 +474,7 @@ static int cuda_eval_batch(const PNetwork pnet, const real *inputs, real *output
         return ERR_NULL_PTR;
     if (!g_cuda.initialized)
         return ERR_FAIL;
-    if (!pnet->layers[0].t_weights || !pnet->layers[0].t_weights->gpu_buf)
+    if (pnet->layer_count < 2 || !pnet->layers[1].t_weights || !pnet->layers[1].t_weights->gpu_buf)
         return ERR_FAIL;
 
     if (!cuda_forward_infer((PNetwork)pnet, inputs, outputs, batch_size))
@@ -534,7 +531,7 @@ static int cuda_alloc_training_buffers(PNetwork pnet, int batch_size)
             if (!l->t_batch_dl_dz || !cuda_ensure_buf(l->t_batch_dl_dz)) return 0;
         }
 
-        if (layer < pnet->layer_count - 1)
+        if (layer > 0)
         {
             if (!l->t_gradients || !cuda_ensure_buf(l->t_gradients)) return 0;
             if (!l->t_bias_grad || !cuda_ensure_buf(l->t_bias_grad)) return 0;
@@ -583,8 +580,8 @@ static int cuda_forward_train(PNetwork pnet, int batch)
         PLayer dst = &pnet->layers[layer + 1];
 
         const float *X = (const float *)src->t_batch_values->gpu_buf;
-        const float *W = (const float *)src->t_weights->gpu_buf;
-        const float *b = (const float *)src->t_bias->gpu_buf;
+        const float *W = (const float *)dst->t_weights->gpu_buf;
+        const float *b = (const float *)dst->t_bias->gpu_buf;
         float *Y = (float *)dst->t_batch_values->gpu_buf;
         float *Z = (float *)dst->t_batch_z->gpu_buf;
 
@@ -635,9 +632,9 @@ static int cuda_backward_pass(PNetwork pnet, int batch)
         float *A      = (float *)layer->t_batch_values->gpu_buf;
         float *Z      = (float *)layer->t_batch_z->gpu_buf;
         float *A_prev = (float *)prev_layer->t_batch_values->gpu_buf;
-        float *W      = (float *)prev_layer->t_weights->gpu_buf;
-        float *dW     = (float *)prev_layer->t_gradients->gpu_buf;
-        float *db     = (float *)prev_layer->t_bias_grad->gpu_buf;
+        float *W      = (float *)layer->t_weights->gpu_buf;
+        float *dW     = (float *)layer->t_gradients->gpu_buf;
+        float *db     = (float *)layer->t_bias_grad->gpu_buf;
 
         int n = batch * nodes;
 
@@ -695,7 +692,7 @@ static void cuda_optimizer_step(PNetwork pnet)
         bc2 = 1.0f / (1.0f - powf(beta2, t));
     }
 
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+    for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
 
@@ -789,7 +786,7 @@ static int cuda_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size
 {
     if (!pnet || !g_cuda.initialized)
         return 0;
-    if (!pnet->layers[0].t_weights || !pnet->layers[0].t_weights->gpu_buf)
+    if (pnet->layer_count < 2 || !pnet->layers[1].t_weights || !pnet->layers[1].t_weights->gpu_buf)
         return 0;
     if (!pnet->layers[0].t_batch_values)
         return 0;
@@ -817,7 +814,7 @@ static int cuda_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size
     }
 
     // --- Zero gradient buffers ---
-    for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+    for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
         if (l->t_gradients && l->t_gradients->gpu_buf)

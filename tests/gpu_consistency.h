@@ -42,7 +42,7 @@ static void gc_train(PNetwork net)
 
 // Compare what ann_predict()/ann_predict_batch() return now (GPU when the
 // library chooses it) with a CPU forward pass over the CPU weights. The CPU
-// pass is forced by hiding layer 0's GPU buffer, which is what dispatch checks.
+// pass is forced by hiding layer 1's weight buffer, which is what dispatch checks.
 static int gc_gpu_matches_cpu(PNetwork net)
 {
     real gpu[4], gpu_batch[4], cpu[4];
@@ -51,11 +51,11 @@ static int gc_gpu_matches_cpu(PNetwork net)
         ann_predict(net, &gc_xor_in[i * 2], &gpu[i]);
     ann_predict_batch(net, gc_xor_in, gpu_batch, 4);
 
-    void *saved = net->layers[0].t_weights->gpu_buf;
-    net->layers[0].t_weights->gpu_buf = NULL;
+    void *saved = net->layers[1].t_weights->gpu_buf;
+    net->layers[1].t_weights->gpu_buf = NULL;
     for (int i = 0; i < 4; i++)
         ann_predict(net, &gc_xor_in[i * 2], &cpu[i]);
-    net->layers[0].t_weights->gpu_buf = saved;
+    net->layers[1].t_weights->gpu_buf = saved;
 
     for (int i = 0; i < 4; i++) {
         real d1 = gpu[i] - cpu[i], d2 = gpu_batch[i] - cpu[i];
@@ -117,7 +117,7 @@ static int gc_tensors_close(PTensor a, PTensor b, real tol)
 static int gc_nets_close(PNetwork a, PNetwork b, real tol, int with_state)
 {
     for (int l = 0; l < a->layer_count - 1; l++) {
-        PLayer la = &a->layers[l], lb = &b->layers[l];
+        PLayer la = &a->layers[l + 1], lb = &b->layers[l + 1];
         if (!gc_tensors_close(la->t_weights, lb->t_weights, tol) ||
             !gc_tensors_close(la->t_bias, lb->t_bias, tol))
             return 0;
@@ -172,8 +172,8 @@ static void run_gpu_consistency_tests(void)
            gc_nets_close(cpu_net, gpu_net, 1e-3f, 0));
 
     int moments_nonzero = 0;
-    for (int i = 0; i < gpu_net->layers[0].t_m->rows * gpu_net->layers[0].t_m->cols; i++)
-        if (gpu_net->layers[0].t_m->values[i] != 0.0f) moments_nonzero = 1;
+    for (int i = 0; i < gpu_net->layers[1].t_m->rows * gpu_net->layers[1].t_m->cols; i++)
+        if (gpu_net->layers[1].t_m->values[i] != 0.0f) moments_nonzero = 1;
     TESTEX("Adam moments come back from the GPU after training", moments_nonzero);
     TESTEX("GPU Adam moments match CPU training", gc_nets_close(cpu_net, gpu_net, 1e-3f, 1));
     TESTEX("After GPU dropout training, the GPU copy matches the CPU weights",
@@ -260,19 +260,19 @@ static void run_gpu_consistency_tests(void)
     TESTEX("Mid-session predictions use the updated weights",
            gc_gpu_matches_cpu(net));
 
-    int n_w = net->layers[0].t_weights->rows * net->layers[0].t_weights->cols;
+    int n_w = net->layers[1].t_weights->rows * net->layers[1].t_weights->cols;
     real *before_sync = (real *)malloc((size_t)n_w * sizeof(real));
-    memcpy(before_sync, net->layers[0].t_weights->values, (size_t)n_w * sizeof(real));
+    memcpy(before_sync, net->layers[1].t_weights->values, (size_t)n_w * sizeof(real));
     ann_gpu_sync_weights(net);
     TESTEX("ann_gpu_sync_weights() does not overwrite newer CPU weights",
-           (memcmp(before_sync, net->layers[0].t_weights->values, (size_t)n_w * sizeof(real)) == 0));
+           (memcmp(before_sync, net->layers[1].t_weights->values, (size_t)n_w * sizeof(real)) == 0));
     free(before_sync);
 
     ann_train_end(net);
     TESTEX("After ann_train_end(), the GPU copy matches the CPU weights",
            gc_gpu_matches_cpu(net));
     TESTEX("After ann_train_end(), weights are still on the GPU",
-           (net->layers[0].t_weights->gpu_buf != NULL));
+           (net->layers[1].t_weights->gpu_buf != NULL));
     ann_free_network(net);
 }
 

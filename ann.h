@@ -193,12 +193,13 @@ struct Layer
 	PTensor t_dropout_mask;				// dropout mask tensor (for batched training)
 
 	PTensor t_values;					// tensor of node values for the layer
-	PTensor t_weights;					// tensor of weights for the layer
+
+	// Parameters that produce this layer from the layer below (NULL on the input layer)
+	PTensor t_weights;					// weights [node_count x previous layer's node_count]
 	PTensor t_v;						// tensor of velocities for optimizer
 	PTensor t_m;						// tensor of momentums for optimizer
 	PTensor t_gradients;				// tensor of gradients for back propagation
-	PTensor t_dl_dz;					// tensor of dL_dz
-	PTensor t_bias;						// bias vector
+	PTensor t_bias;						// bias vector [1 x node_count]
 	PTensor t_bias_grad;				// tensor of gradients for bias
 	PTensor t_bias_m;					// tensor of momentums for bias (Adam)
 	PTensor t_bias_v;					// tensor of velocities for bias (AdaGrad/RMSProp/Adam)

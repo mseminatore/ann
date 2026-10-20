@@ -17,6 +17,85 @@
 #define TEST_FILE_BIN "test_roundtrip.nnb"
 #define TEST_FILE_ONNX "test_roundtrip.onnx.json"
 
+// The 2-2 dense network the fixture files below describe:
+// weights [0.1 0.2; 0.3 0.4], bias [0.5 0.6], sigmoid output, Adam, MSE
+static const real fx_weights[] = {0.1f, 0.2f, 0.3f, 0.4f};
+static const real fx_bias[] = {0.5f, 0.6f};
+
+// Header and layer records, in file order, for format version 1 or 2
+static int fx_ints(int version, int *out)
+{
+    int n = 0;
+    out[n++] = version; out[n++] = OPT_ADAM; out[n++] = LOSS_MSE; out[n++] = 2;
+    if (version == 1) {
+        out[n++] = 2; out[n++] = LAYER_INPUT;  out[n++] = ACTIVATION_NULL;
+        out[n++] = 2; out[n++] = LAYER_OUTPUT; out[n++] = ACTIVATION_SIGMOID;
+    } else {
+        // kind layer_type activation c h w config_count
+        out[n++] = LAYER_KIND_DENSE; out[n++] = LAYER_INPUT;  out[n++] = ACTIVATION_NULL;
+        out[n++] = 2; out[n++] = 1; out[n++] = 1; out[n++] = 0;
+        out[n++] = LAYER_KIND_DENSE; out[n++] = LAYER_OUTPUT; out[n++] = ACTIVATION_SIGMOID;
+        out[n++] = 2; out[n++] = 1; out[n++] = 1; out[n++] = 0;
+    }
+    return n;
+}
+
+// Parameter values in file order: v1 stores the bias first, v2 follows params[] (W, b)
+static int fx_reals(int version, real *out)
+{
+    int n = 0;
+    if (version == 1)
+        for (int i = 0; i < 2; i++) out[n++] = fx_bias[i];
+    for (int i = 0; i < 4; i++) out[n++] = fx_weights[i];
+    if (version != 1)
+        for (int i = 0; i < 2; i++) out[n++] = fx_bias[i];
+    return n;
+}
+
+// Write a fixture model file; drop_last leaves the final value out (truncated file)
+static void fx_write(const char *path, int version, int binary, int drop_last)
+{
+    int ints[32];
+    real reals[8];
+    int ni = fx_ints(version, ints), nr = fx_reals(version, reals) - (drop_last ? 1 : 0);
+    FILE *f = fopen(path, binary ? "wb" : "wt");
+    if (!f) return;
+    for (int i = 0; i < ni; i++) {
+        if (binary) fwrite(&ints[i], sizeof(int), 1, f);
+        else fprintf(f, "%d\n", ints[i]);
+    }
+    for (int i = 0; i < nr; i++) {
+        if (binary) fwrite(&reals[i], sizeof(real), 1, f);
+        else fprintf(f, "%f\n", reals[i]);
+    }
+    fclose(f);
+}
+
+// 1 if the network matches the fixture
+static int fx_matches(PNetwork net)
+{
+    if (!net || net->layer_count != 2 || ann_get_layer_kind(net, 1) != LAYER_KIND_DENSE ||
+        net->layers[1].shape.c != 2 || net->layers[1].shape.h != 1 || net->layers[1].shape.w != 1 ||
+        net->layers[1].activation != ACTIVATION_SIGMOID)
+        return 0;
+    for (int i = 0; i < 4; i++)
+        if (fabs(net->layers[1].t_weights->values[i] - fx_weights[i]) > 1e-6) return 0;
+    for (int i = 0; i < 2; i++)
+        if (fabs(net->layers[1].t_bias->values[i] - fx_bias[i]) > 1e-6) return 0;
+    return 1;
+}
+
+static PNetwork fx_load(const char *path, int binary)
+{
+    return binary ? ann_load_network_binary(path) : ann_load_network(path);
+}
+
+static void quiet_print(const char *s) { (void)s; }
+
+// TESTEX needs a literal message; label it with the format under test
+#define FORMAT_TEST(msg, cond) \
+    if (binary) { TESTEX(msg " (binary)", (cond)); } else { TESTEX(msg " (text)", (cond)); }
+
 // returns 1 if all weights and biases of a and b match within tol
 static int weights_match(const PNetwork a, const PNetwork b, real tol)
 {
@@ -196,6 +275,74 @@ void test_main(int argc, char* argv[])
         remove(TEST_FILE_TXT);
         remove(TEST_FILE_BIN);
         remove(TEST_FILE_ONNX);
+    }
+
+    SUITE("Format Versions");
+    {
+        const char *paths[2] = {"test_fixture.nna", "test_fixture.nnb"};
+
+        for (int binary = 0; binary < 2; binary++) {
+            const char *path = paths[binary];
+            PNetwork net;
+
+            // v1 files written by earlier libann versions still load
+            fx_write(path, 1, binary, 0);
+            net = fx_load(path, binary);
+            FORMAT_TEST("v1 file loads with the right weights", fx_matches(net));
+            ann_free_network(net);
+
+            // v2 records each layer's kind and shape
+            fx_write(path, 2, binary, 0);
+            net = fx_load(path, binary);
+            FORMAT_TEST("v2 file loads with the right weights", fx_matches(net));
+
+            // An all-dense network is saved as v1 so older versions can read it
+            if (net) {
+                net->print_func = quiet_print;
+                if (binary) ann_save_network_binary(net, path);
+                else ann_save_network(net, path);
+            }
+            int version = 0;
+            FILE *f = fopen(path, binary ? "rb" : "rt");
+            if (f) {
+                if (binary) { if (fread(&version, sizeof(int), 1, f) != 1) version = 0; }
+                else if (fscanf(f, "%d", &version) != 1) version = 0;
+                fclose(f);
+            }
+            FORMAT_TEST("All-dense network saves as v1", version == 1);
+            ann_free_network(net);
+
+            // Truncated and unknown-version files are rejected
+            fx_write(path, 1, binary, 1);
+            net = fx_load(path, binary);
+            FORMAT_TEST("Truncated v1 file returns NULL", net == NULL);
+            ann_free_network(net);
+
+            fx_write(path, 2, binary, 1);
+            net = fx_load(path, binary);
+            FORMAT_TEST("Truncated v2 file returns NULL", net == NULL);
+            ann_free_network(net);
+
+            remove(path);
+        }
+
+        // Unknown version and unknown layer kind
+        FILE *f = fopen("test_fixture.nna", "wt");
+        if (f) { fprintf(f, "3\n4\n0\n2\n"); fclose(f); }
+        TESTEX("Unknown file version returns NULL", ann_load_network("test_fixture.nna") == NULL);
+
+        int ints[32];
+        real reals[8];
+        int ni = fx_ints(2, ints), nr = fx_reals(2, reals);
+        ints[4 + 7] = 99;   // second layer's kind
+        f = fopen("test_fixture.nna", "wt");
+        if (f) {
+            for (int i = 0; i < ni; i++) fprintf(f, "%d\n", ints[i]);
+            for (int i = 0; i < nr; i++) fprintf(f, "%f\n", reals[i]);
+            fclose(f);
+        }
+        TESTEX("Unknown layer kind returns NULL", ann_load_network("test_fixture.nna") == NULL);
+        remove("test_fixture.nna");
     }
 
     SUITE("Error Handling");

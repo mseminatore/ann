@@ -60,10 +60,20 @@ ANN_API int ann_gpu_init(void)
     return 0;
 }
 
+static int network_is_dense(const PNetwork pnet);
+static void invoke_error_callback(int error_code, const char *function_name);
+
 ANN_API int ann_gpu_upload_network(PNetwork pnet)
 {
     if (!g_gpu_backend)
         return ERR_FAIL;
+
+    // The GPU backends implement dense layers only; other networks stay on the CPU
+    if (!pnet || !network_is_dense(pnet))
+    {
+        invoke_error_callback(pnet ? ERR_INVALID : ERR_NULL_PTR, "ann_gpu_upload_network");
+        return pnet ? ERR_INVALID : ERR_NULL_PTR;
+    }
 
     int err = g_gpu_backend->upload_network(pnet);
     if (err == ERR_OK)
@@ -185,8 +195,9 @@ static ErrorLogCallback g_error_log_callback = NULL;
 //------------------------------------------------
 // define the text and binary file format versions
 //------------------------------------------------
-static const int ANN_TEXT_FORMAT_VERSION = 1;
-static const int ANN_BINARY_FORMAT_VERSION = 1;
+// model file format versions (see save_network)
+static const int ANN_FORMAT_V1 = 1;
+static const int ANN_FORMAT_V2 = 2;
 
 #if defined(_WIN32) && !defined(_WIN64)
 #	define R_MIN -1
@@ -593,6 +604,7 @@ static void dense_backward(PLayer layer, const PTensor X, const PTensor dZ, PTen
 //------------------------------
 typedef struct {
 	const char *name;
+	int config_count;		// how many config[] entries the kind uses (saved in v2 files)
 	// allocate and register params[]; shape and node_count are already set
 	int  (*setup)(PNetwork pnet, int layer);
 	void (*init_weights)(PNetwork pnet, int layer, Weight_init_type init_type);
@@ -602,11 +614,22 @@ typedef struct {
 	void (*forward_single)(PLayer layer, const PTensor x, PTensor y);
 	// accumulate parameter gradients from dZ; write dX unless it is NULL
 	void (*backward)(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows);
+	// ONNX export: the layer's initializers, then its nodes from input to output
+	// (the activation node is added by the caller); *first tracks JSON commas
+	void (*onnx_initializers)(FILE *fptr, const PNetwork pnet, int layer, int *first);
+	void (*onnx_nodes)(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+	                   char *output, size_t output_size, int *first);
 } Layer_ops;
+
+// ONNX hooks live with the rest of the ONNX export code
+static void dense_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
+static void dense_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                             char *output, size_t output_size, int *first);
 
 // indexed by Layer_kind
 static const Layer_ops g_layer_ops[] = {
-	{ "Dense", dense_setup, dense_init_weights, dense_forward, dense_forward_single, dense_backward },
+	{ "Dense", 0, dense_setup, dense_init_weights, dense_forward, dense_forward_single, dense_backward,
+	  dense_onnx_initializers, dense_onnx_nodes },
 };
 
 static const Layer_ops *layer_ops(const Layer *layer)
@@ -1569,16 +1592,21 @@ static void optimize_adam(PNetwork pnet)
 //[]---------------------------------------------[]
 
 //------------------------------
-// add a new layer to the network
+// add a layer of any kind with the given output shape and kind settings
+// (config may be NULL when config_count is 0)
 //------------------------------
-int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type)
+static int add_layer(PNetwork pnet, Layer_kind kind, Layer_shape shape, const int *config, int config_count,
+                     Layer_type layer_type, Activation_type activation_type)
 {
 	if (!pnet) {
 		invoke_error_callback(ERR_NULL_PTR, "ann_add_layer");
 		return ERR_NULL_PTR;
 	}
 
-	if (node_count <= 0) {
+	int node_count = shape.c * shape.h * shape.w;
+	if (shape.c <= 0 || shape.h <= 0 || shape.w <= 0 ||
+		(int)kind < 0 || (size_t)kind >= sizeof(g_layer_ops) / sizeof(g_layer_ops[0]) ||
+		config_count < 0 || config_count > ANN_LAYER_CONFIG_MAX) {
 		invoke_error_callback(ERR_INVALID, "ann_add_layer");
 		return ERR_INVALID;
 	}
@@ -1663,10 +1691,10 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 		return ERR_ALLOC;
 	}
 	pnet->layers[cur_layer].node_count	= node_count;
-	pnet->layers[cur_layer].kind		= LAYER_KIND_DENSE;
-	pnet->layers[cur_layer].shape.c		= node_count;
-	pnet->layers[cur_layer].shape.h		= 1;
-	pnet->layers[cur_layer].shape.w		= 1;
+	pnet->layers[cur_layer].kind		= kind;
+	pnet->layers[cur_layer].shape		= shape;
+	for (int i = 0; i < config_count; i++)
+		pnet->layers[cur_layer].config[i] = config[i];
 
 	// create the parameters that produce this layer from the one below
 	if (cur_layer > 0 && layer_ops(&pnet->layers[cur_layer])->setup(pnet, cur_layer) != ERR_OK)
@@ -1679,6 +1707,18 @@ int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activati
 	}
 
 	return ERR_OK;
+}
+
+//------------------------------
+// add a new dense layer to the network
+//------------------------------
+int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type)
+{
+	Layer_shape shape;
+	shape.c = node_count;
+	shape.h = 1;
+	shape.w = 1;
+	return add_layer(pnet, LAYER_KIND_DENSE, shape, NULL, 0, layer_type, activation_type);
 }
 
 //------------------------------
@@ -2727,6 +2767,17 @@ Activation_type ann_get_layer_activation(const PNetwork pnet, int layer)
 }
 
 //------------------------------
+// get what a layer computes
+//------------------------------
+Layer_kind ann_get_layer_kind(const PNetwork pnet, int layer)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return LAYER_KIND_DENSE;
+
+	return pnet->layers[layer].kind;
+}
+
+//------------------------------
 // set the loss function
 //------------------------------
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
@@ -2963,75 +3014,273 @@ int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, in
 	return ERR_OK;
 }
 
-//-----------------------------------
-// save network to a binary file
-//-----------------------------------
-int ann_save_network_binary(const PNetwork pnet, const char *filename)
+//================================================================================================
+// Model files (.nna text, .nnb binary). Both hold the same values: text writes one per line,
+// binary writes raw ints and reals.
+//
+// v1, written when every layer is dense so older libann versions can read it:
+//   version optimizer loss layer_count
+//   per layer:            node_count layer_type activation
+//   per layer 1..n-1:     bias values, then weight values
+// v2, written when any layer is another kind:
+//   version optimizer loss layer_count
+//   per layer:            kind layer_type activation c h w config_count config...
+//   per layer 1..n-1:     each params[] tensor's values, in order
+//================================================================================================
+
+//------------------------------
+// value I/O shared by the text and binary formats; each returns 1 on success
+//------------------------------
+static int write_int(FILE *fptr, int binary, int value)
+{
+	if (binary)
+		return fwrite(&value, sizeof(value), 1, fptr) == 1;
+	return fprintf(fptr, "%d\n", value) > 0;
+}
+
+static int write_real(FILE *fptr, int binary, real value)
+{
+	if (binary)
+		return fwrite(&value, sizeof(value), 1, fptr) == 1;
+	return fprintf(fptr, "%f\n", value) > 0;
+}
+
+static int write_values(FILE *fptr, int binary, const PTensor t)
+{
+	int count = t->rows * t->cols;
+	for (int i = 0; i < count; i++)
+	{
+		if (!write_real(fptr, binary, t->values[i]))
+			return 0;
+	}
+	return 1;
+}
+
+static int read_int(FILE *fptr, int binary, int *value)
+{
+	if (binary)
+		return fread(value, sizeof(*value), 1, fptr) == 1;
+	return fscanf(fptr, "%d", value) == 1;
+}
+
+static int read_values(FILE *fptr, int binary, PTensor t)
+{
+	int count = t->rows * t->cols;
+	for (int i = 0; i < count; i++)
+	{
+		int ok = binary ? fread(&t->values[i], sizeof(real), 1, fptr) == 1
+		                : fscanf(fptr, "%f", &t->values[i]) == 1;
+		if (!ok)
+			return 0;
+	}
+	return 1;
+}
+
+//------------------------------
+// 1 if every layer is dense (the network fits the v1 file format)
+//------------------------------
+static int network_is_dense(const PNetwork pnet)
+{
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		if (pnet->layers[layer].kind != LAYER_KIND_DENSE)
+			return 0;
+	}
+	return 1;
+}
+
+//------------------------------
+// save a network in the text or binary format
+//------------------------------
+static int save_network(const PNetwork pnet, const char *filename, int binary, const char *function_name)
 {
 	if (!pnet || !filename)
 	{
-		invoke_error_callback(ERR_NULL_PTR, "ann_save_network_binary");
+		invoke_error_callback(ERR_NULL_PTR, function_name);
 		return ERR_NULL_PTR;
 	}
 
-	FILE *fptr = fopen(filename, "wb");
+	FILE *fptr = fopen(filename, binary ? "wb" : "wt");
 	if (!fptr)
 	{
-		invoke_error_callback(ERR_IO, "ann_save_network_binary");
+		invoke_error_callback(ERR_IO, function_name);
 		return ERR_IO;
 	}
 
-	// write binary version
-	fwrite (&ANN_BINARY_FORMAT_VERSION, sizeof(int), 1, fptr);
+	int v1 = network_is_dense(pnet);
 
-	// save out network
-	// save optimizer
-	fwrite(&pnet->optimizer, sizeof(int), 1, fptr);
+	// header
+	int ok = write_int(fptr, binary, v1 ? ANN_FORMAT_V1 : ANN_FORMAT_V2) &&
+	         write_int(fptr, binary, pnet->optimizer) &&
+	         write_int(fptr, binary, pnet->loss_type) &&
+	         write_int(fptr, binary, pnet->layer_count);
 
-	// save loss
-	fwrite(&pnet->loss_type, sizeof(int), 1, fptr);
-
-	// save network props
-	fwrite(&pnet->layer_count, sizeof(int), 1, fptr);
-
-	// save layer details
-	int val;
-	for (int layer = 0; layer < pnet->layer_count; layer++)
+	// layer details
+	for (int layer = 0; ok && layer < pnet->layer_count; layer++)
 	{
-		// node count
-		val = pnet->layers[layer].node_count;
-		fwrite(&val, sizeof(val), 1, fptr);
-
-		// layer type
-		val = pnet->layers[layer].layer_type;
-		fwrite(&val, sizeof(val), 1, fptr);
-
-		// activation type
-		val = pnet->layers[layer].activation;
-		fwrite(&val, sizeof(val), 1, fptr);
-	}
-
-	real w;
-	for (int layer = 1; layer < pnet->layer_count; layer++)
-	{
-		// save bias vector
-		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
+		PLayer cur = &pnet->layers[layer];
+		if (v1)
 		{
-			w = pnet->layers[layer].t_bias->values[element];
-			fwrite(&w, sizeof(w), 1, fptr);
+			ok = write_int(fptr, binary, cur->node_count) &&
+			     write_int(fptr, binary, cur->layer_type) &&
+			     write_int(fptr, binary, cur->activation);
+			continue;
 		}
 
-		// save node weights
-		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
-		for (int element = 0; element < limit; element++)
+		int config_count = layer_ops(cur)->config_count;
+		ok = write_int(fptr, binary, cur->kind) &&
+		     write_int(fptr, binary, cur->layer_type) &&
+		     write_int(fptr, binary, cur->activation) &&
+		     write_int(fptr, binary, cur->shape.c) &&
+		     write_int(fptr, binary, cur->shape.h) &&
+		     write_int(fptr, binary, cur->shape.w) &&
+		     write_int(fptr, binary, config_count);
+		for (int i = 0; ok && i < config_count; i++)
+			ok = write_int(fptr, binary, cur->config[i]);
+	}
+
+	// parameters
+	for (int layer = 1; ok && layer < pnet->layer_count; layer++)
+	{
+		PLayer cur = &pnet->layers[layer];
+		if (v1)
 		{
-			w = pnet->layers[layer].t_weights->values[element];
-			fwrite(&w, sizeof(w), 1, fptr);
+			ok = write_values(fptr, binary, cur->t_bias) && write_values(fptr, binary, cur->t_weights);
+			continue;
+		}
+
+		for (int p = 0; ok && p < cur->param_count; p++)
+			ok = write_values(fptr, binary, cur->params[p].value);
+	}
+
+	if (fclose(fptr) != 0)
+		ok = 0;
+
+	if (!ok)
+	{
+		invoke_error_callback(ERR_IO, function_name);
+		return ERR_IO;
+	}
+	return ERR_OK;
+}
+
+//------------------------------
+// load a network saved in the text or binary format (v1 or v2)
+//------------------------------
+static PNetwork load_network(const char *filename, int binary)
+{
+	if (!filename)
+		return NULL;
+
+	FILE *fptr = fopen(filename, binary ? "rb" : "rt");
+	if (!fptr)
+		return NULL;
+
+	PNetwork pnet = NULL;
+	int ver, optimizer, loss_type, layer_count;
+
+	if (!read_int(fptr, binary, &ver))
+		goto fail;
+
+	if (ver != ANN_FORMAT_V1 && ver != ANN_FORMAT_V2)
+	{
+		printf("Incompatible version, was %d, expected %d or %d\n", ver, ANN_FORMAT_V1, ANN_FORMAT_V2);
+		goto fail;
+	}
+
+	if (!read_int(fptr, binary, &optimizer) ||
+		!read_int(fptr, binary, &loss_type) ||
+		!read_int(fptr, binary, &layer_count) ||
+		layer_count < 1)
+		goto fail;
+
+	pnet = ann_make_network(optimizer, loss_type);
+	if (!pnet)
+		goto fail;
+
+	ann_printf(pnet, "%sloading network%s %s%s%s...", 
+		COLOR(ANSI_CYAN), RESET(),
+		COLOR(ANSI_WHITE), filename, RESET());
+
+	// create layers
+	for (int layer = 0; layer < layer_count; layer++)
+	{
+		int layer_type, activation;
+
+		if (ver == ANN_FORMAT_V1)
+		{
+			int node_count;
+			if (!read_int(fptr, binary, &node_count) ||
+				!read_int(fptr, binary, &layer_type) ||
+				!read_int(fptr, binary, &activation) ||
+				ann_add_layer(pnet, node_count, layer_type, activation) != ERR_OK)
+				goto fail;
+			continue;
+		}
+
+		int kind, config_count, config[ANN_LAYER_CONFIG_MAX];
+		Layer_shape shape;
+		if (!read_int(fptr, binary, &kind) ||
+			!read_int(fptr, binary, &layer_type) ||
+			!read_int(fptr, binary, &activation) ||
+			!read_int(fptr, binary, &shape.c) ||
+			!read_int(fptr, binary, &shape.h) ||
+			!read_int(fptr, binary, &shape.w) ||
+			!read_int(fptr, binary, &config_count) ||
+			config_count < 0 || config_count > ANN_LAYER_CONFIG_MAX)
+			goto fail;
+
+		for (int i = 0; i < config_count; i++)
+		{
+			if (!read_int(fptr, binary, &config[i]))
+				goto fail;
+		}
+
+		if (add_layer(pnet, kind, shape, config, config_count, layer_type, activation) != ERR_OK)
+			goto fail;
+	}
+
+	// read parameters
+	for (int layer = 1; layer < layer_count; layer++)
+	{
+		PLayer cur = &pnet->layers[layer];
+		if (ver == ANN_FORMAT_V1)
+		{
+			if (!read_values(fptr, binary, cur->t_bias) || !read_values(fptr, binary, cur->t_weights))
+				goto fail;
+			continue;
+		}
+
+		for (int p = 0; p < cur->param_count; p++)
+		{
+			if (!read_values(fptr, binary, cur->params[p].value))
+				goto fail;
 		}
 	}
+
+	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
 
 	fclose(fptr);
-	return ERR_OK;
+
+	// mark network weights as set
+	pnet->weights_set = 1;
+
+	return pnet;
+
+fail:
+	if (pnet)
+		ann_printf(pnet, "%sfailed.%s\n", COLOR(ANSI_RED), RESET());
+	fclose(fptr);
+	ann_free_network(pnet);
+	return NULL;
+}
+
+//------------------------------
+// save network to a binary file
+//------------------------------
+int ann_save_network_binary(const PNetwork pnet, const char *filename)
+{
+	return save_network(pnet, filename, 1, "ann_save_network_binary");
 }
 
 //------------------------------
@@ -3039,74 +3288,7 @@ int ann_save_network_binary(const PNetwork pnet, const char *filename)
 //------------------------------
 PNetwork ann_load_network_binary(const char *filename)
 {
-	if (!filename)
-		return NULL;
-
-	FILE *fptr = fopen(filename, "rb");
-	if (!fptr)
-		return NULL;
-
-	// load version
-	int ver;
-	CHECK_RESULT(fread(&ver, sizeof(ver), 1, fptr), 1, NULL);
-	if (ver != ANN_BINARY_FORMAT_VERSION)
-	{
-		printf("Incompatible version, was %d, expected %d\n", ver, ANN_TEXT_FORMAT_VERSION);
-		fclose(fptr);
-		return NULL;
-	}
-
-	// load network
-	int optimizer, loss_type, layer_count, node_count, layer_type, activation;
-	CHECK_RESULT(fread(&optimizer, sizeof(optimizer), 1, fptr), 1, NULL);
-	CHECK_RESULT(fread(&loss_type, sizeof(loss_type), 1, fptr), 1, NULL);
-	CHECK_RESULT(fread(&layer_count, sizeof(layer_count), 1, fptr), 1, NULL);
-
-	PNetwork pnet = ann_make_network(optimizer, loss_type);
-	if (!pnet)
-	{
-		fclose(fptr);
-		return NULL;
-	}
-
-	ann_printf(pnet, "%sloading network%s %s%s%s...", 
-		COLOR(ANSI_CYAN), RESET(),
-		COLOR(ANSI_WHITE), filename, RESET());
-
-	// create layers
-	for (int layer = 0; layer < layer_count; layer++)
-	{
-		CHECK_RESULT(fread(&node_count, sizeof(node_count), 1, fptr), 1, NULL);
-		CHECK_RESULT(fread(&layer_type, sizeof(layer_type), 1, fptr), 1, NULL);
-		CHECK_RESULT(fread(&activation, sizeof(activation), 1, fptr), 1, NULL);
-
-		ann_add_layer(pnet, node_count, layer_type, activation);
-	}
-
-	for (int layer = 1; layer < layer_count; layer++)
-	{
-		// read bias vector
-		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
-		{
-			CHECK_RESULT(fread(&pnet->layers[layer].t_bias->values[element], sizeof(real), 1, fptr), 1, NULL);
-		}
-
-		// read node weights
-		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
-		for (int element = 0; element < limit; element++)
-		{
-			CHECK_RESULT(fread(&pnet->layers[layer].t_weights->values[element], sizeof(real), 1, fptr), 1, NULL);
-		}
-	}
-
-	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
-
-	fclose(fptr);
-
-	// mark network weights as set
-	pnet->weights_set = 1;
-
-	return pnet;
+	return load_network(filename, 1);
 }
 
 //------------------------------
@@ -3114,63 +3296,7 @@ PNetwork ann_load_network_binary(const char *filename)
 //------------------------------
 int ann_save_network(const PNetwork pnet, const char *filename)
 {
-	if (!pnet || !filename)
-	{
-		invoke_error_callback(ERR_NULL_PTR, "ann_save_network");
-		return ERR_NULL_PTR;
-	}
-
-	FILE *fptr = fopen(filename, "wt");
-	if (!fptr)
-	{
-		invoke_error_callback(ERR_IO, "ann_save_network");
-		return ERR_IO;
-	}
-
-	// save out version
-	fprintf(fptr, "%d\n", ANN_TEXT_FORMAT_VERSION);
-
-	// save out network
-	// save optimizer
-	fprintf(fptr, "%d\n", pnet->optimizer);
-
-	// save loss
-	fprintf(fptr, "%d\n", pnet->loss_type);
-
-	// save network props
-	fprintf(fptr, "%d\n", pnet->layer_count);
-
-	// save layer details
-	for (int layer = 0; layer < pnet->layer_count; layer++)
-	{
-		// node count
-		fprintf(fptr, "%d\n", pnet->layers[layer].node_count);
-
-		// layer type
-		fprintf(fptr, "%d\n", pnet->layers[layer].layer_type);
-
-		// activation type
-		fprintf(fptr, "%d\n", pnet->layers[layer].activation);
-	}
-
-	for (int layer = 1; layer < pnet->layer_count; layer++)
-	{
-		// save bias vector
-		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
-		{
-			fprintf(fptr, "%f\n", pnet->layers[layer].t_bias->values[element]);
-		}
-
-		// save node weights
-		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
-		for (int element = 0; element < limit; element++)
-		{
-			fprintf(fptr, "%f\n", pnet->layers[layer].t_weights->values[element]);			
-		}
-	}
-
-	fclose(fptr);
-	return ERR_OK;
+	return save_network(pnet, filename, 0, "ann_save_network");
 }
 
 //--------------------------------
@@ -3178,70 +3304,7 @@ int ann_save_network(const PNetwork pnet, const char *filename)
 //--------------------------------
 PNetwork ann_load_network(const char *filename)
 {
-	FILE *fptr = fopen(filename, "rt");
-	if (!fptr)
-		return NULL;
-
-	int ver;
-	CHECK_RESULT(fscanf(fptr, "%d", &ver), 1, NULL);
-	if (ver != ANN_TEXT_FORMAT_VERSION)
-	{
-		printf("Incompatible version, was %d, expected %d\n", ver, ANN_TEXT_FORMAT_VERSION);
-		fclose(fptr);
-		return NULL;
-	}
-
-	// load network
-	int optimizer, loss_type, layer_count, node_count, layer_type, activation;
-	CHECK_RESULT(fscanf(fptr, "%d", &optimizer), 1, NULL);
-	CHECK_RESULT(fscanf(fptr, "%d", &loss_type), 1, NULL);
-	CHECK_RESULT(fscanf(fptr, "%d", &layer_count), 1, NULL);
-
-	PNetwork pnet = ann_make_network(optimizer, loss_type);
-	if (!pnet)
-	{
-		fclose(fptr);
-		return NULL;
-	}
-
-	ann_printf(pnet, "%sloading network%s %s%s%s...", 
-		COLOR(ANSI_CYAN), RESET(),
-		COLOR(ANSI_WHITE), filename, RESET());
-
-	// create layers
-	for (int layer = 0; layer < layer_count; layer++)
-	{
-		CHECK_RESULT(fscanf(fptr, "%d", &node_count), 1, NULL);
-		CHECK_RESULT(fscanf(fptr, "%d", &layer_type), 1, NULL);
-		CHECK_RESULT(fscanf(fptr, "%d", &activation), 1, NULL);
-
-		ann_add_layer(pnet, node_count, layer_type, activation);
-	}
-
-	for (int layer = 1; layer < layer_count; layer++)
-	{
-		// read bias vector
-		for (int element = 0; element < pnet->layers[layer].t_bias->cols; element++)
-		{
-			CHECK_RESULT(fscanf(fptr, "%f", &pnet->layers[layer].t_bias->values[element]), 1, NULL);
-		}
-
-		// read node weights
-		int limit = pnet->layers[layer].t_weights->cols * pnet->layers[layer].t_weights->rows;
-		for (int element = 0; element < limit; element++)
-		{
-			CHECK_RESULT(fscanf(fptr, "%f", &pnet->layers[layer].t_weights->values[element]), 1, NULL);
-		}
-	}
-
-	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
-
-	fclose(fptr);
-
-	// mark network weights as set
-	pnet->weights_set = 1;
-
-	return pnet;
+	return load_network(filename, 0);
 }
 
 //-----------------------------------------------
@@ -3322,6 +3385,82 @@ static void write_json_int_array(FILE *fptr, const int *values, int count)
 //-----------------------------------------------
 // Export network to ONNX JSON format
 //-----------------------------------------------
+// Dense ONNX initializers: weight_N [in_nodes, nodes] and bias_N [nodes],
+// where N = layer - 1
+//-----------------------------------------------
+static void dense_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first)
+{
+	PLayer cur = &pnet->layers[layer];
+	int index = layer - 1;
+	int next_nodes = cur->node_count;
+	int curr_nodes = pnet->layers[layer - 1].node_count;
+
+	// Weights: shape is [curr_nodes, next_nodes] stored row-major
+	// ONNX MatMul: input [batch, curr_nodes] @ weights [curr_nodes, next_nodes] -> [batch, next_nodes]
+	if (!*first) fprintf(fptr, ",\n");
+	*first = 0;
+
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"weight_%d\",\n", index);
+	fprintf(fptr, "        \"data_type\": 1,\n");  // 1 = FLOAT
+	int w_dims[] = {curr_nodes, next_nodes};
+	fprintf(fptr, "        \"dims\": ");
+	write_json_int_array(fptr, w_dims, 2);
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "        \"float_data\": ");
+	write_json_float_array(fptr, cur->t_weights->values, curr_nodes * next_nodes);
+	fprintf(fptr, "\n");
+	fprintf(fptr, "      }");
+
+	// Bias: shape is [next_nodes]
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"bias_%d\",\n", index);
+	fprintf(fptr, "        \"data_type\": 1,\n");
+	int b_dims[] = {next_nodes};
+	fprintf(fptr, "        \"dims\": ");
+	write_json_int_array(fptr, b_dims, 1);
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "        \"float_data\": ");
+	write_json_float_array(fptr, cur->t_bias->values, next_nodes);
+	fprintf(fptr, "\n");
+	fprintf(fptr, "      }");
+}
+
+//-----------------------------------------------
+// Dense ONNX nodes: MatMul with weight_N, then Add bias_N
+//-----------------------------------------------
+static void dense_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                             char *output, size_t output_size, int *first)
+{
+	(void)pnet;
+	int index = layer - 1;
+	char matmul_out[64];
+	snprintf(matmul_out, sizeof(matmul_out), "matmul_%d_out", index);
+	snprintf(output, output_size, "add_%d_out", index);
+
+	// MatMul node: input @ weight_N -> matmul_N_out
+	if (!*first) fprintf(fptr, ",\n");
+	*first = 0;
+
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"op_type\": \"MatMul\",\n");
+	fprintf(fptr, "        \"name\": \"matmul_%d\",\n", index);
+	fprintf(fptr, "        \"input\": [\"%s\", \"weight_%d\"],\n", input, index);
+	fprintf(fptr, "        \"output\": [\"%s\"]\n", matmul_out);
+	fprintf(fptr, "      }");
+
+	// Add node: matmul_N_out + bias_N -> add_N_out
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"op_type\": \"Add\",\n");
+	fprintf(fptr, "        \"name\": \"add_%d\",\n", index);
+	fprintf(fptr, "        \"input\": [\"%s\", \"bias_%d\"],\n", matmul_out, index);
+	fprintf(fptr, "        \"output\": [\"%s\"]\n", output);
+	fprintf(fptr, "      }");
+}
+
+//-----------------------------------------------
 int ann_export_onnx(const PNetwork pnet, const char *filename)
 {
 	if (!pnet || !filename)
@@ -3365,44 +3504,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	// ========== INITIALIZERS (weights and biases) ==========
 	fprintf(fptr, "    \"initializer\": [\n");
 	int first_init = 1;
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
-	{
-		PLayer pL = &pnet->layers[layer];
-		PLayer next = &pnet->layers[layer + 1];	// owns the weights from pL to next
-		int next_nodes = next->node_count;
-		int curr_nodes = pL->node_count;
-
-		// Weights: shape is [curr_nodes, next_nodes] stored row-major
-		// ONNX MatMul: input [batch, curr_nodes] @ weights [curr_nodes, next_nodes] -> [batch, next_nodes]
-		if (!first_init) fprintf(fptr, ",\n");
-		first_init = 0;
-
-		fprintf(fptr, "      {\n");
-		fprintf(fptr, "        \"name\": \"weight_%d\",\n", layer);
-		fprintf(fptr, "        \"data_type\": 1,\n");  // 1 = FLOAT
-		int w_dims[] = {curr_nodes, next_nodes};
-		fprintf(fptr, "        \"dims\": ");
-		write_json_int_array(fptr, w_dims, 2);
-		fprintf(fptr, ",\n");
-		fprintf(fptr, "        \"float_data\": ");
-		write_json_float_array(fptr, next->t_weights->values, curr_nodes * next_nodes);
-		fprintf(fptr, "\n");
-		fprintf(fptr, "      }");
-
-		// Bias: shape is [next_nodes]
-		fprintf(fptr, ",\n");
-		fprintf(fptr, "      {\n");
-		fprintf(fptr, "        \"name\": \"bias_%d\",\n", layer);
-		fprintf(fptr, "        \"data_type\": 1,\n");
-		int b_dims[] = {next_nodes};
-		fprintf(fptr, "        \"dims\": ");
-		write_json_int_array(fptr, b_dims, 1);
-		fprintf(fptr, ",\n");
-		fprintf(fptr, "        \"float_data\": ");
-		write_json_float_array(fptr, next->t_bias->values, next_nodes);
-		fprintf(fptr, "\n");
-		fprintf(fptr, "      }");
-	}
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+		layer_ops(&pnet->layers[layer])->onnx_initializers(fptr, pnet, layer, &first_init);
 	fprintf(fptr, "\n    ],\n");
 
 	// ========== NODES (operations) ==========
@@ -3411,36 +3514,19 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	char prev_output[64];
 	snprintf(prev_output, sizeof(prev_output), "input");
 
-	for (int layer = 0; layer < pnet->layer_count - 1; layer++)
+	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
-		char matmul_out[64], add_out[64], act_out[64];
-		snprintf(matmul_out, sizeof(matmul_out), "matmul_%d_out", layer);
-		snprintf(add_out, sizeof(add_out), "add_%d_out", layer);
-		snprintf(act_out, sizeof(act_out), "layer_%d_out", layer);
+		// ONNX names count the layers that have parameters, from 0
+		int index = layer - 1;
+		char linear_out[64], act_out[64];
+		snprintf(act_out, sizeof(act_out), "layer_%d_out", index);
 
-		// Get activation for the NEXT layer (output of this transform)
-		Activation_type next_act = pnet->layers[layer + 1].activation;
+		// The layer's own nodes (e.g. MatMul + Add), then its activation
+		layer_ops(&pnet->layers[layer])->onnx_nodes(fptr, pnet, layer, prev_output,
+		                                            linear_out, sizeof(linear_out), &first_node);
+
+		Activation_type next_act = pnet->layers[layer].activation;
 		const char *act_op = onnx_activation_op(next_act);
-
-		// MatMul node: prev_output @ weight_N -> matmul_N_out
-		if (!first_node) fprintf(fptr, ",\n");
-		first_node = 0;
-
-		fprintf(fptr, "      {\n");
-		fprintf(fptr, "        \"op_type\": \"MatMul\",\n");
-		fprintf(fptr, "        \"name\": \"matmul_%d\",\n", layer);
-		fprintf(fptr, "        \"input\": [\"%s\", \"weight_%d\"],\n", prev_output, layer);
-		fprintf(fptr, "        \"output\": [\"%s\"]\n", matmul_out);
-		fprintf(fptr, "      }");
-
-		// Add node: matmul_N_out + bias_N -> add_N_out
-		fprintf(fptr, ",\n");
-		fprintf(fptr, "      {\n");
-		fprintf(fptr, "        \"op_type\": \"Add\",\n");
-		fprintf(fptr, "        \"name\": \"add_%d\",\n", layer);
-		fprintf(fptr, "        \"input\": [\"%s\", \"bias_%d\"],\n", matmul_out, layer);
-		fprintf(fptr, "        \"output\": [\"%s\"]\n", add_out);
-		fprintf(fptr, "      }");
 
 		// Activation node (if any)
 		if (act_op != NULL)
@@ -3448,8 +3534,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 			fprintf(fptr, ",\n");
 			fprintf(fptr, "      {\n");
 			fprintf(fptr, "        \"op_type\": \"%s\",\n", act_op);
-			fprintf(fptr, "        \"name\": \"activation_%d\",\n", layer);
-			fprintf(fptr, "        \"input\": [\"%s\"],\n", add_out);
+			fprintf(fptr, "        \"name\": \"activation_%d\",\n", index);
+			fprintf(fptr, "        \"input\": [\"%s\"],\n", linear_out);
 			fprintf(fptr, "        \"output\": [\"%s\"]", act_out);
 
 			// LeakyRelu needs alpha attribute
@@ -3480,8 +3566,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 		}
 		else
 		{
-			// No activation, next input is add output
-			snprintf(prev_output, sizeof(prev_output), "%s", add_out);
+			// No activation, next input is the linear output
+			snprintf(prev_output, sizeof(prev_output), "%s", linear_out);
 		}
 	}
 	fprintf(fptr, "\n    ],\n");

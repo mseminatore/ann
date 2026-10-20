@@ -1088,6 +1088,15 @@ ANN_API int ann_get_layer_nodes(const PNetwork pnet, int layer);
 ANN_API Activation_type ann_get_layer_activation(const PNetwork pnet, int layer);
 
 /**
+ * Get the kind of a specific layer (what it computes).
+ * 
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @return Layer kind, or LAYER_KIND_DENSE on error
+ */
+ANN_API Layer_kind ann_get_layer_kind(const PNetwork pnet, int layer);
+
+/**
  * Print network properties and configuration to stdout.
  * 
  * Displays: network topology, optimizer, loss function, mini-batch size, etc.

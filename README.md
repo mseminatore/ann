@@ -154,6 +154,7 @@ ann_set_layer_dropout | set dropout rate for a specific layer
 ann_get_layer_count | get the number of layers in the network
 ann_get_layer_nodes | get the number of nodes in a layer
 ann_get_layer_activation | get the activation type of a layer
+ann_get_layer_kind | get what a layer computes (`LAYER_KIND_DENSE`)
 ann_export_onnx | export trained network to ONNX JSON format
 ann_import_onnx | import network from ONNX JSON file
 ann_export_pikchr | export network architecture as PIKCHR diagram
@@ -284,6 +285,14 @@ Then render with: `pikchr network.pikchr > network.svg`
 **Two modes:**
 - **Simple mode** (networks with >10 nodes per layer): Box diagram with layer info
 - **Detailed mode** (≤10 nodes per layer): Individual node circles with connections
+
+## Saved Model Formats
+
+`ann_save_network()` (text, `.nna`) and `ann_save_network_binary()` (`.nnb`)
+write format version 1 for networks made only of dense layers, so files stay
+readable by older libann releases. Networks with other layer kinds are saved
+as version 2, which also records each layer's kind and shape. The loaders read
+both versions and return `NULL` for unknown versions or truncated files.
 
 ## Learning Curve Export
 

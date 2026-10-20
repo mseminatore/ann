@@ -314,10 +314,12 @@ Output sizes are `(H + 2*padding - kernel) / stride + 1` for convolutions and
 an activation other than none on pool/flatten layers, return `ERR_INVALID`.
 
 Convolutional networks train on the CPU (`ann_gpu_upload_network()` returns
-`ERR_INVALID` for them), save in model format v2, and export to ONNX as
-`Conv`, `MaxPool` and `Flatten` with a `[batch, C, H, W]` input;
-`ann_import_onnx()` does not read them yet. The `fashion_cnn` example trains
-a two-convolution network on Fashion-MNIST to about 90% test accuracy.
+`ERR_INVALID` for them), save in model format v2, and export to and import
+from ONNX as `Conv`, `MaxPool` and `Flatten` with a `[batch, C, H, W]` input.
+The importer also reads simple CNNs and MLPs exported by other tools, such as
+PyTorch (see [ONNX Export & Import](docs/ONNX_EXPORT.md)). The `fashion_cnn`
+example trains a two-convolution network on Fashion-MNIST to about 90% test
+accuracy.
 
 ## Saved Model Formats
 

@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <assert.h>
@@ -3879,7 +3880,7 @@ static void write_json_float(FILE *fptr, real value)
 	if (isnan(v) || isinf(v))
 		fprintf(fptr, "0.0");
 	else
-		fprintf(fptr, "%.8g", v);
+		fprintf(fptr, "%.9g", v);	// 9 significant digits round-trip any float exactly
 }
 
 static void write_json_float_array(FILE *fptr, const real *values, int count)
@@ -4356,6 +4357,303 @@ static Activation_type onnx_op_to_activation(const char *op_type)
 	return ACTIVATION_NULL;
 }
 
+//================================================================================================
+// ONNX import. The graph is read as a chain of nodes from its input, each becoming a layer:
+//   MatMul [+ Add]  dense layer (weights [in, out], bias [out])
+//   Gemm            dense layer (PyTorch's Linear: weights [out, in] with transB = 1)
+//   Conv            conv layer (weights [F, C, k, k], optional bias [F])
+//   MaxPool         max pooling layer
+//   Flatten         flatten layer (libann's own "flatten_input_N" nodes, inserted before
+//                   dense layers, are skipped: dense layers read any shape)
+//   activation op   the activation of the layer just before it
+// Anything libann can't reproduce exactly is rejected rather than approximated.
+//================================================================================================
+
+//------------------------------
+// a field of an ONNX JSON object by its proto name (e.g. "op_type"), also
+// accepting the lowerCamelCase spelling protobuf's JSON printer uses by
+// default ("opType")
+//------------------------------
+static JsonValue *onnx_get(const JsonValue *obj, const char *name)
+{
+	JsonValue *v = obj ? json_get(obj, name) : NULL;
+	if (v || !obj || !strchr(name, '_'))
+		return v;
+
+	char camel[64];
+	size_t n = 0;
+	for (const char *c = name; *c && n + 1 < sizeof(camel); c++)
+	{
+		if (*c == '_' && c[1])
+			camel[n++] = (char)toupper((unsigned char)*++c);
+		else
+			camel[n++] = *c;
+	}
+	camel[n] = '\0';
+	return json_get(obj, camel);
+}
+
+//------------------------------
+// a JSON number, or a numeric string (protobuf's JSON form writes int64 as strings)
+//------------------------------
+static int onnx_number(const JsonValue *v, double *out)
+{
+	if (v && v->type == JSON_STRING)
+	{
+		char *end;
+		*out = strtod(v->u.str_val, &end);
+		return end != v->u.str_val && *end == '\0';
+	}
+	return v && json_number(v, out) == 0;
+}
+
+static int onnx_int(const JsonValue *v, int *out)
+{
+	double d;
+	if (!onnx_number(v, &d) || d != (double)(int)d)
+		return 0;
+	*out = (int)d;
+	return 1;
+}
+
+//------------------------------
+// name of a node's i-th input or output (NULL when absent)
+//------------------------------
+static const char *onnx_io(const JsonValue *node, const char *key, size_t i)
+{
+	JsonValue *list = onnx_get(node, key);
+	return (list && i < json_array_length(list)) ? json_string(json_at(list, i)) : NULL;
+}
+
+static JsonValue *onnx_initializer(const JsonValue *graph, const char *name)
+{
+	JsonValue *list = onnx_get(graph, "initializer");
+	for (size_t i = 0; name && list && i < json_array_length(list); i++)
+	{
+		const char *n = json_string(onnx_get(json_at(list, i), "name"));
+		if (n && strcmp(n, name) == 0)
+			return json_at(list, i);
+	}
+	return NULL;
+}
+
+static JsonValue *onnx_attribute(const JsonValue *node, const char *name)
+{
+	JsonValue *list = onnx_get(node, "attribute");
+	for (size_t i = 0; list && i < json_array_length(list); i++)
+	{
+		const char *n = json_string(onnx_get(json_at(list, i), "name"));
+		if (n && strcmp(n, name) == 0)
+			return json_at(list, i);
+	}
+	return NULL;
+}
+
+//------------------------------
+// read an int list attribute ("ints") into out; returns the count, 0 when
+// the attribute is absent, or -1 when it is malformed or longer than max
+//------------------------------
+static int onnx_attribute_ints(const JsonValue *node, const char *name, int *out, int max)
+{
+	JsonValue *attr = onnx_attribute(node, name);
+	if (!attr)
+		return 0;
+
+	JsonValue *ints = onnx_get(attr, "ints");
+	int count = ints ? (int)json_array_length(ints) : -1;
+	if (count < 0 || count > max)
+		return -1;
+	for (int i = 0; i < count; i++)
+	{
+		if (!onnx_int(json_at(ints, i), &out[i]))
+			return -1;
+	}
+	return count;
+}
+
+//------------------------------
+// 1 if an int list attribute is absent or holds only the value expected
+//------------------------------
+static int onnx_ints_all(const JsonValue *node, const char *name, int expected)
+{
+	int v[8];
+	int count = onnx_attribute_ints(node, name, v, 8);
+	for (int i = 0; i < count; i++)
+	{
+		if (v[i] != expected)
+			return 0;
+	}
+	return count >= 0;
+}
+
+//------------------------------
+// an int list attribute whose entries are all equal: returns 1 and sets *value
+// (fallback when absent), 0 otherwise
+//------------------------------
+static int onnx_uniform_ints(const JsonValue *node, const char *name, int fallback, int *value)
+{
+	int v[8];
+	int count = onnx_attribute_ints(node, name, v, 8);
+	*value = count > 0 ? v[0] : fallback;
+	for (int i = 1; i < count; i++)
+	{
+		if (v[i] != v[0])
+			return 0;
+	}
+	return count >= 0;
+}
+
+//------------------------------
+// 1 if a string attribute is absent or equals text (protobuf's JSON form
+// holds string attributes as base64, so both spellings are accepted)
+//------------------------------
+static int onnx_string_is(const JsonValue *node, const char *name, const char *text, const char *base64)
+{
+	JsonValue *attr = onnx_attribute(node, name);
+	const char *v = attr ? json_string(onnx_get(attr, "s")) : NULL;
+	return !attr || (v && (strcmp(v, text) == 0 || strcmp(v, base64) == 0));
+}
+
+//------------------------------
+// decode base64 text into out (at most max bytes); returns the byte count or -1
+//------------------------------
+static int onnx_base64_decode(const char *text, unsigned char *out, int max)
+{
+	int bits = 0, count = 0;
+	unsigned long acc = 0;
+
+	for (const char *c = text; *c && *c != '='; c++)
+	{
+		const char *alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+		const char *pos = strchr(alphabet, *c);
+		if (!pos)
+		{
+			if (*c == '-' || *c == '_')	// URL-safe alphabet
+				pos = alphabet + (*c == '-' ? 62 : 63);
+			else
+				return -1;
+		}
+
+		acc = (acc << 6) | (unsigned long)(pos - alphabet);
+		bits += 6;
+		if (bits >= 8)
+		{
+			bits -= 8;
+			if (count >= max)
+				return -1;
+			out[count++] = (unsigned char)((acc >> bits) & 0xFF);
+		}
+	}
+	return count;
+}
+
+//------------------------------
+// copy an initializer's values into t, from float_data or from raw_data
+// (base64 of little-endian float32, the form most ONNX exporters write);
+// with transpose the data is a [t->cols x t->rows] matrix (ONNX MatMul
+// layout) and is stored transposed
+//------------------------------
+static int onnx_load_values(const JsonValue *init, PTensor t, int transpose)
+{
+	JsonValue *data = init ? onnx_get(init, "float_data") : NULL;
+	const char *raw = init ? json_string(onnx_get(init, "raw_data")) : NULL;
+	int count = t->rows * t->cols;
+	unsigned char *bytes = NULL;
+	int data_type = 1;
+
+	if (init && onnx_get(init, "data_type") && !onnx_int(onnx_get(init, "data_type"), &data_type))
+		data_type = -1;	// e.g. an enum name; only FLOAT (1) is supported
+	if (data_type != 1)
+		return 0;
+
+	if (raw)
+	{
+		bytes = malloc((size_t)count * 4);
+		if (!bytes || onnx_base64_decode(raw, bytes, count * 4) != count * 4)
+		{
+			free(bytes);
+			return 0;
+		}
+	}
+	else if (!data || data->type != JSON_ARRAY || (int)json_array_length(data) != count)
+		return 0;
+
+	for (int j = 0; j < count; j++)
+	{
+		double v;
+		if (bytes)
+		{
+			unsigned char *b = bytes + 4 * j;
+			unsigned long u = b[0] | ((unsigned long)b[1] << 8) | ((unsigned long)b[2] << 16) | ((unsigned long)b[3] << 24);
+			float f;
+			unsigned int u32 = (unsigned int)u;
+			memcpy(&f, &u32, sizeof(f));
+			v = f;
+		}
+		else if (!onnx_number(json_at(data, j), &v))
+			return 0;
+
+		// element j of the [cols x rows] matrix is t[j % rows][j / rows]
+		int dst = transpose ? (j % t->rows) * t->cols + j / t->rows : j;
+		t->values[dst] = (real)v;
+	}
+	free(bytes);
+	return 1;
+}
+
+//------------------------------
+// an initializer's dims; returns their count, or -1 when malformed
+//------------------------------
+static int onnx_dims(const JsonValue *init, int *dims, int max)
+{
+	JsonValue *list = init ? onnx_get(init, "dims") : NULL;
+	int count = list ? (int)json_array_length(list) : -1;
+	if (count < 0 || count > max)
+		return -1;
+	for (int i = 0; i < count; i++)
+	{
+		if (!onnx_int(json_at(list, i), &dims[i]))
+			return -1;
+	}
+	return count;
+}
+
+//------------------------------
+// the activation of a node that may follow a layer; ACTIVATION_NULL with
+// *ok = 1 when it is not an activation, *ok = 0 when it is one libann can't
+// match exactly
+//------------------------------
+static Activation_type onnx_node_activation(const JsonValue *node, int *ok)
+{
+	const char *op = json_string(onnx_get(node, "op_type"));
+	Activation_type act = onnx_op_to_activation(op);
+	*ok = 1;
+
+	if (act == ACTIVATION_LEAKY_RELU)
+	{
+		JsonValue *alpha = onnx_attribute(node, "alpha");
+		double a = 0.01;
+		if (alpha && !onnx_number(onnx_get(alpha, "f"), &a))
+			a = -1;
+		*ok = fabs(a - 0.01) < 1e-6;
+	}
+	else if (act == ACTIVATION_GELU)
+	{
+		// libann implements the tanh approximation only
+		JsonValue *attr = onnx_attribute(node, "approximate");
+		*ok = attr && onnx_string_is(node, "approximate", "tanh", "dGFuaA==");
+	}
+	else if (act == ACTIVATION_SOFTMAX)
+	{
+		JsonValue *axis = onnx_attribute(node, "axis");
+		int a = -1;
+		if (axis && !onnx_int(onnx_get(axis, "i"), &a))
+			a = 0;
+		*ok = (a == -1 || a == 1);
+	}
+	return act;
+}
+
 //------------------------------
 // Import network from ONNX JSON file
 //------------------------------
@@ -4376,236 +4674,291 @@ PNetwork ann_import_onnx(const char *filename)
 	}
 
 	PNetwork pnet = NULL;
+	const char *error = "ann_import_onnx: invalid model";
 
-	// Get graph
-	JsonValue *graph = json_get(&root, "graph");
-	if (!graph || graph->type != JSON_OBJECT)
+	JsonValue *graph = onnx_get(&root, "graph");
+	JsonValue *nodes = graph ? onnx_get(graph, "node") : NULL;
+	if (!graph || graph->type != JSON_OBJECT || !nodes || nodes->type != JSON_ARRAY)
 	{
-		invoke_error_callback(ERR_INVALID, "ann_import_onnx: missing graph");
-		goto cleanup;
+		error = "ann_import_onnx: missing graph or nodes";
+		goto fail;
 	}
 
-	// Get initializers (weights and biases)
-	JsonValue *initializer = json_get(graph, "initializer");
-	if (!initializer || initializer->type != JSON_ARRAY)
-	{
-		invoke_error_callback(ERR_INVALID, "ann_import_onnx: missing initializer");
-		goto cleanup;
-	}
-
-	// Count layers by counting weight tensors (weight_0, weight_1, ...)
-	size_t num_weights = 0;
-	for (size_t i = 0; i < json_array_length(initializer); i++)
-	{
-		JsonValue *init = json_at(initializer, i);
-		const char *name = json_string(json_get(init, "name"));
-		if (name && strncmp(name, "weight_", 7) == 0)
-			num_weights++;
-	}
-
-	if (num_weights == 0)
-	{
-		invoke_error_callback(ERR_INVALID, "ann_import_onnx: no weights found");
-		goto cleanup;
-	}
-
-	// Get layer sizes from weight dimensions
-	// weight_i has dims [layer_i_nodes, layer_i+1_nodes]
-	int *layer_sizes = (int *)malloc((num_weights + 1) * sizeof(int));
-	if (!layer_sizes)
-	{
-		invoke_error_callback(ERR_ALLOC, "ann_import_onnx");
-		goto cleanup;
-	}
-
-	// Extract layer sizes from weight tensors
-	for (size_t layer = 0; layer < num_weights; layer++)
-	{
-		char weight_name[32];
-		snprintf(weight_name, sizeof(weight_name), "weight_%zu", layer);
-
-		// Find this weight tensor
-		JsonValue *weight_init = NULL;
-		for (size_t i = 0; i < json_array_length(initializer); i++)
-		{
-			JsonValue *init = json_at(initializer, i);
-			const char *name = json_string(json_get(init, "name"));
-			if (name && strcmp(name, weight_name) == 0)
-			{
-				weight_init = init;
-				break;
-			}
-		}
-
-		if (!weight_init)
-		{
-			invoke_error_callback(ERR_INVALID, "ann_import_onnx: missing weight tensor");
-			free(layer_sizes);
-			goto cleanup;
-		}
-
-		JsonValue *dims = json_get(weight_init, "dims");
-		if (!dims || json_array_length(dims) != 2)
-		{
-			invoke_error_callback(ERR_INVALID, "ann_import_onnx: invalid weight dims");
-			free(layer_sizes);
-			goto cleanup;
-		}
-
-		int curr_nodes, next_nodes;
-		json_int(json_at(dims, 0), &curr_nodes);
-		json_int(json_at(dims, 1), &next_nodes);
-
-		layer_sizes[layer] = curr_nodes;
-		if (layer == num_weights - 1)
-			layer_sizes[layer + 1] = next_nodes;
-	}
-
-	// Get nodes to determine activations
-	JsonValue *nodes = json_get(graph, "node");
-	if (!nodes || nodes->type != JSON_ARRAY)
-	{
-		invoke_error_callback(ERR_INVALID, "ann_import_onnx: missing nodes");
-		free(layer_sizes);
-		goto cleanup;
-	}
-
-	// Build activation list for each layer (except input)
-	Activation_type *activations = (Activation_type *)malloc((num_weights + 1) * sizeof(Activation_type));
-	if (!activations)
-	{
-		invoke_error_callback(ERR_ALLOC, "ann_import_onnx");
-		free(layer_sizes);
-		goto cleanup;
-	}
-
-	// Initialize activations to NULL (input layer always NULL)
-	activations[0] = ACTIVATION_NULL;
-	for (size_t i = 1; i <= num_weights; i++)
-		activations[i] = ACTIVATION_NULL;
-
-	// Parse nodes to find activations
-	// Nodes are: MatMul, Add, [Activation] for each layer
-	for (size_t i = 0; i < json_array_length(nodes); i++)
-	{
-		JsonValue *node = json_at(nodes, i);
-		const char *op_type = json_string(json_get(node, "op_type"));
-		const char *name = json_string(json_get(node, "name"));
-
-		if (!op_type) continue;
-
-		// Skip MatMul and Add operations
-		if (strcmp(op_type, "MatMul") == 0 || strcmp(op_type, "Add") == 0)
-			continue;
-
-		// Check for unsupported operations
-		Activation_type act = onnx_op_to_activation(op_type);
-		if (act == ACTIVATION_NULL && 
-		    strcmp(op_type, "MatMul") != 0 && 
-		    strcmp(op_type, "Add") != 0)
-		{
-			// Unsupported operation
-			invoke_error_callback(ERR_INVALID, "ann_import_onnx: unsupported op");
-			free(layer_sizes);
-			free(activations);
-			goto cleanup;
-		}
-
-		// Extract layer index from activation name (e.g., "activation_0")
-		if (name && strncmp(name, "activation_", 11) == 0)
-		{
-			int layer_idx = atoi(name + 11);
-			if (layer_idx >= 0 && layer_idx < (int)num_weights)
-			{
-				activations[layer_idx + 1] = act;
-			}
-		}
-	}
-
-	// Create network
-	pnet = ann_make_network(OPT_ADAM, LOSS_MSE);
-	if (!pnet)
-	{
-		free(layer_sizes);
-		free(activations);
-		goto cleanup;
-	}
-
-	// Add layers
-	ann_add_layer(pnet, layer_sizes[0], LAYER_INPUT, ACTIVATION_NULL);
-	for (size_t i = 1; i < num_weights; i++)
-	{
-		ann_add_layer(pnet, layer_sizes[i], LAYER_HIDDEN, activations[i]);
-	}
-	ann_add_layer(pnet, layer_sizes[num_weights], LAYER_OUTPUT, activations[num_weights]);
-
-	// Weights are stored [in, out] as ONNX MatMul expects; ann-library 1.0
+	// Dense weights are stored [in, out] as ONNX MatMul expects; ann-library 1.0
 	// exports wrote libann's [out, in] data without transposing it
-	const char *producer = json_string(json_get(&root, "producer_name"));
-	const char *producer_version = json_string(json_get(&root, "producer_version"));
+	const char *producer = json_string(onnx_get(&root, "producer_name"));
+	const char *producer_version = json_string(onnx_get(&root, "producer_version"));
 	int legacy_layout = producer && producer_version &&
 	                    strcmp(producer, ONNX_PRODUCER_NAME) == 0 && strcmp(producer_version, "1.0") == 0;
 
-	// Load weights and biases from initializers
-	for (size_t layer = 0; layer < num_weights; layer++)
+	// The graph input: the first one that isn't an initializer (older models list both)
+	JsonValue *inputs = onnx_get(graph, "input");
+	JsonValue *input = NULL;
+	for (size_t i = 0; inputs && i < json_array_length(inputs); i++)
 	{
-		char weight_name[32], bias_name[32];
-		snprintf(weight_name, sizeof(weight_name), "weight_%zu", layer);
-		snprintf(bias_name, sizeof(bias_name), "bias_%zu", layer);
-
-		// Find and load weights
-		for (size_t i = 0; i < json_array_length(initializer); i++)
+		JsonValue *candidate = json_at(inputs, i);
+		if (!onnx_initializer(graph, json_string(onnx_get(candidate, "name"))))
 		{
-			JsonValue *init = json_at(initializer, i);
-			const char *name = json_string(json_get(init, "name"));
-
-			if (name && strcmp(name, weight_name) == 0)
-			{
-				JsonValue *float_data = json_get(init, "float_data");
-				if (float_data && float_data->type == JSON_ARRAY)
-				{
-					PTensor weights = pnet->layers[layer + 1].t_weights;	// weight_N produces layer N+1, [out x in]
-					size_t count = json_array_length(float_data);
-					for (size_t j = 0; j < count && j < (size_t)(weights->rows * weights->cols); j++)
-					{
-						double val;
-						json_number(json_at(float_data, j), &val);
-
-						// element j of the [in x out] ONNX matrix is W[j % out][j / out]
-						size_t dst = legacy_layout ? j : (j % weights->rows) * weights->cols + j / weights->rows;
-						weights->values[dst] = (real)val;
-					}
-				}
-			}
-			else if (name && strcmp(name, bias_name) == 0)
-			{
-				JsonValue *float_data = json_get(init, "float_data");
-				if (float_data && float_data->type == JSON_ARRAY)
-				{
-					PTensor bias = pnet->layers[layer + 1].t_bias;
-					size_t count = json_array_length(float_data);
-					for (size_t j = 0; j < count && j < (size_t)bias->cols; j++)
-					{
-						double val;
-						json_number(json_at(float_data, j), &val);
-						bias->values[j] = (real)val;
-					}
-				}
-			}
+			input = candidate;
+			break;
 		}
 	}
 
-	// Mark network weights as set
+	JsonValue *dim = onnx_get(onnx_get(onnx_get(onnx_get(input, "type"), "tensor_type"), "shape"), "dim");
+	int rank = dim ? (int)json_array_length(dim) : 0;
+	int size[4] = {0, 0, 0, 0};
+	for (int i = 1; i < rank && i < 4; i++)
+	{
+		if (!onnx_int(onnx_get(json_at(dim, i), "dim_value"), &size[i]))
+			rank = 0;
+	}
+	if (!input && json_array_length(nodes) > 0)
+	{
+		// no declared input: a dense model's width comes from its first weights
+		JsonValue *first = json_at(nodes, 0);
+		const char *first_op = json_string(onnx_get(first, "op_type"));
+		int dims[2];
+		if (first_op && strcmp(first_op, "MatMul") == 0 &&
+			onnx_dims(onnx_initializer(graph, onnx_io(first, "input", 1)), dims, 2) == 2)
+		{
+			rank = 2;
+			size[1] = dims[0];
+		}
+	}
+	if (rank != 2 && rank != 4)
+	{
+		error = "ann_import_onnx: input must be [batch, n] or [batch, C, H, W]";
+		goto fail;
+	}
+
+	pnet = ann_make_network(OPT_ADAM, LOSS_MSE);
+	if (!pnet)
+	{
+		error = "ann_import_onnx";
+		goto fail;
+	}
+	int err = rank == 2 ? ann_add_layer(pnet, size[1], LAYER_INPUT, ACTIVATION_NULL)
+	                    : ann_add_input(pnet, size[1], size[2], size[3]);
+	if (err != ERR_OK)
+		goto fail;
+
+	// Walk the chain of nodes
+	const char *current = input ? json_string(onnx_get(input, "name")) : onnx_io(json_at(nodes, 0), "input", 0);
+	int image = rank == 4;
+	size_t count = json_array_length(nodes);
+
+	for (size_t i = 0; i < count; i++)
+	{
+		JsonValue *node = json_at(nodes, i);
+		const char *op = json_string(onnx_get(node, "op_type"));
+		const char *name = json_string(onnx_get(node, "name"));
+		const char *output = onnx_io(node, "output", 0);
+		const char *in0 = onnx_io(node, "input", 0);
+
+		if (!op || !output || !in0 || !current || strcmp(in0, current) != 0)
+		{
+			error = "ann_import_onnx: only a single chain of nodes is supported";
+			goto fail;
+		}
+
+		PLayer prev = &pnet->layers[pnet->layer_count - 1];
+		Layer_kind kind;
+		int units = 0, kernel = 0, stride = 1, pad = 0;
+		int transpose = 0;	// dense weights stored [in, out] (MatMul layout)
+		JsonValue *weight = NULL, *bias = NULL;
+
+		if (strcmp(op, "MatMul") == 0)
+		{
+			int dims[2];
+			weight = onnx_initializer(graph, onnx_io(node, "input", 1));
+			if (image || onnx_dims(weight, dims, 2) != 2 || dims[0] != prev->node_count)
+			{
+				error = "ann_import_onnx: MatMul weights must be [in, out] on a flat input";
+				goto fail;
+			}
+			kind = LAYER_KIND_DENSE;
+			units = dims[1];
+			transpose = !legacy_layout;
+
+			// an Add of a bias vector right after it belongs to the same layer
+			JsonValue *next = i + 1 < count ? json_at(nodes, i + 1) : NULL;
+			const char *next_op = next ? json_string(onnx_get(next, "op_type")) : NULL;
+			const char *next_in = next ? onnx_io(next, "input", 0) : NULL;
+			if (next_op && strcmp(next_op, "Add") == 0 && next_in && strcmp(next_in, output) == 0)
+			{
+				int bdims[1];
+				bias = onnx_initializer(graph, onnx_io(next, "input", 1));
+				if (onnx_dims(bias, bdims, 1) != 1 || bdims[0] != units)
+				{
+					error = "ann_import_onnx: dense bias must be [out]";
+					goto fail;
+				}
+				output = onnx_io(next, "output", 0);
+				i++;
+			}
+		}
+		else if (strcmp(op, "Gemm") == 0)
+		{
+			// Gemm(x, W, b) = alpha * x * op(W) + beta * b, as PyTorch writes Linear
+			int dims[2], trans_a = 0, trans_b = 0, bdims[2], nb;
+			double alpha = 1.0, beta = 1.0;
+			JsonValue *attr;
+			if ((attr = onnx_attribute(node, "transA")) && !onnx_int(onnx_get(attr, "i"), &trans_a)) trans_a = 1;
+			if ((attr = onnx_attribute(node, "transB")) && !onnx_int(onnx_get(attr, "i"), &trans_b)) trans_b = -1;
+			if ((attr = onnx_attribute(node, "alpha")) && !onnx_number(onnx_get(attr, "f"), &alpha)) alpha = 0;
+			if ((attr = onnx_attribute(node, "beta")) && !onnx_number(onnx_get(attr, "f"), &beta)) beta = 0;
+
+			weight = onnx_initializer(graph, onnx_io(node, "input", 1));
+			bias = onnx_initializer(graph, onnx_io(node, "input", 2));
+			int in_dim = trans_b ? 1 : 0;
+			if (image || trans_a != 0 || (trans_b != 0 && trans_b != 1) || alpha != 1.0 || beta != 1.0 ||
+				onnx_dims(weight, dims, 2) != 2 || dims[in_dim] != prev->node_count)
+			{
+				error = "ann_import_onnx: unsupported Gemm (needs transA = 0, alpha = beta = 1, flat input)";
+				goto fail;
+			}
+			kind = LAYER_KIND_DENSE;
+			units = dims[1 - in_dim];
+			transpose = !trans_b;	// transB = 1 stores W as [out, in], libann's layout
+
+			// the bias must be one value per output ([out] or [1, out])
+			nb = bias ? onnx_dims(bias, bdims, 2) : 0;
+			if (bias && !((nb == 1 && bdims[0] == units) || (nb == 2 && bdims[0] == 1 && bdims[1] == units)))
+			{
+				error = "ann_import_onnx: Gemm bias must have one value per output";
+				goto fail;
+			}
+		}
+		else if (strcmp(op, "Conv") == 0)
+		{
+			JsonValue *group = onnx_attribute(node, "group");
+			int groups = 1;
+			if (group && !onnx_int(onnx_get(group, "i"), &groups))
+				groups = 0;
+			if (groups != 1)
+			{
+				error = "ann_import_onnx: grouped convolutions are not supported";
+				goto fail;
+			}
+			int dims[4];
+			weight = onnx_initializer(graph, onnx_io(node, "input", 1));
+			bias = onnx_initializer(graph, onnx_io(node, "input", 2));
+			if (!image || onnx_dims(weight, dims, 4) != 4 || dims[1] != prev->shape.c || dims[2] != dims[3] ||
+				!onnx_uniform_ints(node, "kernel_shape", dims[2], &kernel) || kernel != dims[2] ||
+				!onnx_uniform_ints(node, "strides", 1, &stride) || !onnx_uniform_ints(node, "pads", 0, &pad) ||
+				!onnx_ints_all(node, "dilations", 1) || !onnx_string_is(node, "auto_pad", "NOTSET", "Tk9UU0VU"))
+			{
+				error = "ann_import_onnx: unsupported Conv (needs square kernels, equal strides and pads, no dilation)";
+				goto fail;
+			}
+			kind = LAYER_KIND_CONV2D;
+			units = dims[0];
+		}
+		else if (strcmp(op, "MaxPool") == 0)
+		{
+			int ceil_mode = 0;
+			JsonValue *ceil = onnx_attribute(node, "ceil_mode");
+			if (ceil && !onnx_int(onnx_get(ceil, "i"), &ceil_mode))
+				ceil_mode = 1;
+			if (!image || !onnx_attribute(node, "kernel_shape") ||
+				!onnx_uniform_ints(node, "kernel_shape", 0, &kernel) || !onnx_uniform_ints(node, "strides", 1, &stride) ||
+				!onnx_ints_all(node, "pads", 0) || !onnx_ints_all(node, "dilations", 1) || ceil_mode != 0 ||
+				!onnx_string_is(node, "auto_pad", "NOTSET", "Tk9UU0VU"))
+			{
+				error = "ann_import_onnx: unsupported MaxPool (needs square windows, equal strides, no padding)";
+				goto fail;
+			}
+			kind = LAYER_KIND_MAXPOOL2D;
+		}
+		else if (strcmp(op, "Flatten") == 0)
+		{
+			JsonValue *axis = onnx_attribute(node, "axis");
+			int a = 1;
+			if (axis && !onnx_int(onnx_get(axis, "i"), &a))
+				a = 0;
+			if (a != 1)
+			{
+				error = "ann_import_onnx: Flatten must use axis 1";
+				goto fail;
+			}
+			image = 0;
+			current = output;
+
+			// libann inserts these before dense layers, which read any shape
+			if (name && strncmp(name, "flatten_input_", 14) == 0)
+				continue;
+			kind = LAYER_KIND_FLATTEN;
+		}
+		else
+		{
+			error = "ann_import_onnx: unsupported op";
+			goto fail;
+		}
+
+		// an activation op right after the layer is the layer's activation
+		Activation_type act = ACTIVATION_NULL;
+		JsonValue *next = i + 1 < count ? json_at(nodes, i + 1) : NULL;
+		const char *next_in = next ? onnx_io(next, "input", 0) : NULL;
+		if (next && next_in && strcmp(next_in, output) == 0)
+		{
+			int ok;
+			Activation_type next_act = onnx_node_activation(next, &ok);
+			if (!ok || (next_act != ACTIVATION_NULL && (kind == LAYER_KIND_MAXPOOL2D || kind == LAYER_KIND_FLATTEN)))
+			{
+				error = "ann_import_onnx: unsupported activation";
+				goto fail;
+			}
+			if (next_act != ACTIVATION_NULL)
+			{
+				act = next_act;
+				output = onnx_io(next, "output", 0);
+				i++;
+			}
+		}
+
+		switch (kind)
+		{
+		case LAYER_KIND_DENSE:		err = ann_add_layer(pnet, units, LAYER_HIDDEN, act); break;
+		case LAYER_KIND_CONV2D:		err = ann_add_conv2d(pnet, units, kernel, stride, pad, act); break;
+		case LAYER_KIND_MAXPOOL2D:	err = ann_add_maxpool2d(pnet, kernel, stride); break;
+		default:					err = ann_add_flatten(pnet); break;
+		}
+		if (err != ERR_OK)
+			goto fail;
+
+		// parameters
+		PLayer cur = &pnet->layers[pnet->layer_count - 1];
+		if (weight && !onnx_load_values(weight, cur->params[0].value, transpose))
+		{
+			error = "ann_import_onnx: weight data does not match its dims";
+			goto fail;
+		}
+		if (weight && bias && !onnx_load_values(bias, cur->params[1].value, 0))
+		{
+			error = "ann_import_onnx: bias data does not match its dims";
+			goto fail;
+		}
+
+		if (kind == LAYER_KIND_CONV2D || kind == LAYER_KIND_MAXPOOL2D)
+			image = 1;
+		current = output;
+	}
+
+	if (pnet->layer_count < 2)
+	{
+		error = "ann_import_onnx: no layers found";
+		goto fail;
+	}
+
+	pnet->layers[pnet->layer_count - 1].layer_type = LAYER_OUTPUT;
 	pnet->weights_set = 1;
-	
-	free(layer_sizes);
-	free(activations);
 	json_free(&root);
 	return pnet;
 
-cleanup:
+fail:
+	invoke_error_callback(ERR_INVALID, error);
+	ann_free_network(pnet);
 	json_free(&root);
-	if (pnet) ann_free_network(pnet);
 	return NULL;
 }
 

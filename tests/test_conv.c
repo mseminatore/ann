@@ -468,7 +468,72 @@ void test_main(int argc, char *argv[])
                file_contains(onnx, "\"op_type\": \"Flatten\""));
         TESTEX("an image input [batch, 1, 6, 6]",
                file_contains(onnx, "{\"dim_param\": \"batch\"}, {\"dim_value\": 1}, {\"dim_value\": 6}, {\"dim_value\": 6}"));
-        TESTEX("ONNX import rejects CNNs (not supported yet)", ann_import_onnx(onnx) == NULL);
+        PNetwork back = ann_import_onnx(onnx);
+        TESTEX("CNN imports from ONNX", back != NULL && back->layer_count == net->layer_count);
+        int same_layers = back != NULL;
+        for (int l = 0; same_layers && l < net->layer_count; l++)
+            same_layers = back->layers[l].kind == net->layers[l].kind &&
+                          back->layers[l].activation == net->layers[l].activation &&
+                          back->layers[l].shape.c == net->layers[l].shape.c &&
+                          back->layers[l].shape.h == net->layers[l].shape.h &&
+                          back->layers[l].shape.w == net->layers[l].shape.w &&
+                          memcmp(back->layers[l].config, net->layers[l].config, sizeof(net->layers[l].config)) == 0;
+        TESTEX("with the same layer kinds, activations, shapes and settings", same_layers);
+        TESTEX("and the output layer marked LAYER_OUTPUT", back && back->layers[back->layer_count - 1].layer_type == LAYER_OUTPUT);
+        {
+            enum { N = 6 };
+            real x[N * 36], y[N * 2];
+            make_bars(x, y, N);
+            TESTEX("Imported CNN predicts identically", back && max_pred_diff(net, back, x, N) == 0.0f);
+        }
+        ann_free_network(back);
+        remove(onnx);
+
+        // Without an explicit flatten, the exporter's own Flatten node is not a layer
+        PNetwork noflat = ann_make_network(OPT_ADAM, LOSS_MSE);
+        noflat->print_func = quiet;
+        ann_add_input(noflat, 1, 6, 6);
+        ann_add_conv2d(noflat, 2, 3, 2, 1, ACTIVATION_TANH);
+        ann_add_layer(noflat, 2, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+        ann_train_begin(noflat);
+        ann_train_end(noflat);
+        ann_export_onnx(noflat, onnx);
+        back = ann_import_onnx(onnx);
+        TESTEX("Auto-inserted Flatten is not imported as a layer", back && back->layer_count == 3 &&
+               ann_get_layer_kind(back, 2) == LAYER_KIND_DENSE && back->layers[1].config[1] == 2);
+        ann_free_network(back);
+        ann_free_network(noflat);
+        remove(onnx);
+
+        // A PyTorch-style model as protobuf's JSON printer writes it: camelCase
+        // fields, int64 values as strings, raw_data weights, Gemm with transB,
+        // a conv without bias and no node names
+        FILE *f = fopen(onnx, "w");
+        if (f) {
+            fputs("{\"irVersion\":\"8\",\"producerName\":\"pytorch\",\"graph\":{\"node\":[{\"input\":[\"x\",\"c.w\"],\"output\":[\"c\"],\"opType\":\"Conv\",\"attribute\":[{\"name\":\"kernel_shape\",\"ints\":[\"2\",\"2\"],\"type\":\"INTS\"},{\"name\":\"strides\",\"ints\":[\"1\",\"1\"],\"type\":\"INTS\"}]},{\"input\":[\"c\"],\"output\":[\"r\"],\"opType\":\"Relu\"},{\"input\":[\"r\"],\"output\":[\"f\"],\"opType\":\"Flatten\",\"attribute\":[{\"name\":\"axis\",\"i\":\"1\",\"type\":\"INT\"}]},{\"input\":[\"f\",\"fc.w\",\"fc.b\"],\"output\":[\"y\"],\"opType\":\"Gemm\",\"attribute\":[{\"name\":\"transB\",\"i\":\"1\",\"type\":\"INT\"}]}],\"name\":\"g\",\"initializer\":[{\"dims\":[\"2\",\"1\",\"2\",\"2\"],\"dataType\":1,\"name\":\"c.w\",\"rawData\":\"AAAAPwAAgL4AAAA+AACAPwAAgL8AAEA/AACAPgAAAL8=\"},{\"dims\":[\"2\",\"18\"],\"dataType\":1,\"name\":\"fc.w\",\"rawData\":\"AAAAPwAAgL8AAIA+AABAPwAAAL8AAIA/AACAvgAAAD4AAAA/AABAvwAAgD8AAIA+AAAAvgAAAD8AAIC/AABAPwAAgD4AAAC/AAAAvwAAgD4AAIA/AABAvwAAAD8AAIC+AABAPwAAgD8AAAC/AAAAPgAAgL8AAAA/AACAPgAAQL8AAAA/AACAPwAAgL4AAAA/\"},{\"dims\":[\"2\"],\"dataType\":1,\"name\":\"fc.b\",\"rawData\":\"zczMPc3MTL4=\"}],\"input\":[{\"name\":\"x\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"1\"},{\"dimValue\":\"4\"},{\"dimValue\":\"4\"}]}}}}],\"output\":[{\"name\":\"y\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"2\"}]}}}}]},\"opsetImport\":[{\"domain\":\"\",\"version\":\"17\"}]}", f);
+            fclose(f);
+        }
+        back = ann_import_onnx(onnx);
+        real img[16], out[2];
+        for (int i = 0; i < 16; i++) img[i] = i / 8.0f - 1.0f;
+        if (back) ann_predict(back, img, out);
+        TESTEX("External model imports (Conv, Relu, Flatten, Gemm)", back && back->layer_count == 4 &&
+               ann_get_layer_kind(back, 1) == LAYER_KIND_CONV2D && back->layers[1].activation == ACTIVATION_RELU &&
+               ann_get_layer_kind(back, 2) == LAYER_KIND_FLATTEN && ann_get_layer_kind(back, 3) == LAYER_KIND_DENSE);
+        TESTEX("and matches onnxruntime's output", back && fabs(out[0] - 0.8871094f) < 1e-5 && fabs(out[1] - 0.44453126f) < 1e-5);
+        ann_free_network(back);
+
+        // Something libann can't reproduce exactly is rejected
+        f = fopen(onnx, "w");
+        if (f) {
+            fputs("{\"graph\":{\"node\":[{\"input\":[\"x\",\"w\"],\"output\":[\"y\"],\"op_type\":\"Conv\","
+                  "\"attribute\":[{\"name\":\"dilations\",\"ints\":[2,2]}]}],"
+                  "\"initializer\":[{\"name\":\"w\",\"dims\":[1,1,2,2],\"data_type\":1,\"float_data\":[1,2,3,4]}],"
+                  "\"input\":[{\"name\":\"x\",\"type\":{\"tensor_type\":{\"shape\":{\"dim\":[{\"dim_param\":\"N\"},"
+                  "{\"dim_value\":1},{\"dim_value\":5},{\"dim_value\":5}]}}}}]}}", f);
+            fclose(f);
+        }
+        TESTEX("Dilated convolution is rejected", ann_import_onnx(onnx) == NULL);
         remove(onnx);
 
         const char *pik = "test_conv.pikchr";

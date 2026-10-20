@@ -374,4 +374,32 @@ void test_main(int argc, char *argv[])
         tensor_free(yv);
         tensor_free(y3);
     }
+
+    SUITE("Print Function");
+    {
+        real xs[] = {1, 2, 3, 4};
+        PTensor x = tensor_create_from_array(4, 1, xs);
+        PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net, 1, LAYER_INPUT, ACTIVATION_NULL);
+        ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_NULL);
+        ann_set_epoch_limit(net, 2);
+
+        TESTEX("Networks print to stdout by default", ann_get_print_function(net) != NULL);
+
+        g_printed[0] = '\0';
+        ann_set_print_function(net, capture_print);
+        TESTEX("ann_get_print_function returns the function set", ann_get_print_function(net) == capture_print);
+        ann_train_network(net, x, x, 4);
+        TESTEX("Training output goes to the print function", strstr(g_printed, "Epoch 2/2") != NULL);
+
+        g_printed[0] = '\0';
+        ann_set_print_function(net, NULL);
+        ann_train_network(net, x, x, 4);
+        ann_print_props(net);
+        TESTEX("A NULL print function silences the network", g_printed[0] == '\0' &&
+               ann_get_print_function(net) == NULL);
+
+        ann_free_network(net);
+        tensor_free(x);
+    }
 }

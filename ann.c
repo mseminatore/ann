@@ -285,8 +285,12 @@ static void ann_printf(PNetwork pnet, const char *format, ...)
 	char buf[DEFAULT_SMALL_BUF_SIZE];
 	va_list valist;
 
+	// a network with no print function is silent
+	if (!pnet->print_func)
+		return;
+
 	va_start(valist, format);
-		vsprintf(buf, format, valist);
+		vsnprintf(buf, sizeof(buf), format, valist);
 	va_end(valist);
 
 	pnet->print_func(buf);
@@ -1094,7 +1098,7 @@ void ann_print_outputs(const PNetwork pnet)
 	if (!pnet)
 		return;
 
-	puts("");
+	ann_printf(pnet, "\n");
 
 	PLayer pLayer = &pnet->layers[0];
 
@@ -3275,6 +3279,20 @@ Activation_type ann_get_layer_activation(const PNetwork pnet, int layer)
 }
 
 //------------------------------
+// set or get where a network's progress output goes
+//------------------------------
+void ann_set_print_function(PNetwork pnet, Output_func print_func)
+{
+	if (pnet)
+		pnet->print_func = print_func;
+}
+
+Output_func ann_get_print_function(const PNetwork pnet)
+{
+	return pnet ? pnet->print_func : NULL;
+}
+
+//------------------------------
 // get what a layer computes
 //------------------------------
 Layer_kind ann_get_layer_kind(const PNetwork pnet, int layer)
@@ -3747,7 +3765,8 @@ static PNetwork load_network(const char *filename, int binary)
 
 	if (ver != ANN_FORMAT_V1 && ver != ANN_FORMAT_V2)
 	{
-		printf("Incompatible version, was %d, expected %d or %d\n", ver, ANN_FORMAT_V1, ANN_FORMAT_V2);
+		invoke_error_callback(ERR_INVALID, binary ? "ann_load_network_binary: unsupported file version"
+		                                           : "ann_load_network: unsupported file version");
 		goto fail;
 	}
 

@@ -461,6 +461,12 @@ static void free_layer_params(PLayer layer)
 	memset(layer->params, 0, sizeof(layer->params));
 	layer->param_count = 0;
 
+	for (int i = 0; i < 2; i++)
+	{
+		tensor_free(layer->t_scratch[i]);
+		layer->t_scratch[i] = NULL;
+	}
+
 	// the dense aliases pointed at the tensors just freed
 	layer->t_weights	= NULL;
 	layer->t_gradients	= NULL;
@@ -518,22 +524,19 @@ static int dense_setup(PNetwork pnet, int layer)
 }
 
 //------------------------------
-// Dense: initialize weights and bias with the chosen scheme
+// initialize a weight tensor and its bias with the chosen scheme
 //------------------------------
-static void dense_init_weights(PNetwork pnet, int layer, Weight_init_type init_type)
+static void init_weight_bias(PNetwork pnet, PTensor weights, PTensor bias, int fan_in, int fan_out,
+                             Weight_init_type init_type)
 {
-	PLayer cur = &pnet->layers[layer];
-	int fan_in = pnet->layers[layer - 1].node_count;
-	int fan_out = cur->node_count;
-
 	switch (init_type)
 	{
 	case WEIGHT_INIT_HE:
 		// He initialization: std = sqrt(2 / fan_in)
 		{
 			real std = (real)sqrt(2.0 / fan_in);
-			tensor_random_normal(cur->t_weights, (real)0.0, std);
-			tensor_fill(cur->t_bias, (real)0.0);
+			tensor_random_normal(weights, (real)0.0, std);
+			tensor_fill(bias, (real)0.0);
 		}
 		break;
 
@@ -541,18 +544,28 @@ static void dense_init_weights(PNetwork pnet, int layer, Weight_init_type init_t
 		// Xavier/Glorot initialization: std = sqrt(2 / (fan_in + fan_out))
 		{
 			real std = (real)sqrt(2.0 / (fan_in + fan_out));
-			tensor_random_normal(cur->t_weights, (real)0.0, std);
-			tensor_fill(cur->t_bias, (real)0.0);
+			tensor_random_normal(weights, (real)0.0, std);
+			tensor_fill(bias, (real)0.0);
 		}
 		break;
 
 	default:
 	case WEIGHT_INIT_UNIFORM:
 		// Original uniform initialization
-		tensor_random_uniform(cur->t_bias, (real)-pnet->weight_limit, (real)pnet->weight_limit);
-		tensor_random_uniform(cur->t_weights, (real)-pnet->weight_limit, (real)pnet->weight_limit);
+		tensor_random_uniform(bias, (real)-pnet->weight_limit, (real)pnet->weight_limit);
+		tensor_random_uniform(weights, (real)-pnet->weight_limit, (real)pnet->weight_limit);
 		break;
 	}
+}
+
+//------------------------------
+// Dense: initialize weights and bias with the chosen scheme
+//------------------------------
+static void dense_init_weights(PNetwork pnet, int layer, Weight_init_type init_type)
+{
+	PLayer cur = &pnet->layers[layer];
+	init_weight_bias(pnet, cur->t_weights, cur->t_bias, pnet->layers[layer - 1].node_count,
+	                 cur->node_count, init_type);
 }
 
 //------------------------------
@@ -604,13 +617,301 @@ static void dense_backward(PLayer layer, const PTensor X, const PTensor dZ, PTen
 }
 
 //------------------------------
+// a Tensor header over existing memory (for GEMM on one sample's rows);
+// it owns nothing and is never freed
+//------------------------------
+static Tensor tensor_view(real *values, int rows, int cols)
+{
+	Tensor t;
+	memset(&t, 0, sizeof(t));
+	t.rows = rows;
+	t.cols = cols;
+	t.stride = cols;
+	t.values = values;
+	return t;
+}
+
+//------------------------------
+// Conv2D settings, stored in config[]
+//------------------------------
+enum { CONV_KERNEL, CONV_STRIDE, CONV_PADDING, CONV_CONFIG_COUNT };
+enum { POOL_SIZE, POOL_STRIDE, POOL_CONFIG_COUNT };
+
+//------------------------------
+// output size of a window sliding over n inputs; 0 if it does not fit
+//------------------------------
+static int window_output_size(int n, int window, int stride, int padding)
+{
+	int span = n + 2 * padding - window;
+	if (window < 1 || stride < 1 || padding < 0 || span < 0)
+		return 0;
+	return span / stride + 1;
+}
+
+//------------------------------
+// Conv2D: check settings and shape, allocate W [F x C*k*k], b [1 x F]
+// and the im2col buffers [C*k*k x OH*OW]
+//------------------------------
+static int conv_setup(PNetwork pnet, int layer)
+{
+	PLayer cur = &pnet->layers[layer];
+	Layer_shape in = cur->in_shape;
+	int k = cur->config[CONV_KERNEL], s = cur->config[CONV_STRIDE], p = cur->config[CONV_PADDING];
+
+	if (cur->activation == ACTIVATION_SOFTMAX ||
+		window_output_size(in.h, k, s, p) != cur->shape.h ||
+		window_output_size(in.w, k, s, p) != cur->shape.w || cur->shape.h < 1 || cur->shape.w < 1)
+		return ERR_INVALID;
+
+	int patch = in.c * k * k;
+	int positions = cur->shape.h * cur->shape.w;
+
+	if (add_param(cur, cur->shape.c, patch, 1) != ERR_OK ||
+		add_param(cur, 1, cur->shape.c, 0) != ERR_OK ||
+		!(cur->t_scratch[0] = tensor_zeros(patch, positions)) ||
+		!(cur->t_scratch[1] = tensor_zeros(patch, positions)))
+	{
+		free_layer_params(cur);
+		return ERR_ALLOC;
+	}
+	return ERR_OK;
+}
+
+static void conv_init_weights(PNetwork pnet, int layer, Weight_init_type init_type)
+{
+	PLayer cur = &pnet->layers[layer];
+	int kk = cur->config[CONV_KERNEL] * cur->config[CONV_KERNEL];
+	init_weight_bias(pnet, cur->params[0].value, cur->params[1].value,
+	                 cur->in_shape.c * kk, cur->shape.c * kk, init_type);
+}
+
+//------------------------------
+// copy one sample's input patches into columns: col[(c*k + i)*k + j][oh*OW + ow]
+// = x[c][oh*s - p + i][ow*s - p + j], or 0 in the padding
+//------------------------------
+static void conv_im2col(const Layer *layer, const real *x, real *col)
+{
+	Layer_shape in = layer->in_shape;
+	int k = layer->config[CONV_KERNEL], s = layer->config[CONV_STRIDE], p = layer->config[CONV_PADDING];
+	int oh_n = layer->shape.h, ow_n = layer->shape.w;
+
+	for (int c = 0; c < in.c; c++)
+		for (int i = 0; i < k; i++)
+			for (int j = 0; j < k; j++)
+			{
+				real *row = col + ((c * k + i) * k + j) * oh_n * ow_n;
+				for (int oh = 0; oh < oh_n; oh++)
+				{
+					int ih = oh * s - p + i;
+					for (int ow = 0; ow < ow_n; ow++)
+					{
+						int iw = ow * s - p + j;
+						row[oh * ow_n + ow] = (ih >= 0 && ih < in.h && iw >= 0 && iw < in.w)
+							? x[(c * in.h + ih) * in.w + iw] : (real)0.0;
+					}
+				}
+			}
+}
+
+//------------------------------
+// the reverse of conv_im2col: add each column entry back to its input position
+//------------------------------
+static void conv_col2im(const Layer *layer, const real *col, real *x)
+{
+	Layer_shape in = layer->in_shape;
+	int k = layer->config[CONV_KERNEL], s = layer->config[CONV_STRIDE], p = layer->config[CONV_PADDING];
+	int oh_n = layer->shape.h, ow_n = layer->shape.w;
+
+	for (int c = 0; c < in.c; c++)
+		for (int i = 0; i < k; i++)
+			for (int j = 0; j < k; j++)
+			{
+				const real *row = col + ((c * k + i) * k + j) * oh_n * ow_n;
+				for (int oh = 0; oh < oh_n; oh++)
+				{
+					int ih = oh * s - p + i;
+					if (ih < 0 || ih >= in.h)
+						continue;
+					for (int ow = 0; ow < ow_n; ow++)
+					{
+						int iw = ow * s - p + j;
+						if (iw >= 0 && iw < in.w)
+							x[(c * in.h + ih) * in.w + iw] += row[oh * ow_n + ow];
+					}
+				}
+			}
+}
+
+//------------------------------
+// Conv2D forward, per sample: Y_s [F x OH*OW] = W [F x C*k*k] * im2col(X_s) + b
+// (rows of Y_s are channels, so the result is already in C, H, W order)
+//------------------------------
+static void conv_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	PTensor W = layer->params[0].value;
+	const real *bias = layer->params[1].value->values;
+	PTensor col = layer->t_scratch[0];
+	int filters = layer->shape.c, positions = layer->shape.h * layer->shape.w;
+	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = 0; b < rows; b++)
+	{
+		conv_im2col(layer, X->values + b * in_nodes, col->values);
+
+		Tensor y = tensor_view(Y->values + b * layer->node_count, filters, positions);
+		tensor_gemm((real)1.0, W, col, (real)0.0, &y);
+
+		for (int f = 0; f < filters; f++)
+			for (int i = 0; i < positions; i++)
+				y.values[f * positions + i] += bias[f];
+	}
+}
+
+//------------------------------
+// Conv2D backward, per sample: dW += dZ_s * im2col(X_s)^T, db += row sums of
+// dZ_s, and dX_s = col2im(W^T * dZ_s)
+//------------------------------
+static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
+{
+	PTensor W = layer->params[0].value;
+	PTensor dW = layer->params[0].grad;
+	real *db = layer->params[1].grad->values;
+	PTensor col = layer->t_scratch[0], dcol = layer->t_scratch[1];
+	int filters = layer->shape.c, positions = layer->shape.h * layer->shape.w;
+	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = 0; b < rows; b++)
+	{
+		Tensor dz = tensor_view(dZ->values + b * layer->node_count, filters, positions);
+
+		conv_im2col(layer, X->values + b * in_nodes, col->values);
+		tensor_gemm_transB((real)1.0, &dz, col, (real)1.0, dW);
+
+		for (int f = 0; f < filters; f++)
+			for (int i = 0; i < positions; i++)
+				db[f] += dz.values[f * positions + i];
+
+		if (dX)
+		{
+			real *dx = dX->values + b * in_nodes;
+			tensor_gemm_transA((real)1.0, W, &dz, (real)0.0, dcol);
+			memset(dx, 0, in_nodes * sizeof(real));
+			conv_col2im(layer, dcol->values, dx);
+		}
+	}
+}
+
+//------------------------------
+// MaxPool2D: no parameters; check settings and shape
+//------------------------------
+static int maxpool_setup(PNetwork pnet, int layer)
+{
+	PLayer cur = &pnet->layers[layer];
+	int size = cur->config[POOL_SIZE], stride = cur->config[POOL_STRIDE];
+
+	if (cur->activation != ACTIVATION_NULL || cur->shape.c != cur->in_shape.c ||
+		window_output_size(cur->in_shape.h, size, stride, 0) != cur->shape.h ||
+		window_output_size(cur->in_shape.w, size, stride, 0) != cur->shape.w || cur->shape.h < 1 || cur->shape.w < 1)
+		return ERR_INVALID;
+	return ERR_OK;
+}
+
+//------------------------------
+// index (within one sample's input) of the largest value in an output's
+// window; the first one wins ties
+//------------------------------
+static int maxpool_argmax(const Layer *layer, const real *x, int c, int oh, int ow)
+{
+	Layer_shape in = layer->in_shape;
+	int size = layer->config[POOL_SIZE], stride = layer->config[POOL_STRIDE];
+	int best = (c * in.h + oh * stride) * in.w + ow * stride;
+
+	for (int i = 0; i < size; i++)
+		for (int j = 0; j < size; j++)
+		{
+			int idx = (c * in.h + oh * stride + i) * in.w + ow * stride + j;
+			if (x[idx] > x[best])
+				best = idx;
+		}
+	return best;
+}
+
+static void maxpool_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = 0; b < rows; b++)
+	{
+		const real *x = X->values + b * in_nodes;
+		real *y = Y->values + b * layer->node_count;
+		for (int c = 0; c < layer->shape.c; c++)
+			for (int oh = 0; oh < layer->shape.h; oh++)
+				for (int ow = 0; ow < layer->shape.w; ow++)
+					y[(c * layer->shape.h + oh) * layer->shape.w + ow] = x[maxpool_argmax(layer, x, c, oh, ow)];
+	}
+}
+
+//------------------------------
+// MaxPool2D backward: each output's gradient goes to the input that was its
+// window's maximum (found again from X, which is unchanged since forward)
+//------------------------------
+static void maxpool_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
+{
+	if (!dX)
+		return;
+
+	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = 0; b < rows; b++)
+	{
+		const real *x = X->values + b * in_nodes;
+		const real *dz = dZ->values + b * layer->node_count;
+		real *dx = dX->values + b * in_nodes;
+
+		memset(dx, 0, in_nodes * sizeof(real));
+		for (int c = 0; c < layer->shape.c; c++)
+			for (int oh = 0; oh < layer->shape.h; oh++)
+				for (int ow = 0; ow < layer->shape.w; ow++)
+					dx[maxpool_argmax(layer, x, c, oh, ow)] += dz[(c * layer->shape.h + oh) * layer->shape.w + ow];
+	}
+}
+
+//------------------------------
+// Flatten: a reshape; values are already stored flat, so it copies them
+//------------------------------
+static int flatten_setup(PNetwork pnet, int layer)
+{
+	PLayer cur = &pnet->layers[layer];
+	int in_nodes = cur->in_shape.c * cur->in_shape.h * cur->in_shape.w;
+
+	if (cur->activation != ACTIVATION_NULL || cur->shape.c != in_nodes || cur->shape.h != 1 || cur->shape.w != 1)
+		return ERR_INVALID;
+	return ERR_OK;
+}
+
+static void flatten_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	memcpy(Y->values, X->values, (size_t)rows * layer->node_count * sizeof(real));
+}
+
+static void flatten_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
+{
+	(void)X;
+	if (dX)
+		memcpy(dX->values, dZ->values, (size_t)rows * layer->node_count * sizeof(real));
+}
+
+//------------------------------
 // Operations every layer kind provides
 //------------------------------
 typedef struct {
 	const char *name;
 	int config_count;		// how many config[] entries the kind uses (saved in v2 files)
-	// allocate and register params[]; shape and node_count are already set
+	// check the layer's settings and shape, then allocate and register params[];
+	// shape, in_shape, config and node_count are already set. Returns ERR_INVALID
+	// for bad settings or ERR_ALLOC.
 	int  (*setup)(PNetwork pnet, int layer);
+	// NULL for kinds without parameters
 	void (*init_weights)(PNetwork pnet, int layer, Weight_init_type init_type);
 	// linear part of the forward pass for X [rows x input nodes] into Y
 	void (*forward)(PLayer layer, const PTensor X, PTensor Y, int rows);
@@ -619,7 +920,8 @@ typedef struct {
 	// accumulate parameter gradients from dZ; write dX unless it is NULL
 	void (*backward)(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows);
 	// ONNX export: the layer's initializers, then its nodes from input to output
-	// (the activation node is added by the caller); *first tracks JSON commas
+	// (the activation node is added by the caller); *first tracks JSON commas.
+	// NULL until the kind supports ONNX export.
 	void (*onnx_initializers)(FILE *fptr, const PNetwork pnet, int layer, int *first);
 	void (*onnx_nodes)(FILE *fptr, const PNetwork pnet, int layer, const char *input,
 	                   char *output, size_t output_size, int *first);
@@ -634,6 +936,12 @@ static void dense_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const c
 static const Layer_ops g_layer_ops[] = {
 	{ "Dense", 0, dense_setup, dense_init_weights, dense_forward, dense_forward_single, dense_backward,
 	  dense_onnx_initializers, dense_onnx_nodes },
+	{ "Conv2D", CONV_CONFIG_COUNT, conv_setup, conv_init_weights, conv_forward, NULL, conv_backward,
+	  NULL, NULL },
+	{ "MaxPool2D", POOL_CONFIG_COUNT, maxpool_setup, NULL, maxpool_forward, NULL, maxpool_backward,
+	  NULL, NULL },
+	{ "Flatten", 0, flatten_setup, NULL, flatten_forward, NULL, flatten_backward,
+	  NULL, NULL },
 };
 
 static const Layer_ops *layer_ops(const Layer *layer)
@@ -682,7 +990,9 @@ static void init_weights(PNetwork pnet)
 			}
 		}
 
-		layer_ops(&pnet->layers[layer])->init_weights(pnet, layer, init_type);
+		const Layer_ops *ops = layer_ops(&pnet->layers[layer]);
+		if (ops->init_weights)
+			ops->init_weights(pnet, layer, init_type);
 	}
 
 	pnet->weights_set = 1;
@@ -1610,7 +1920,8 @@ static int add_layer(PNetwork pnet, Layer_kind kind, Layer_shape shape, const in
 	int node_count = shape.c * shape.h * shape.w;
 	if (shape.c <= 0 || shape.h <= 0 || shape.w <= 0 ||
 		(int)kind < 0 || (size_t)kind >= sizeof(g_layer_ops) / sizeof(g_layer_ops[0]) ||
-		config_count < 0 || config_count > ANN_LAYER_CONFIG_MAX) {
+		config_count < 0 || config_count > ANN_LAYER_CONFIG_MAX ||
+		(kind != LAYER_KIND_DENSE && pnet->layer_count == 0)) {
 		invoke_error_callback(ERR_INVALID, "ann_add_layer");
 		return ERR_INVALID;
 	}
@@ -1638,6 +1949,9 @@ static int add_layer(PNetwork pnet, Layer_kind kind, Layer_shape shape, const in
 	}
 
 	int cur_layer = pnet->layer_count - 1;
+
+	// start from a clean slot (an earlier failed add may have used it)
+	memset(&pnet->layers[cur_layer], 0, sizeof(Layer));
 	pnet->layers[cur_layer].layer_type = layer_type;
 	pnet->layers[cur_layer].activation = activation_type;
 
@@ -1697,20 +2011,113 @@ static int add_layer(PNetwork pnet, Layer_kind kind, Layer_shape shape, const in
 	pnet->layers[cur_layer].node_count	= node_count;
 	pnet->layers[cur_layer].kind		= kind;
 	pnet->layers[cur_layer].shape		= shape;
+	if (cur_layer > 0)
+		pnet->layers[cur_layer].in_shape = pnet->layers[cur_layer - 1].shape;
 	for (int i = 0; i < config_count; i++)
 		pnet->layers[cur_layer].config[i] = config[i];
 
-	// create the parameters that produce this layer from the one below
-	if (cur_layer > 0 && layer_ops(&pnet->layers[cur_layer])->setup(pnet, cur_layer) != ERR_OK)
+	// check the kind's settings and create the parameters that produce this
+	// layer from the one below
+	int err = cur_layer > 0 ? layer_ops(&pnet->layers[cur_layer])->setup(pnet, cur_layer) : ERR_OK;
+	if (err != ERR_OK)
 	{
 		tensor_free(pnet->layers[cur_layer].t_values);
 		pnet->layers[cur_layer].t_values = NULL;
 		pnet->layer_count--;
-		invoke_error_callback(ERR_ALLOC, "ann_add_layer");
-		return ERR_ALLOC;
+		invoke_error_callback(err, "ann_add_layer");
+		return err;
 	}
 
 	return ERR_OK;
+}
+
+//------------------------------
+// shape of the last layer added; NULL for an empty network
+//------------------------------
+static const Layer_shape *last_shape(const PNetwork pnet)
+{
+	return (pnet && pnet->layer_count > 0) ? &pnet->layers[pnet->layer_count - 1].shape : NULL;
+}
+
+//------------------------------
+// add an input layer of shape (channels, height, width)
+//------------------------------
+int ann_add_input(PNetwork pnet, int channels, int height, int width)
+{
+	if (pnet && pnet->layer_count != 0)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_add_input");
+		return ERR_INVALID;
+	}
+
+	Layer_shape shape;
+	shape.c = channels;
+	shape.h = height;
+	shape.w = width;
+	return add_layer(pnet, LAYER_KIND_DENSE, shape, NULL, 0, LAYER_INPUT, ACTIVATION_NULL);
+}
+
+//------------------------------
+// add a 2-D convolution layer
+//------------------------------
+int ann_add_conv2d(PNetwork pnet, int filters, int kernel_size, int stride, int padding, Activation_type activation)
+{
+	const Layer_shape *in = last_shape(pnet);
+	Layer_shape shape;
+	int config[CONV_CONFIG_COUNT];
+
+	config[CONV_KERNEL] = kernel_size;
+	config[CONV_STRIDE] = stride;
+	config[CONV_PADDING] = padding;
+	shape.c = filters;
+	shape.h = in ? window_output_size(in->h, kernel_size, stride, padding) : 1;
+	shape.w = in ? window_output_size(in->w, kernel_size, stride, padding) : 1;
+
+	// a window that does not fit gives a zero size (add_layer rejects a conv
+	// layer in an empty network, and filters < 1)
+	if (in && (shape.h < 1 || shape.w < 1))
+	{
+		invoke_error_callback(ERR_INVALID, "ann_add_conv2d");
+		return ERR_INVALID;
+	}
+	return add_layer(pnet, LAYER_KIND_CONV2D, shape, config, CONV_CONFIG_COUNT, LAYER_HIDDEN, activation);
+}
+
+//------------------------------
+// add a 2-D max pooling layer
+//------------------------------
+int ann_add_maxpool2d(PNetwork pnet, int pool_size, int stride)
+{
+	const Layer_shape *in = last_shape(pnet);
+	Layer_shape shape;
+	int config[POOL_CONFIG_COUNT];
+
+	config[POOL_SIZE] = pool_size;
+	config[POOL_STRIDE] = stride;
+	shape.c = in ? in->c : 1;
+	shape.h = in ? window_output_size(in->h, pool_size, stride, 0) : 1;
+	shape.w = in ? window_output_size(in->w, pool_size, stride, 0) : 1;
+
+	if (in && (shape.h < 1 || shape.w < 1))
+	{
+		invoke_error_callback(ERR_INVALID, "ann_add_maxpool2d");
+		return ERR_INVALID;
+	}
+	return add_layer(pnet, LAYER_KIND_MAXPOOL2D, shape, config, POOL_CONFIG_COUNT, LAYER_HIDDEN, ACTIVATION_NULL);
+}
+
+//------------------------------
+// add a flatten layer
+//------------------------------
+int ann_add_flatten(PNetwork pnet)
+{
+	const Layer_shape *in = last_shape(pnet);
+	Layer_shape shape;
+
+	shape.c = in ? in->c * in->h * in->w : 1;
+	shape.h = 1;
+	shape.w = 1;
+	return add_layer(pnet, LAYER_KIND_FLATTEN, shape, NULL, 0, LAYER_HIDDEN, ACTIVATION_NULL);
 }
 
 //------------------------------
@@ -1923,6 +2330,14 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 
 	if (outputs->rows != rows)
 		return 0.0;
+
+	// the data's columns must match the input and output layers
+	if (pnet->layer_count < 2 || inputs->cols != pnet->layers[0].node_count ||
+		outputs->cols != pnet->layers[pnet->layer_count - 1].node_count)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_train_network");
+		return 0.0;
+	}
 
 	if (!check_loss_output(pnet, "ann_train_network"))
 		return 0.0;
@@ -2696,10 +3111,12 @@ void ann_set_dropout(PNetwork pnet, real rate)
 	
 	pnet->default_dropout = rate;
 	
-	// Apply to all existing hidden layers that don't have a custom rate
+	// Apply to all existing hidden dense and conv layers that don't have a
+	// custom rate (pooling and flatten layers only move values around)
 	for (int i = 1; i < pnet->layer_count - 1; i++)
 	{
-		if (pnet->layers[i].dropout_rate == (real)0.0)
+		Layer_kind kind = pnet->layers[i].kind;
+		if ((kind == LAYER_KIND_DENSE || kind == LAYER_KIND_CONV2D) && pnet->layers[i].dropout_rate == (real)0.0)
 			pnet->layers[i].dropout_rate = rate;
 	}
 }
@@ -3094,6 +3511,19 @@ static int network_is_dense(const PNetwork pnet)
 }
 
 //------------------------------
+// 1 if the v1 format can hold the network: dense layers with flat shapes
+//------------------------------
+static int network_fits_v1(const PNetwork pnet)
+{
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		if (pnet->layers[layer].shape.h != 1 || pnet->layers[layer].shape.w != 1)
+			return 0;
+	}
+	return network_is_dense(pnet);
+}
+
+//------------------------------
 // save a network in the text or binary format
 //------------------------------
 static int save_network(const PNetwork pnet, const char *filename, int binary, const char *function_name)
@@ -3111,7 +3541,7 @@ static int save_network(const PNetwork pnet, const char *filename, int binary, c
 		return ERR_IO;
 	}
 
-	int v1 = network_is_dense(pnet);
+	int v1 = network_fits_v1(pnet);
 
 	// header
 	int ok = write_int(fptr, binary, v1 ? ANN_FORMAT_V1 : ANN_FORMAT_V2) &&
@@ -3502,6 +3932,17 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	{
 		invoke_error_callback(ERR_INVALID, "ann_export_onnx");
 		return ERR_INVALID;
+	}
+
+	// every layer kind needs ONNX support
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+	{
+		const Layer_ops *ops = layer_ops(&pnet->layers[layer]);
+		if (!ops->onnx_initializers || !ops->onnx_nodes)
+		{
+			invoke_error_callback(ERR_INVALID, "ann_export_onnx");
+			return ERR_INVALID;
+		}
 	}
 
 	FILE *fptr = fopen(filename, "wt");

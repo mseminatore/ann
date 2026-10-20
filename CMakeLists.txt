@@ -32,6 +32,7 @@ add_test(NAME test_forward_pass COMMAND test_forward_pass)
 add_test(NAME test_gradients COMMAND test_gradients)
 add_test(NAME test_comprehensive_callbacks COMMAND test_comprehensive_callbacks)
 add_test(NAME test_training_options COMMAND test_training_options)
+add_test(NAME test_conv COMMAND test_conv)
 
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
@@ -261,3 +262,6 @@ target_link_libraries(test_comprehensive_callbacks libann ${BLAS_LIB} ${MATH_LIB
 
 add_executable(test_training_options tests/test_training_options.c testy/test_main.c)
 target_link_libraries(test_training_options libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_conv tests/test_conv.c testy/test_main.c)
+target_link_libraries(test_conv libann ${BLAS_LIB} ${MATH_LIB})

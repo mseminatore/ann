@@ -247,6 +247,32 @@ static void run_gpu_consistency_tests(void)
     }
 
     // ========================================================================
+    SUITE("Non-Dense Networks Stay on the CPU");
+    // ========================================================================
+    {
+        PNetwork conv = ann_make_network(OPT_ADAM, LOSS_MSE);
+        ann_add_input(conv, 1, 2, 2);
+        ann_add_conv2d(conv, 2, 2, 1, 0, ACTIVATION_SIGMOID);   // -> 2x1x1
+        ann_add_layer(conv, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+        ann_set_epoch_limit(conv, 5);
+        TESTEX("Uploading a conv network returns ERR_INVALID", ann_gpu_upload_network(conv) == ERR_INVALID);
+        TESTEX("and leaves its weights off the GPU", conv->layers[1].params[0].value->gpu_buf == NULL);
+
+        // four 1x2x2 images: the XOR inputs in the top row, zeros below
+        real images[16] = {0,0,0,0, 0,1,0,0, 1,0,0,0, 1,1,0,0};
+        PTensor tin  = tensor_create_from_array(4, 4, images);
+        PTensor tout = tensor_create_from_array(4, 1, gc_xor_out);
+        real before = 0.0f, out = 0.0f;
+        ann_predict(conv, &images[4], &before);
+        ann_train_network(conv, tin, tout, 4);
+        ann_predict(conv, &images[4], &out);
+        TESTEX("The conv network still trains (on the CPU)", isfinite(out) && out != before);
+        tensor_free(tin);
+        tensor_free(tout);
+        ann_free_network(conv);
+    }
+
+    // ========================================================================
     SUITE("GPU/CPU Weight Consistency - Online Training");
     // ========================================================================
 

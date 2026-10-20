@@ -171,6 +171,9 @@ install(FILES ann.h tensor.h ann_config.h ann_hypertune.h json.h ann_gpu_backend
 add_executable(mnist examples/mnist.c)
 target_link_libraries(mnist libann ${BLAS_LIB} ${MATH_LIB})
 
+add_executable(fashion_cnn examples/fashion_cnn.c)
+target_link_libraries(fashion_cnn libann ${BLAS_LIB} ${MATH_LIB})
+
 add_executable(mnist_hypertune_tpe examples/mnist_hypertune_tpe.c)
 target_link_libraries(mnist_hypertune_tpe libann ${BLAS_LIB} ${MATH_LIB})
 

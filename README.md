@@ -154,7 +154,7 @@ ann_set_layer_dropout | set dropout rate for a specific layer
 ann_get_layer_count | get the number of layers in the network
 ann_get_layer_nodes | get the number of nodes in a layer
 ann_get_layer_activation | get the activation type of a layer
-ann_get_layer_kind | get what a layer computes (`LAYER_KIND_DENSE`)
+ann_get_layer_kind | get what a layer computes (`LAYER_KIND_DENSE`, `_CONV2D`, `_MAXPOOL2D`, `_FLATTEN`)
 ann_export_onnx | export trained network to ONNX JSON format
 ann_import_onnx | import network from ONNX JSON file
 ann_export_pikchr | export network architecture as PIKCHR diagram
@@ -286,12 +286,45 @@ Then render with: `pikchr network.pikchr > network.svg`
 - **Simple mode** (networks with >10 nodes per layer): Box diagram with layer info
 - **Detailed mode** (≤10 nodes per layer): Individual node circles with connections
 
+## Convolutional Networks
+
+Image inputs, convolution, max pooling and flatten layers build small CNNs.
+Each sample is stored as `C*H*W` values in channel, row, column order (as in
+ONNX and PyTorch), so image data loaded with `ann_load_csv()` can be used
+directly.
+
+```c
+PNetwork net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+ann_add_input(net, 1, 28, 28);                      // channels, height, width
+ann_add_conv2d(net, 8, 3, 1, 0, ACTIVATION_RELU);   // filters, kernel, stride, padding -> 8x26x26
+ann_add_maxpool2d(net, 2, 2);                       // pool size, stride               -> 8x13x13
+ann_add_flatten(net);                               // optional before a dense layer  -> 1352
+ann_add_layer(net, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+```
+
+Function | Description
+-------- | -----------
+ann_add_input | input layer with an image shape (channels, height, width)
+ann_add_conv2d | 2-D convolution with square kernels, stride and zero padding
+ann_add_maxpool2d | 2-D max pooling per channel
+ann_add_flatten | reshape an image to a vector (optional: dense layers flatten their input)
+
+Output sizes are `(H + 2*padding - kernel) / stride + 1` for convolutions and
+`(H - pool) / stride + 1` for pooling. Settings that don't fit the input, or
+an activation other than none on pool/flatten layers, return `ERR_INVALID`.
+
+Convolutional networks train on the CPU (`ann_gpu_upload_network()` returns
+`ERR_INVALID` for them), save in model format v2, and export to ONNX as
+`Conv`, `MaxPool` and `Flatten` with a `[batch, C, H, W]` input;
+`ann_import_onnx()` does not read them yet. The `fashion_cnn` example trains
+a two-convolution network on Fashion-MNIST to about 90% test accuracy.
+
 ## Saved Model Formats
 
 `ann_save_network()` (text, `.nna`) and `ann_save_network_binary()` (`.nnb`)
 write format version 1 for networks made only of dense layers, so files stay
-readable by older libann releases. Networks with other layer kinds are saved
-as version 2, which also records each layer's kind and shape. The loaders read
+readable by older libann releases. Networks with other layer kinds or an image-shaped
+input are saved as version 2, which also records each layer's kind and shape. The loaders read
 both versions and return `NULL` for unknown versions or truncated files.
 
 ## Learning Curve Export
@@ -762,6 +795,7 @@ with the library and its usage. These are:
 * **save_test** - demonstrates loading and testing a pre-trained text model file
 * **save_test_binary** - demonstrates loading and testing a pre-trained binary model file
 * **mnist** - model for the MNIST datasets (digit or fashion)
+* **fashion_cnn** - convolutional network (conv, max pooling, flatten) for Fashion-MNIST
 * **mnist_hypertune_tpe** - TPE hyperparameter search on Fashion-MNIST, including per-layer activations
 * **mnist_hypertune_random** - random search over the full search space on Fashion-MNIST
 * **mnist_hypertune_bayes** - Bayesian (Gaussian Process) optimization on Fashion-MNIST

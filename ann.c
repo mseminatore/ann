@@ -649,8 +649,23 @@ static int window_output_size(int n, int window, int stride, int padding)
 }
 
 //------------------------------
+// make sure *t has at least rows rows of cols values (contents are not kept)
+//------------------------------
+static int ensure_rows(PTensor *t, int rows, int cols)
+{
+	if (*t && (*t)->rows >= rows && (*t)->cols == cols)
+		return ERR_OK;
+
+	tensor_free(*t);
+	*t = tensor_zeros(rows, cols);
+	return *t ? ERR_OK : ERR_ALLOC;
+}
+
+//------------------------------
 // Conv2D: check settings and shape, allocate W [F x C*k*k], b [1 x F]
-// and the im2col buffers [C*k*k x OH*OW]
+// and one sample's column gradient [C*k*k x OH*OW]. The forward pass keeps
+// each sample's im2col columns in t_scratch[0] (one row per sample) for the
+// backward pass; it grows to the batch size on first use.
 //------------------------------
 static int conv_setup(PNetwork pnet, int layer)
 {
@@ -668,7 +683,7 @@ static int conv_setup(PNetwork pnet, int layer)
 
 	if (add_param(cur, cur->shape.c, patch, 1) != ERR_OK ||
 		add_param(cur, 1, cur->shape.c, 0) != ERR_OK ||
-		!(cur->t_scratch[0] = tensor_zeros(patch, positions)) ||
+		!(cur->t_scratch[0] = tensor_zeros(1, patch * positions)) ||
 		!(cur->t_scratch[1] = tensor_zeros(patch, positions)))
 	{
 		free_layer_params(cur);
@@ -686,6 +701,23 @@ static void conv_init_weights(PNetwork pnet, int layer, Weight_init_type init_ty
 }
 
 //------------------------------
+// the outputs ow in [*lo, *hi) whose input column ow*s - p + j lies inside
+// [0, width); the others read padding
+//------------------------------
+static void conv_valid_range(int width, int out_width, int s, int p, int j, int *lo, int *hi)
+{
+	// ow*s - p + j >= 0  <=>  ow >= ceil((p - j) / s)
+	int first = p - j > 0 ? (p - j + s - 1) / s : 0;
+	// ow*s - p + j <= width - 1  <=>  ow <= floor((width - 1 + p - j) / s)
+	int last = width - 1 + p - j >= 0 ? (width - 1 + p - j) / s : -1;
+
+	*lo = first < out_width ? first : out_width;
+	*hi = last + 1 < out_width ? last + 1 : out_width;
+	if (*hi < *lo)
+		*hi = *lo;
+}
+
+//------------------------------
 // copy one sample's input patches into columns: col[(c*k + i)*k + j][oh*OW + ow]
 // = x[c][oh*s - p + i][ow*s - p + j], or 0 in the padding
 //------------------------------
@@ -700,15 +732,29 @@ static void conv_im2col(const Layer *layer, const real *x, real *col)
 			for (int j = 0; j < k; j++)
 			{
 				real *row = col + ((c * k + i) * k + j) * oh_n * ow_n;
+				int lo, hi;
+				conv_valid_range(in.w, ow_n, s, p, j, &lo, &hi);
+
 				for (int oh = 0; oh < oh_n; oh++)
 				{
+					real *out = row + oh * ow_n;
 					int ih = oh * s - p + i;
-					for (int ow = 0; ow < ow_n; ow++)
+					if (ih < 0 || ih >= in.h)
 					{
-						int iw = ow * s - p + j;
-						row[oh * ow_n + ow] = (ih >= 0 && ih < in.h && iw >= 0 && iw < in.w)
-							? x[(c * in.h + ih) * in.w + iw] : (real)0.0;
+						memset(out, 0, ow_n * sizeof(real));
+						continue;
 					}
+
+					const real *src = x + (c * in.h + ih) * in.w + lo * s - p + j;
+					for (int ow = 0; ow < lo; ow++)
+						out[ow] = (real)0.0;
+					if (s == 1)
+						memcpy(out + lo, src, (hi - lo) * sizeof(real));
+					else
+						for (int ow = lo; ow < hi; ow++)
+							out[ow] = src[(ow - lo) * s];
+					for (int ow = hi; ow < ow_n; ow++)
+						out[ow] = (real)0.0;
 				}
 			}
 }
@@ -727,17 +773,19 @@ static void conv_col2im(const Layer *layer, const real *col, real *x)
 			for (int j = 0; j < k; j++)
 			{
 				const real *row = col + ((c * k + i) * k + j) * oh_n * ow_n;
+				int lo, hi;
+				conv_valid_range(in.w, ow_n, s, p, j, &lo, &hi);
+
 				for (int oh = 0; oh < oh_n; oh++)
 				{
 					int ih = oh * s - p + i;
 					if (ih < 0 || ih >= in.h)
 						continue;
-					for (int ow = 0; ow < ow_n; ow++)
-					{
-						int iw = ow * s - p + j;
-						if (iw >= 0 && iw < in.w)
-							x[(c * in.h + ih) * in.w + iw] += row[oh * ow_n + ow];
-					}
+
+					const real *src = row + oh * ow_n;
+					real *dst = x + (c * in.h + ih) * in.w + lo * s - p + j;
+					for (int ow = lo; ow < hi; ow++)
+						dst[(ow - lo) * s] += src[ow];
 				}
 			}
 }
@@ -750,46 +798,58 @@ static void conv_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 {
 	PTensor W = layer->params[0].value;
 	const real *bias = layer->params[1].value->values;
-	PTensor col = layer->t_scratch[0];
 	int filters = layer->shape.c, positions = layer->shape.h * layer->shape.w;
+	int patch = W->cols;
 	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+
+	if (ensure_rows(&layer->t_scratch[0], rows, patch * positions) != ERR_OK)
+		return;
 
 	for (int b = 0; b < rows; b++)
 	{
-		conv_im2col(layer, X->values + b * in_nodes, col->values);
+		Tensor col = tensor_view(layer->t_scratch[0]->values + (size_t)b * patch * positions, patch, positions);
+		conv_im2col(layer, X->values + b * in_nodes, col.values);
 
 		Tensor y = tensor_view(Y->values + b * layer->node_count, filters, positions);
-		tensor_gemm((real)1.0, W, col, (real)0.0, &y);
+		tensor_gemm((real)1.0, W, &col, (real)0.0, &y);
 
 		for (int f = 0; f < filters; f++)
+		{
+			real *y_row = y.values + f * positions;
 			for (int i = 0; i < positions; i++)
-				y.values[f * positions + i] += bias[f];
+				y_row[i] += bias[f];
+		}
 	}
 }
 
 //------------------------------
-// Conv2D backward, per sample: dW += dZ_s * im2col(X_s)^T, db += row sums of
-// dZ_s, and dX_s = col2im(W^T * dZ_s)
+// Conv2D backward, per sample: dW += dZ_s * col_s^T, db += row sums of dZ_s,
+// and dX_s = col2im(W^T * dZ_s), with col_s kept from the forward pass
 //------------------------------
 static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
 {
 	PTensor W = layer->params[0].value;
 	PTensor dW = layer->params[0].grad;
 	real *db = layer->params[1].grad->values;
-	PTensor col = layer->t_scratch[0], dcol = layer->t_scratch[1];
+	PTensor dcol = layer->t_scratch[1];
 	int filters = layer->shape.c, positions = layer->shape.h * layer->shape.w;
+	int patch = W->cols;
 	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+	(void)X;
 
 	for (int b = 0; b < rows; b++)
 	{
 		Tensor dz = tensor_view(dZ->values + b * layer->node_count, filters, positions);
+		Tensor col = tensor_view(layer->t_scratch[0]->values + (size_t)b * patch * positions, patch, positions);
 
-		conv_im2col(layer, X->values + b * in_nodes, col->values);
-		tensor_gemm_transB((real)1.0, &dz, col, (real)1.0, dW);
+		tensor_gemm_transB((real)1.0, &dz, &col, (real)1.0, dW);
 
 		for (int f = 0; f < filters; f++)
+		{
+			const real *dz_row = dz.values + f * positions;
 			for (int i = 0; i < positions; i++)
-				db[f] += dz.values[f * positions + i];
+				db[f] += dz_row[i];
+		}
 
 		if (dX)
 		{
@@ -802,7 +862,9 @@ static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTens
 }
 
 //------------------------------
-// MaxPool2D: no parameters; check settings and shape
+// MaxPool2D: no parameters; check settings and shape. The forward pass
+// records which input each output took in t_scratch[0] (one row per sample)
+// so the backward pass can route gradients without searching again.
 //------------------------------
 static int maxpool_setup(PNetwork pnet, int layer)
 {
@@ -817,46 +879,65 @@ static int maxpool_setup(PNetwork pnet, int layer)
 }
 
 //------------------------------
-// index (within one sample's input) of the largest value in an output's
-// window; the first one wins ties
+// MaxPool2D forward: each output is its window's largest input (the first
+// one on ties); its index within the sample is saved for backward
 //------------------------------
-static int maxpool_argmax(const Layer *layer, const real *x, int c, int oh, int ow)
+static void maxpool_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 {
 	Layer_shape in = layer->in_shape;
 	int size = layer->config[POOL_SIZE], stride = layer->config[POOL_STRIDE];
-	int best = (c * in.h + oh * stride) * in.w + ow * stride;
+	int in_nodes = in.c * in.h * in.w;
+	int oh_n = layer->shape.h, ow_n = layer->shape.w;
 
-	for (int i = 0; i < size; i++)
-		for (int j = 0; j < size; j++)
-		{
-			int idx = (c * in.h + oh * stride + i) * in.w + ow * stride + j;
-			if (x[idx] > x[best])
-				best = idx;
-		}
-	return best;
-}
-
-static void maxpool_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
-{
-	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+	if (ensure_rows(&layer->t_scratch[0], rows, layer->node_count) != ERR_OK)
+		return;
 
 	for (int b = 0; b < rows; b++)
 	{
 		const real *x = X->values + b * in_nodes;
 		real *y = Y->values + b * layer->node_count;
+		real *arg = layer->t_scratch[0]->values + (size_t)b * layer->node_count;
+
 		for (int c = 0; c < layer->shape.c; c++)
-			for (int oh = 0; oh < layer->shape.h; oh++)
-				for (int ow = 0; ow < layer->shape.w; ow++)
-					y[(c * layer->shape.h + oh) * layer->shape.w + ow] = x[maxpool_argmax(layer, x, c, oh, ow)];
+			for (int oh = 0; oh < oh_n; oh++)
+			{
+				int out = (c * oh_n + oh) * ow_n;
+				int row0 = (c * in.h + oh * stride) * in.w;
+
+				for (int ow = 0; ow < ow_n; ow++, out++)
+				{
+					int best = row0 + ow * stride;
+					if (size == 2)
+					{
+						// the common 2x2 window, unrolled in the same scan order
+						int idx = best;
+						if (x[idx + 1] > x[best]) best = idx + 1;
+						if (x[idx + in.w] > x[best]) best = idx + in.w;
+						if (x[idx + in.w + 1] > x[best]) best = idx + in.w + 1;
+					}
+					else
+					{
+						for (int i = 0; i < size; i++)
+							for (int j = 0; j < size; j++)
+							{
+								int idx = row0 + ow * stride + i * in.w + j;
+								if (x[idx] > x[best])
+									best = idx;
+							}
+					}
+					y[out] = x[best];
+					arg[out] = (real)best;	// exact: indices are far below 2^24
+				}
+			}
 	}
 }
 
 //------------------------------
-// MaxPool2D backward: each output's gradient goes to the input that was its
-// window's maximum (found again from X, which is unchanged since forward)
+// MaxPool2D backward: each output's gradient goes to the input it took
 //------------------------------
 static void maxpool_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
 {
+	(void)X;
 	if (!dX)
 		return;
 
@@ -864,15 +945,13 @@ static void maxpool_backward(PLayer layer, const PTensor X, const PTensor dZ, PT
 
 	for (int b = 0; b < rows; b++)
 	{
-		const real *x = X->values + b * in_nodes;
 		const real *dz = dZ->values + b * layer->node_count;
+		const real *arg = layer->t_scratch[0]->values + (size_t)b * layer->node_count;
 		real *dx = dX->values + b * in_nodes;
 
 		memset(dx, 0, in_nodes * sizeof(real));
-		for (int c = 0; c < layer->shape.c; c++)
-			for (int oh = 0; oh < layer->shape.h; oh++)
-				for (int ow = 0; ow < layer->shape.w; ow++)
-					dx[maxpool_argmax(layer, x, c, oh, ow)] += dz[(c * layer->shape.h + oh) * layer->shape.w + ow];
+		for (int out = 0; out < layer->node_count; out++)
+			dx[(int)arg[out]] += dz[out];
 	}
 }
 
@@ -1416,16 +1495,15 @@ void ann_mse_output_delta(Activation_type act, real *delta, const real *Y, const
 		}
 		break;
 
+	// branch-free selects so the loops vectorize
 	case ACTIVATION_RELU:
 		for (int i = 0; i < total; i++)
-			if (Z[i] <= (real)0.0)
-				delta[i] = (real)0.0;
+			delta[i] = Z[i] <= (real)0.0 ? (real)0.0 : delta[i];
 		break;
 
 	case ACTIVATION_LEAKY_RELU:
 		for (int i = 0; i < total; i++)
-			if (Z[i] <= (real)0.0)
-				delta[i] *= (real)0.01;
+			delta[i] = Z[i] <= (real)0.0 ? delta[i] * (real)0.01 : delta[i];
 		break;
 
 	case ACTIVATION_GELU:

@@ -61,6 +61,10 @@ fashion_cnn: $(LIBANN) examples/fashion_cnn.o
 export_model: $(LIBANN) examples/export_model.o
 	$(CC) -o $@ examples/export_model.o $(LIBANN) $(LFLAGS)
 
+# needs fashion_q.h and fashion_f.h from export_model; not part of 'all'
+run_exported: examples/run_exported.c fashion_q.h fashion_f.h ann_rt.h
+	$(CC) -O2 -I. -o $@ examples/run_exported.c -lm
+
 mnist_hypertune_tpe: $(LIBANN) examples/mnist_hypertune_tpe.o
 	$(CC) -o $@ examples/mnist_hypertune_tpe.o $(LIBANN) $(LFLAGS)
 
@@ -151,5 +155,5 @@ examples/%.o: examples/%.c $(DEPS)
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) -I. $< -o $@
 
 clean:
-	rm -f $(LIBANN) $(LIBANN_SO) $(LIB_OBJS) $(SHARED_OBJS) $(TARGET) fashion_cnn export_model logic digit5x7 mnist_hypertune_tpe mnist_hypertune_grid mnist_hypertune_random mnist_hypertune_bayes save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json test_gradients test_comprehensive_callbacks test_training_options test_conv test_threads test_quantize testy/test_main.o
+	rm -f $(LIBANN) $(LIBANN_SO) $(LIB_OBJS) $(SHARED_OBJS) $(TARGET) fashion_cnn export_model run_exported logic digit5x7 mnist_hypertune_tpe mnist_hypertune_grid mnist_hypertune_random mnist_hypertune_bayes save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json test_gradients test_comprehensive_callbacks test_training_options test_conv test_threads test_quantize testy/test_main.o
 	rm -f tests/*.o examples/*.o

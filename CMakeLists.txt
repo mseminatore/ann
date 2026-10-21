@@ -183,6 +183,15 @@ target_link_libraries(fashion_cnn libann ${BLAS_LIB} ${MATH_LIB})
 add_executable(export_model examples/export_model.c)
 target_link_libraries(export_model libann ${BLAS_LIB} ${MATH_LIB})
 
+# run_exported builds the headers export_model writes, without libann. Not in
+# the default build since the headers exist only after export_model runs:
+#   cmake -DEXPORT_HEADER_DIR=<dir with fashion_q.h, fashion_f.h> ..
+#   cmake --build . --target run_exported
+set(EXPORT_HEADER_DIR ${CMAKE_CURRENT_BINARY_DIR} CACHE PATH "Directory holding the headers export_model wrote")
+add_executable(run_exported EXCLUDE_FROM_ALL examples/run_exported.c)
+target_include_directories(run_exported PRIVATE ${EXPORT_HEADER_DIR} ${CMAKE_SOURCE_DIR})
+target_link_libraries(run_exported ${MATH_LIB})
+
 add_executable(mnist_hypertune_tpe examples/mnist_hypertune_tpe.c)
 target_link_libraries(mnist_hypertune_tpe libann ${BLAS_LIB} ${MATH_LIB})
 

@@ -49,6 +49,19 @@ int classify(const int8_t *image)            // MODEL_INPUT_SIZE int8 values
 ./export_model -m mnist-fashion.nna fashion-mnist_train.csv fashion-mnist_test.csv
 ```
 
+`examples/run_exported.c` is the other half: a program built without libann, from just the
+generated `fashion_q.h` and `fashion_f.h` plus `ann_rt.h`. It runs the test set through both
+headers and prints their accuracy, which should match what `export_model` printed, and the time
+per image. It is not in the default build, because the headers exist only after `export_model`
+runs:
+
+```bash
+cmake -DEXPORT_HEADER_DIR=<dir with the headers> .. && cmake --build . --target run_exported
+./run_exported fashion-mnist_test.csv
+
+make run_exported      # Makefile: expects the headers in the project root
+```
+
 ## API
 
 | Function | Purpose |

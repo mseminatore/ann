@@ -27,6 +27,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "tensor.h"
@@ -114,6 +115,333 @@
 #		define USE_NEON_SIMD
 #	endif
 #endif
+
+#include "ann_parallel.h"
+
+//================================================================================================
+// THREAD POOL for ann_parallel_for (see ann_parallel.h)
+//
+// Persistent workers wait for a job: a range function, its context, and [0, count) divided into
+// at most `threads` contiguous chunks. The caller takes chunks too and returns once every chunk
+// is done. Each chunk always covers the same indices for a given count and thread count, and
+// callers only split work so that each output is computed whole by one chunk, so results do not
+// depend on timing.
+//================================================================================================
+
+#define ANN_MAX_THREADS 64
+
+#ifndef ANN_NO_THREADS
+
+#ifdef _WIN32
+#	ifndef NOMINMAX
+#		define NOMINMAX			// keep tensor.h's max()
+#	endif
+#	ifndef WIN32_LEAN_AND_MEAN
+#		define WIN32_LEAN_AND_MEAN
+#	endif
+#	include <windows.h>
+typedef CRITICAL_SECTION	pool_mutex;
+typedef CONDITION_VARIABLE	pool_cond;
+typedef HANDLE				pool_thread;
+#	define pool_mutex_init(m)	InitializeCriticalSection(m)
+#	define pool_lock(m)			EnterCriticalSection(m)
+#	define pool_unlock(m)		LeaveCriticalSection(m)
+#	define pool_cond_init(c)	InitializeConditionVariable(c)
+#	define pool_wait(c, m)		SleepConditionVariableCS(c, m, INFINITE)
+#	define pool_signal(c)		WakeConditionVariable(c)
+#	define pool_broadcast(c)	WakeAllConditionVariable(c)
+#else
+#	include <pthread.h>
+#	include <unistd.h>
+typedef pthread_mutex_t		pool_mutex;
+typedef pthread_cond_t		pool_cond;
+typedef pthread_t			pool_thread;
+#	define pool_mutex_init(m)	pthread_mutex_init(m, NULL)
+#	define pool_lock(m)			pthread_mutex_lock(m)
+#	define pool_unlock(m)		pthread_mutex_unlock(m)
+#	define pool_cond_init(c)	pthread_cond_init(c, NULL)
+#	define pool_wait(c, m)		pthread_cond_wait(c, m)
+#	define pool_signal(c)		pthread_cond_signal(c)
+#	define pool_broadcast(c)	pthread_cond_broadcast(c)
+#endif
+
+static struct {
+	int initialized;			// mutex and condition variables created
+	int requested;				// ann_parallel_set_threads() value; 0 = default
+	int threads;				// resolved thread count (callers included)
+	int workers;				// worker threads running
+	int busy;					// a parallel loop is in progress
+	int shutdown;				// workers should exit
+
+	pool_mutex lock;
+	pool_cond work_ready;		// a job has chunks left to take
+	pool_cond work_done;		// the last chunk finished
+	pool_thread handles[ANN_MAX_THREADS];
+
+	// the current job
+	ann_range_func fn;
+	void *ctx;
+	int count;
+	int chunks;
+	int next_chunk;				// next chunk to hand out
+	int pending;				// chunks not yet finished
+} g_pool;
+
+//------------------------------
+// the online processor count
+//------------------------------
+static int pool_processor_count(void)
+{
+#ifdef _WIN32
+	SYSTEM_INFO info;
+	GetSystemInfo(&info);
+	return (int)info.dwNumberOfProcessors;
+#else
+	long n = sysconf(_SC_NPROCESSORS_ONLN);
+	return n > 0 ? (int)n : 1;
+#endif
+}
+
+//------------------------------
+// run chunk c of the job: indices [c * count / chunks, (c + 1) * count / chunks)
+//------------------------------
+static void pool_run_chunk(ann_range_func fn, void *ctx, int count, int chunks, int c)
+{
+	int begin = (int)((long long)count * c / chunks);
+	int end = (int)((long long)count * (c + 1) / chunks);
+	if (begin < end)
+		fn(ctx, begin, end);
+}
+
+#ifdef _WIN32
+static DWORD WINAPI pool_worker(LPVOID arg)
+#else
+static void *pool_worker(void *arg)
+#endif
+{
+	(void)arg;
+	pool_lock(&g_pool.lock);
+	for (;;)
+	{
+		while (!g_pool.shutdown && g_pool.next_chunk >= g_pool.chunks)
+			pool_wait(&g_pool.work_ready, &g_pool.lock);
+		if (g_pool.shutdown)
+			break;
+
+		int c = g_pool.next_chunk++;
+		ann_range_func fn = g_pool.fn;
+		void *ctx = g_pool.ctx;
+		int count = g_pool.count, chunks = g_pool.chunks;
+		pool_unlock(&g_pool.lock);
+
+		pool_run_chunk(fn, ctx, count, chunks, c);
+
+		pool_lock(&g_pool.lock);
+		if (--g_pool.pending == 0)
+			pool_signal(&g_pool.work_done);
+	}
+	pool_unlock(&g_pool.lock);
+	return 0;
+}
+
+//------------------------------
+// stop and join the workers (at exit, or before changing the thread count)
+//------------------------------
+static void pool_stop(void)
+{
+	if (!g_pool.initialized || g_pool.workers == 0)
+		return;
+
+	pool_lock(&g_pool.lock);
+	g_pool.shutdown = 1;
+	pool_broadcast(&g_pool.work_ready);
+	pool_unlock(&g_pool.lock);
+
+	for (int i = 0; i < g_pool.workers; i++)
+	{
+#ifdef _WIN32
+		WaitForSingleObject(g_pool.handles[i], INFINITE);
+		CloseHandle(g_pool.handles[i]);
+#else
+		pthread_join(g_pool.handles[i], NULL);
+#endif
+	}
+
+	g_pool.workers = 0;
+	g_pool.shutdown = 0;
+}
+
+//------------------------------
+// the thread count: the requested one, else ANN_NUM_THREADS, else the processor count
+//------------------------------
+static int pool_resolve_threads(void)
+{
+	int n = g_pool.requested;
+	if (n <= 0)
+	{
+		const char *env = getenv("ANN_NUM_THREADS");
+		n = env ? atoi(env) : 0;
+	}
+	if (n <= 0)
+		n = pool_processor_count();
+	return n < 1 ? 1 : (n > ANN_MAX_THREADS ? ANN_MAX_THREADS : n);
+}
+
+//------------------------------
+// create the synchronization objects and resolve the thread count, once
+//------------------------------
+static void pool_init(void)
+{
+	if (g_pool.initialized)
+		return;
+
+	pool_mutex_init(&g_pool.lock);
+	pool_cond_init(&g_pool.work_ready);
+	pool_cond_init(&g_pool.work_done);
+	g_pool.threads = pool_resolve_threads();
+	g_pool.initialized = 1;
+	atexit(pool_stop);
+}
+
+//------------------------------
+// start threads - 1 workers (the caller is the remaining thread)
+//------------------------------
+static void pool_start(void)
+{
+	while (g_pool.workers < g_pool.threads - 1)
+	{
+#ifdef _WIN32
+		HANDLE h = CreateThread(NULL, 0, pool_worker, NULL, 0, NULL);
+		if (!h)
+			break;
+#else
+		pthread_t h;
+		if (pthread_create(&h, NULL, pool_worker, NULL) != 0)
+			break;
+#endif
+		g_pool.handles[g_pool.workers++] = h;
+	}
+}
+
+//------------------------------
+// 1 if ann_parallel_for() could split [0, count) across threads, so hot loops
+// can call their range function directly (and let it inline) otherwise
+//------------------------------
+static int parallel_may_split(int count, int grain)
+{
+	pool_init();
+	return g_pool.threads > 1 && count >= 2 * (grain < 1 ? 1 : grain);
+}
+
+void ann_parallel_for(int count, int grain, ann_range_func fn, void *ctx)
+{
+	if (count <= 0)
+		return;
+	if (grain < 1)
+		grain = 1;
+
+	pool_init();
+
+	// at most one chunk per thread, and each chunk at least `grain` indices
+	int chunks = count / grain;
+	if (chunks > g_pool.threads)
+		chunks = g_pool.threads;
+
+	// run serially when the range is small, or the pool is busy (a nested
+	// loop, or another application thread is using it)
+	if (chunks < 2)
+	{
+		fn(ctx, 0, count);
+		return;
+	}
+
+	pool_lock(&g_pool.lock);
+	if (g_pool.busy)
+	{
+		pool_unlock(&g_pool.lock);
+		fn(ctx, 0, count);
+		return;
+	}
+
+	pool_start();
+	if (g_pool.workers == 0)
+	{
+		pool_unlock(&g_pool.lock);
+		fn(ctx, 0, count);
+		return;
+	}
+
+	g_pool.busy = 1;
+	g_pool.fn = fn;
+	g_pool.ctx = ctx;
+	g_pool.count = count;
+	g_pool.chunks = chunks;
+	g_pool.next_chunk = 0;
+	g_pool.pending = chunks;
+	pool_broadcast(&g_pool.work_ready);
+
+	// the caller takes chunks too
+	while (g_pool.next_chunk < g_pool.chunks)
+	{
+		int c = g_pool.next_chunk++;
+		pool_unlock(&g_pool.lock);
+		pool_run_chunk(fn, ctx, count, chunks, c);
+		pool_lock(&g_pool.lock);
+		g_pool.pending--;
+	}
+
+	while (g_pool.pending > 0)
+		pool_wait(&g_pool.work_done, &g_pool.lock);
+
+	g_pool.busy = 0;
+	pool_unlock(&g_pool.lock);
+}
+
+void ann_parallel_set_threads(int threads)
+{
+	pool_init();
+
+	// workers are restarted lazily with the new count
+	pool_stop();
+	pool_lock(&g_pool.lock);
+	g_pool.requested = threads;
+	g_pool.threads = pool_resolve_threads();
+	pool_unlock(&g_pool.lock);
+}
+
+int ann_parallel_get_threads(void)
+{
+	pool_init();
+	return g_pool.threads;
+}
+
+#else	// ANN_NO_THREADS: every loop runs on the calling thread
+
+static int parallel_may_split(int count, int grain)
+{
+	(void)count;
+	(void)grain;
+	return 0;
+}
+
+void ann_parallel_for(int count, int grain, ann_range_func fn, void *ctx)
+{
+	(void)grain;
+	if (count > 0)
+		fn(ctx, 0, count);
+}
+
+void ann_parallel_set_threads(int threads)
+{
+	(void)threads;
+}
+
+int ann_parallel_get_threads(void)
+{
+	return 1;
+}
+
+#endif	// ANN_NO_THREADS
 
 #define TENSOR_ALIGN 32
 
@@ -1208,46 +1536,36 @@ PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest)
 	return dest;
 }
 
+#ifndef USE_BLAS
 //-------------------------------
-// General matrix multiplication
-// C = alpha * A * B + beta * C
-// A is MxK, B is KxN, C is MxN
+// Scalar GEMMs split the rows of C across threads; each row is computed whole
+// by one range call, in the same order as a serial loop
 //-------------------------------
-PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTensor C)
+typedef struct {
+	real alpha;
+	PTensor A, B, C;
+	int M, N, K;
+} gemm_job;
+
+// rows of C per chunk, so each chunk has enough work to be worth a thread
+static int gemm_grain(int N, int K)
 {
-	if (!A || !B || !C)
-		return NULL;
+	long long per_row = (long long)N * K;
+	return per_row >= 32768 ? 1 : (int)(32768 / (per_row > 0 ? per_row : 1));
+}
 
-	// Check dimensions: A(MxK) * B(KxN) = C(MxN)
-	if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols)
-		return NULL;
-
-	int M = A->rows;
-	int K = A->cols;
-	int N = B->cols;
-
-	// Handle empty matrices - nothing to compute
-	if (M == 0 || N == 0 || K == 0)
-		return C;
-
-#ifdef USE_BLAS
-	cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-		M, N, K,
-		alpha, A->values, K,
-		B->values, N,
-		beta, C->values, N);
-#else
-	// Cache-friendly i-k-j loop order
-	// Scale C by beta first
-	if (beta == (real)0.0)
-		memset(C->values, 0, M * N * sizeof(real));
-	else if (beta != (real)1.0)
-		for (int i = 0; i < M * N; i++)
-			C->values[i] *= beta;
+// C[begin..end) += alpha * A * B
+static void gemm_rows(void *arg, int begin, int end)
+{
+	const gemm_job *job = (const gemm_job *)arg;
+	const PTensor A = job->A, B = job->B;
+	PTensor C = job->C;
+	real alpha = job->alpha;
+	int N = job->N, K = job->K;
 
 	// i-k-j: A rows accessed sequentially, B[k,:] reused across j,
 	// C[i,:] stays in cache for the inner j-loop
-	for (int i = 0; i < M; i++)
+	for (int i = begin; i < end; i++)
 	{
 		real *c_row = C->values + i * N;
 		const real *a_row = A->values + i * K;
@@ -1288,50 +1606,20 @@ PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTe
 				c_row[j] += a_ik * b_row[j];
 		}
 	}
-#endif
-
-	return C;
 }
 
-//-------------------------------
-// gemm with B transposed: C = alpha * A * B^T + beta * C
-// For batched forward pass: Y = X * W^T
-// A is M×K, B is N×K (transposed to K×N), C is M×N
-//-------------------------------
-PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real beta, PTensor C)
+// C[begin..end) += alpha * A * B^T
+static void gemm_transB_rows(void *arg, int begin, int end)
 {
-	if (!A || !B || !C)
-		return NULL;
-
-	// Check dimensions: A(M×K) * B^T(K×N) = C(M×N), where B is stored as N×K
-	if (A->cols != B->cols || A->rows != C->rows || B->rows != C->cols)
-		return NULL;
-
-	int M = A->rows;
-	int K = A->cols;
-	int N = B->rows;
-
-	if (M == 0 || N == 0 || K == 0)
-		return C;
-
-#ifdef USE_BLAS
-	// Row-major C(M×N) = A(M×K) * B^T(K×N) where B is stored as N×K
-	cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-		M, N, K,
-		alpha, A->values, K,     // lda = K (row stride of A)
-		B->values, K,            // ldb = K (row stride of B, which has K cols)
-		beta, C->values, N);     // ldc = N (row stride of C)
-#else
-	// Scale C by beta
-	if (beta == (real)0.0)
-		memset(C->values, 0, M * N * sizeof(real));
-	else if (beta != (real)1.0)
-		for (int i = 0; i < M * N; i++)
-			C->values[i] *= beta;
+	const gemm_job *job = (const gemm_job *)arg;
+	const PTensor A = job->A, B = job->B;
+	PTensor C = job->C;
+	real alpha = job->alpha;
+	int N = job->N, K = job->K;
 
 	// A[i,k] * B^T[k,j] = A[i,k] * B[j,k]
 	// Both A and B rows are accessed sequentially for each (i,j) pair
-	for (int i = 0; i < M; i++)
+	for (int i = begin; i < end; i++)
 	{
 		const real *a_row = A->values + i * K;
 		real *c_row = C->values + i * N;
@@ -1382,6 +1670,152 @@ PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real be
 			c_row[j] += alpha * sum;
 		}
 	}
+}
+
+// C[begin..end) += alpha * A^T * B
+static void gemm_transA_rows(void *arg, int begin, int end)
+{
+	const gemm_job *job = (const gemm_job *)arg;
+	const PTensor A = job->A, B = job->B;
+	PTensor C = job->C;
+	real alpha = job->alpha;
+	int M = job->M, N = job->N, K = job->K;
+
+	// Cache-friendly: iterate over k in outer loop
+	// A^T[i,k] = A[k,i], so A[k,:] is accessed sequentially
+	// B[k,:] is accessed sequentially, C[i,:] is accumulated
+	for (int k = 0; k < K; k++)
+	{
+		const real *a_row = A->values + k * M;  // row k of A
+		const real *b_row = B->values + k * N;  // row k of B
+		for (int i = begin; i < end; i++)
+		{
+			real a_ki = alpha * a_row[i];  // A[k,i] = A^T[i,k]
+			real *c_row = C->values + i * N;
+			int j = 0;
+#if defined(USE_AVX_SIMD)
+			__m256 va = _mm256_set1_ps(a_ki);
+			for (; j + 7 < N; j += 8)
+			{
+				__m256 vc = _mm256_loadu_ps(c_row + j);
+				__m256 vb = _mm256_loadu_ps(b_row + j);
+				vc = _mm256_add_ps(vc, _mm256_mul_ps(va, vb));
+				_mm256_storeu_ps(c_row + j, vc);
+			}
+#elif defined(USE_SSE_SIMD)
+			__m128 va = _mm_set1_ps(a_ki);
+			for (; j + 3 < N; j += 4)
+			{
+				__m128 vc = _mm_loadu_ps(c_row + j);
+				__m128 vb = _mm_loadu_ps(b_row + j);
+				vc = _mm_add_ps(vc, _mm_mul_ps(va, vb));
+				_mm_storeu_ps(c_row + j, vc);
+			}
+#elif defined(USE_NEON_SIMD)
+			float32x4_t va = vdupq_n_f32(a_ki);
+			for (; j + 3 < N; j += 4)
+			{
+				float32x4_t vc = vld1q_f32(c_row + j);
+				float32x4_t vb = vld1q_f32(b_row + j);
+				vc = vmlaq_f32(vc, va, vb);
+				vst1q_f32(c_row + j, vc);
+			}
+#endif
+			for (; j < N; j++)
+				c_row[j] += a_ki * b_row[j];
+		}
+	}
+}
+#endif
+
+//-------------------------------
+// General matrix multiplication
+// C = alpha * A * B + beta * C
+// A is MxK, B is KxN, C is MxN
+//-------------------------------
+PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTensor C)
+{
+	if (!A || !B || !C)
+		return NULL;
+
+	// Check dimensions: A(MxK) * B(KxN) = C(MxN)
+	if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols)
+		return NULL;
+
+	int M = A->rows;
+	int K = A->cols;
+	int N = B->cols;
+
+	// Handle empty matrices - nothing to compute
+	if (M == 0 || N == 0 || K == 0)
+		return C;
+
+#ifdef USE_BLAS
+	cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+		M, N, K,
+		alpha, A->values, K,
+		B->values, N,
+		beta, C->values, N);
+#else
+	// Cache-friendly i-k-j loop order
+	// Scale C by beta first
+	if (beta == (real)0.0)
+		memset(C->values, 0, M * N * sizeof(real));
+	else if (beta != (real)1.0)
+		for (int i = 0; i < M * N; i++)
+			C->values[i] *= beta;
+
+	gemm_job job = { alpha, A, B, C, M, N, K };
+	if (parallel_may_split(M, gemm_grain(N, K)))
+		ann_parallel_for(M, gemm_grain(N, K), gemm_rows, &job);
+	else
+		gemm_rows(&job, 0, M);
+#endif
+
+	return C;
+}
+
+//-------------------------------
+// gemm with B transposed: C = alpha * A * B^T + beta * C
+// For batched forward pass: Y = X * W^T
+// A is M×K, B is N×K (transposed to K×N), C is M×N
+//-------------------------------
+PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real beta, PTensor C)
+{
+	if (!A || !B || !C)
+		return NULL;
+
+	// Check dimensions: A(M×K) * B^T(K×N) = C(M×N), where B is stored as N×K
+	if (A->cols != B->cols || A->rows != C->rows || B->rows != C->cols)
+		return NULL;
+
+	int M = A->rows;
+	int K = A->cols;
+	int N = B->rows;
+
+	if (M == 0 || N == 0 || K == 0)
+		return C;
+
+#ifdef USE_BLAS
+	// Row-major C(M×N) = A(M×K) * B^T(K×N) where B is stored as N×K
+	cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+		M, N, K,
+		alpha, A->values, K,     // lda = K (row stride of A)
+		B->values, K,            // ldb = K (row stride of B, which has K cols)
+		beta, C->values, N);     // ldc = N (row stride of C)
+#else
+	// Scale C by beta
+	if (beta == (real)0.0)
+		memset(C->values, 0, M * N * sizeof(real));
+	else if (beta != (real)1.0)
+		for (int i = 0; i < M * N; i++)
+			C->values[i] *= beta;
+
+	gemm_job job = { alpha, A, B, C, M, N, K };
+	if (parallel_may_split(M, gemm_grain(N, K)))
+		ann_parallel_for(M, gemm_grain(N, K), gemm_transB_rows, &job);
+	else
+		gemm_transB_rows(&job, 0, M);
 #endif
 
 	return C;
@@ -1423,50 +1857,11 @@ PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real be
 		for (int i = 0; i < M * N; i++)
 			C->values[i] *= beta;
 
-	// Cache-friendly: iterate over k in outer loop
-	// A^T[i,k] = A[k,i], so A[k,:] is accessed sequentially
-	// B[k,:] is accessed sequentially, C[i,:] is accumulated
-	for (int k = 0; k < K; k++)
-	{
-		const real *a_row = A->values + k * M;  // row k of A
-		const real *b_row = B->values + k * N;  // row k of B
-		for (int i = 0; i < M; i++)
-		{
-			real a_ki = alpha * a_row[i];  // A[k,i] = A^T[i,k]
-			real *c_row = C->values + i * N;
-			int j = 0;
-#if defined(USE_AVX_SIMD)
-			__m256 va = _mm256_set1_ps(a_ki);
-			for (; j + 7 < N; j += 8)
-			{
-				__m256 vc = _mm256_loadu_ps(c_row + j);
-				__m256 vb = _mm256_loadu_ps(b_row + j);
-				vc = _mm256_add_ps(vc, _mm256_mul_ps(va, vb));
-				_mm256_storeu_ps(c_row + j, vc);
-			}
-#elif defined(USE_SSE_SIMD)
-			__m128 va = _mm_set1_ps(a_ki);
-			for (; j + 3 < N; j += 4)
-			{
-				__m128 vc = _mm_loadu_ps(c_row + j);
-				__m128 vb = _mm_loadu_ps(b_row + j);
-				vc = _mm_add_ps(vc, _mm_mul_ps(va, vb));
-				_mm_storeu_ps(c_row + j, vc);
-			}
-#elif defined(USE_NEON_SIMD)
-			float32x4_t va = vdupq_n_f32(a_ki);
-			for (; j + 3 < N; j += 4)
-			{
-				float32x4_t vc = vld1q_f32(c_row + j);
-				float32x4_t vb = vld1q_f32(b_row + j);
-				vc = vmlaq_f32(vc, va, vb);
-				vst1q_f32(c_row + j, vc);
-			}
-#endif
-			for (; j < N; j++)
-				c_row[j] += a_ki * b_row[j];
-		}
-	}
+	gemm_job job = { alpha, A, B, C, M, N, K };
+	if (parallel_may_split(M, gemm_grain(N, K)))
+		ann_parallel_for(M, gemm_grain(N, K), gemm_transA_rows, &job);
+	else
+		gemm_transA_rows(&job, 0, M);
 #endif
 
 	return C;

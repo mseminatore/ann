@@ -157,6 +157,8 @@ ann_get_layer_activation | get the activation type of a layer
 ann_get_layer_kind | get what a layer computes (`LAYER_KIND_DENSE`, `_CONV2D`, `_MAXPOOL2D`, `_FLATTEN`)
 ann_get_layer_shape | get a layer's output shape (channels, height, width)
 ann_get_layer_settings | get a conv/pool layer's kernel or pool size, stride and padding
+ann_set_num_threads | set how many CPU threads libann uses (0 = default)
+ann_get_num_threads | get the CPU thread count
 ann_export_onnx | export trained network to ONNX JSON format
 ann_import_onnx | import network from ONNX JSON file
 ann_export_pikchr | export network architecture as PIKCHR diagram
@@ -505,6 +507,43 @@ int main() {
     // ... rest of your code
 }
 ```
+
+# Multithreading
+
+Training and batched inference use several CPU threads. libann splits its own
+loops across them: convolution and pooling by sample and by filter, the
+element-wise work (activations, their derivatives, optimizer updates) by
+element, and, in builds without BLAS, its matrix multiply by rows.
+
+```c
+ann_set_num_threads(4);   // 0 = default, 1 = single-threaded
+int n = ann_get_num_threads();
+```
+
+The default is the `ANN_NUM_THREADS` environment variable if set, otherwise
+the number of processors.
+
+- **BLAS libraries keep their own threads.** BLAS calls (OpenBLAS, Accelerate,
+  MKL, CBLAS) always run on the calling thread and libann's workers never call
+  BLAS, so the two never run at the same time or oversubscribe the CPU.
+- **Results don't depend on the thread count.** Every value is computed by
+  one thread in the same order as a serial run, so 1, 4 or 8 threads train
+  bit-identical networks (with a non-BLAS build; threaded BLAS libraries can
+  differ slightly from run to run by themselves).
+- **Small work stays serial**, so tiny networks see no overhead.
+- Build with `-DANN_NO_THREADS` to compile the thread pool out.
+
+Measured on a 4-core Intel Mac (training time per sample or epoch):
+
+Workload | 1 thread | 4 threads
+-------- | -------- | ---------
+CNN (2 conv layers), scalar build | 173 µs | 64 µs (2.7x)
+CNN, Accelerate | 100 µs | 69 µs (1.45x)
+Dense 784-128-10, batch 128, scalar build | 488 ms | 169 ms (2.9x)
+Dense 784-128-10, batch 128, Accelerate | 52 ms | 43 ms (1.2x)
+
+Dense networks gain little with a BLAS library, which already spreads their
+matrix multiplies over the cores.
 
 # GPU training and inference
 

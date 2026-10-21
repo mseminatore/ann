@@ -35,6 +35,12 @@
 #include <time.h>
 #include "ann.h"
 #include "json.h"
+#include "ann_parallel.h"
+
+// Element-wise loops run on several threads once they have at least twice this
+// many elements (see ann_parallel.h). Each element is computed independently,
+// so results do not depend on the thread count.
+#define ANN_ELEMENT_GRAIN 16384
 
 #include "ann_gpu_backend.h"
 
@@ -799,31 +805,138 @@ static void conv_col2im(const Layer *layer, const real *col, real *x)
 // Conv2D forward, per sample: Y_s [F x OH*OW] = W [F x C*k*k] * im2col(X_s) + b
 // (rows of Y_s are channels, so the result is already in C, H, W order)
 //------------------------------
+// Conv2D work split across threads (see ann_parallel.h). Samples are
+// independent in the forward pass and for dX; dW and db are split by filter
+// and still summed over samples in order, so results match a serial run.
+// Without BLAS the per-sample GEMMs run inside the threads; with BLAS they
+// stay on the calling thread, which leaves BLAS's own threading alone.
+//------------------------------
+typedef struct {
+	PLayer layer;
+	const real *x;		// layer input, one row per sample
+	real *y;			// layer output (forward) or dZ (backward)
+	real *dx;			// gradient for the layer below (backward), or NULL
+	int rows;
+} conv_job;
+
+// one sample's im2col columns, kept from the forward pass
+static Tensor conv_columns(const Layer *layer, int b)
+{
+	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
+	return tensor_view(layer->t_scratch[0]->values + (size_t)b * patch * positions, patch, positions);
+}
+
+// one sample's column gradient
+static Tensor conv_column_grads(const Layer *layer, int b)
+{
+	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
+	return tensor_view(layer->t_scratch[1]->values + (size_t)b * patch * positions, patch, positions);
+}
+
+// add each filter's bias to its row of a sample's output
+static void conv_add_bias(const Layer *layer, real *y)
+{
+	const real *bias = layer->params[1].value->values;
+	int positions = layer->shape.h * layer->shape.w;
+	for (int f = 0; f < layer->shape.c; f++)
+	{
+		real *y_row = y + f * positions;
+		for (int i = 0; i < positions; i++)
+			y_row[i] += bias[f];
+	}
+}
+
+static void conv_forward_samples(void *arg, int begin, int end)
+{
+	const conv_job *job = (const conv_job *)arg;
+	PLayer layer = job->layer;
+	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = begin; b < end; b++)
+	{
+		Tensor col = conv_columns(layer, b);
+		conv_im2col(layer, job->x + b * in_nodes, col.values);
+#ifndef USE_BLAS
+		Tensor y = tensor_view(job->y + b * layer->node_count, layer->shape.c, col.cols);
+		tensor_gemm((real)1.0, layer->params[0].value, &col, (real)0.0, &y);
+		conv_add_bias(layer, y.values);
+#endif
+	}
+}
+
+//------------------------------
+// Conv2D forward, per sample: Y_s [F x OH*OW] = W [F x C*k*k] * im2col(X_s) + b
+// (rows of Y_s are channels, so the result is already in C, H, W order)
+//------------------------------
 static void conv_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 {
-	PTensor W = layer->params[0].value;
-	const real *bias = layer->params[1].value->values;
-	int filters = layer->shape.c, positions = layer->shape.h * layer->shape.w;
-	int patch = W->cols;
-	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
+	conv_job job;
 
 	if (ensure_rows(&layer->t_scratch[0], rows, patch * positions) != ERR_OK)
 		return;
 
+	job.layer = layer;
+	job.x = X->values;
+	job.y = Y->values;
+	job.dx = NULL;
+	job.rows = rows;
+	ann_parallel_for(rows, 1, conv_forward_samples, &job);
+
+#ifdef USE_BLAS
 	for (int b = 0; b < rows; b++)
 	{
-		Tensor col = tensor_view(layer->t_scratch[0]->values + (size_t)b * patch * positions, patch, positions);
-		conv_im2col(layer, X->values + b * in_nodes, col.values);
+		Tensor col = conv_columns(layer, b);
+		Tensor y = tensor_view(Y->values + b * layer->node_count, layer->shape.c, positions);
+		tensor_gemm((real)1.0, layer->params[0].value, &col, (real)0.0, &y);
+		conv_add_bias(layer, y.values);
+	}
+#endif
+}
 
-		Tensor y = tensor_view(Y->values + b * layer->node_count, filters, positions);
-		tensor_gemm((real)1.0, W, &col, (real)0.0, &y);
+// dW and db for filters [begin, end), summed over the samples in order
+static void conv_filter_grads(void *arg, int begin, int end)
+{
+	const conv_job *job = (const conv_job *)arg;
+	PLayer layer = job->layer;
+	int positions = layer->shape.h * layer->shape.w;
+	real *db = layer->params[1].grad->values;
 
-		for (int f = 0; f < filters; f++)
+	for (int b = 0; b < job->rows; b++)
+	{
+		const real *dz = job->y + b * layer->node_count;
+#ifndef USE_BLAS
+		PTensor dW = layer->params[0].grad;
+		Tensor col = conv_columns(layer, b);
+		Tensor dz_rows = tensor_view((real *)dz + begin * positions, end - begin, positions);
+		Tensor dW_rows = tensor_view(dW->values + begin * dW->cols, end - begin, dW->cols);
+		tensor_gemm_transB((real)1.0, &dz_rows, &col, (real)1.0, &dW_rows);
+#endif
+		for (int f = begin; f < end; f++)
 		{
-			real *y_row = y.values + f * positions;
+			const real *dz_row = dz + f * positions;
 			for (int i = 0; i < positions; i++)
-				y_row[i] += bias[f];
+				db[f] += dz_row[i];
 		}
+	}
+}
+
+// dX for samples [begin, end): col2im of each sample's column gradient
+static void conv_input_grads(void *arg, int begin, int end)
+{
+	const conv_job *job = (const conv_job *)arg;
+	PLayer layer = job->layer;
+	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = begin; b < end; b++)
+	{
+		Tensor dcol = conv_column_grads(layer, b);
+#ifndef USE_BLAS
+		Tensor dz = tensor_view(job->y + b * layer->node_count, layer->shape.c, dcol.cols);
+		tensor_gemm_transA((real)1.0, layer->params[0].value, &dz, (real)0.0, &dcol);
+#endif
+		memset(job->dx + b * in_nodes, 0, in_nodes * sizeof(real));
+		conv_col2im(layer, dcol.values, job->dx + b * in_nodes);
 	}
 }
 
@@ -833,37 +946,38 @@ static void conv_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 //------------------------------
 static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
 {
-	PTensor W = layer->params[0].value;
-	PTensor dW = layer->params[0].grad;
-	real *db = layer->params[1].grad->values;
-	PTensor dcol = layer->t_scratch[1];
-	int filters = layer->shape.c, positions = layer->shape.h * layer->shape.w;
-	int patch = W->cols;
-	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
+	conv_job job;
 	(void)X;
 
+	job.layer = layer;
+	job.x = NULL;
+	job.y = dZ->values;
+	job.dx = dX ? dX->values : NULL;
+	job.rows = rows;
+
+#ifdef USE_BLAS
 	for (int b = 0; b < rows; b++)
 	{
-		Tensor dz = tensor_view(dZ->values + b * layer->node_count, filters, positions);
-		Tensor col = tensor_view(layer->t_scratch[0]->values + (size_t)b * patch * positions, patch, positions);
-
-		tensor_gemm_transB((real)1.0, &dz, &col, (real)1.0, dW);
-
-		for (int f = 0; f < filters; f++)
-		{
-			const real *dz_row = dz.values + f * positions;
-			for (int i = 0; i < positions; i++)
-				db[f] += dz_row[i];
-		}
-
-		if (dX)
-		{
-			real *dx = dX->values + b * in_nodes;
-			tensor_gemm_transA((real)1.0, W, &dz, (real)0.0, dcol);
-			memset(dx, 0, in_nodes * sizeof(real));
-			conv_col2im(layer, dcol->values, dx);
-		}
+		Tensor col = conv_columns(layer, b);
+		Tensor dz = tensor_view(dZ->values + b * layer->node_count, layer->shape.c, positions);
+		tensor_gemm_transB((real)1.0, &dz, &col, (real)1.0, layer->params[0].grad);
 	}
+#endif
+	ann_parallel_for(layer->shape.c, 1, conv_filter_grads, &job);
+
+	if (!dX || ensure_rows(&layer->t_scratch[1], rows, patch * positions) != ERR_OK)
+		return;
+
+#ifdef USE_BLAS
+	for (int b = 0; b < rows; b++)
+	{
+		Tensor dcol = conv_column_grads(layer, b);
+		Tensor dz = tensor_view(dZ->values + b * layer->node_count, layer->shape.c, positions);
+		tensor_gemm_transA((real)1.0, layer->params[0].value, &dz, (real)0.0, &dcol);
+	}
+#endif
+	ann_parallel_for(rows, 1, conv_input_grads, &job);
 }
 
 //------------------------------
@@ -884,24 +998,28 @@ static int maxpool_setup(PNetwork pnet, int layer)
 }
 
 //------------------------------
-// MaxPool2D forward: each output is its window's largest input (the first
-// one on ties); its index within the sample is saved for backward
+// MaxPool2D work split across threads by sample
 //------------------------------
-static void maxpool_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+typedef struct {
+	PLayer layer;
+	const real *x;		// input (forward) or dZ (backward)
+	real *y;			// output (forward) or dX (backward)
+} pool_job;
+
+static void maxpool_forward_samples(void *arg, int begin, int end)
 {
+	const pool_job *job = (const pool_job *)arg;
+	PLayer layer = job->layer;
 	Layer_shape in = layer->in_shape;
 	int size = layer->config[POOL_SIZE], stride = layer->config[POOL_STRIDE];
 	int in_nodes = in.c * in.h * in.w;
 	int oh_n = layer->shape.h, ow_n = layer->shape.w;
 
-	if (ensure_rows(&layer->t_scratch[0], rows, layer->node_count) != ERR_OK)
-		return;
-
-	for (int b = 0; b < rows; b++)
+	for (int b = begin; b < end; b++)
 	{
-		const real *x = X->values + b * in_nodes;
-		real *y = Y->values + b * layer->node_count;
-		real *arg = layer->t_scratch[0]->values + (size_t)b * layer->node_count;
+		const real *x = job->x + b * in_nodes;
+		real *y = job->y + b * layer->node_count;
+		real *arg_max = layer->t_scratch[0]->values + (size_t)b * layer->node_count;
 
 		for (int c = 0; c < layer->shape.c; c++)
 			for (int oh = 0; oh < oh_n; oh++)
@@ -931,33 +1049,61 @@ static void maxpool_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 							}
 					}
 					y[out] = x[best];
-					arg[out] = (real)best;	// exact: indices are far below 2^24
+					arg_max[out] = (real)best;	// exact: indices are far below 2^24
 				}
 			}
 	}
 }
 
 //------------------------------
+// MaxPool2D forward: each output is its window's largest input (the first
+// one on ties); its index within the sample is saved for backward
+//------------------------------
+static void maxpool_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	pool_job job;
+
+	if (ensure_rows(&layer->t_scratch[0], rows, layer->node_count) != ERR_OK)
+		return;
+
+	job.layer = layer;
+	job.x = X->values;
+	job.y = Y->values;
+	ann_parallel_for(rows, 1, maxpool_forward_samples, &job);
+}
+
+//------------------------------
 // MaxPool2D backward: each output's gradient goes to the input it took
 //------------------------------
+static void maxpool_backward_samples(void *arg, int begin, int end)
+{
+	const pool_job *job = (const pool_job *)arg;
+	PLayer layer = job->layer;
+	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = begin; b < end; b++)
+	{
+		const real *dz = job->x + b * layer->node_count;
+		const real *arg_max = layer->t_scratch[0]->values + (size_t)b * layer->node_count;
+		real *dx = job->y + b * in_nodes;
+
+		memset(dx, 0, in_nodes * sizeof(real));
+		for (int out = 0; out < layer->node_count; out++)
+			dx[(int)arg_max[out]] += dz[out];
+	}
+}
+
 static void maxpool_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
 {
+	pool_job job;
 	(void)X;
 	if (!dX)
 		return;
 
-	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
-
-	for (int b = 0; b < rows; b++)
-	{
-		const real *dz = dZ->values + b * layer->node_count;
-		const real *arg = layer->t_scratch[0]->values + (size_t)b * layer->node_count;
-		real *dx = dX->values + b * in_nodes;
-
-		memset(dx, 0, in_nodes * sizeof(real));
-		for (int out = 0; out < layer->node_count; out++)
-			dx[(int)arg[out]] += dz[out];
-	}
+	job.layer = layer;
+	job.x = dZ->values;
+	job.y = dX->values;
+	ann_parallel_for(rows, 1, maxpool_backward_samples, &job);
 }
 
 //------------------------------
@@ -1349,6 +1495,51 @@ static void make_dropout_masks(PNetwork pnet, int batch_size)
 #endif
 
 //---------------------------------------------
+// Apply an activation in place to values [begin, end) (inlined per activation
+// so the loops vectorize)
+//---------------------------------------------
+typedef struct {
+	Activation_type act;
+	real *values;
+} activation_job;
+
+static void activation_range(void *arg, int begin, int end)
+{
+	const activation_job *job = (const activation_job *)arg;
+	real *y = job->values;
+
+	switch (job->act)
+	{
+	case ACTIVATION_SIGMOID:
+		for (int i = begin; i < end; i++)
+			y[i] = (real)1.0 / ((real)1.0 + (real)exp(-y[i]));
+		break;
+	case ACTIVATION_RELU:
+		for (int i = begin; i < end; i++)
+			y[i] = y[i] > (real)0.0 ? y[i] : (real)0.0;
+		break;
+	case ACTIVATION_LEAKY_RELU:
+		for (int i = begin; i < end; i++)
+			y[i] = y[i] > (real)0.0 ? y[i] : (real)0.01 * y[i];
+		break;
+	case ACTIVATION_TANH:
+		for (int i = begin; i < end; i++)
+			y[i] = (real)tanh(y[i]);
+		break;
+	case ACTIVATION_SOFTSIGN:
+		for (int i = begin; i < end; i++)
+			y[i] = y[i] / ((real)1.0 + (real)fabs(y[i]));
+		break;
+	case ACTIVATION_GELU:
+		for (int i = begin; i < end; i++)
+			y[i] = gelu(y[i]);
+		break;
+	default:
+		break;
+	}
+}
+
+//---------------------------------------------
 // Batched forward propagation
 // Input: layers[0].t_batch_values has input data [batch_size × input_nodes]
 // Output: all layers have t_batch_values populated
@@ -1374,38 +1565,13 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 		int total = batch_size * cur->node_count;
 		memcpy(Z->values, Y->values, total * sizeof(real));
 
-		// Inlined activation (avoids function pointer overhead, enables auto-vectorization)
-		if (act_type != ACTIVATION_SOFTMAX)
+		// Activation (softmax is applied to the output layer below)
+		if (act_type != ACTIVATION_SOFTMAX && act_type != ACTIVATION_NULL)
 		{
-			switch (act_type)
-			{
-			case ACTIVATION_SIGMOID:
-				for (int i = 0; i < total; i++)
-					Y->values[i] = (real)1.0 / ((real)1.0 + (real)exp(-Y->values[i]));
-				break;
-			case ACTIVATION_RELU:
-				for (int i = 0; i < total; i++)
-					Y->values[i] = Y->values[i] > (real)0.0 ? Y->values[i] : (real)0.0;
-				break;
-			case ACTIVATION_LEAKY_RELU:
-				for (int i = 0; i < total; i++)
-					Y->values[i] = Y->values[i] > (real)0.0 ? Y->values[i] : (real)0.01 * Y->values[i];
-				break;
-			case ACTIVATION_TANH:
-				for (int i = 0; i < total; i++)
-					Y->values[i] = (real)tanh(Y->values[i]);
-				break;
-			case ACTIVATION_SOFTSIGN:
-				for (int i = 0; i < total; i++)
-					Y->values[i] = Y->values[i] / ((real)1.0 + (real)fabs(Y->values[i]));
-				break;
-			case ACTIVATION_GELU:
-				for (int i = 0; i < total; i++)
-					Y->values[i] = gelu(Y->values[i]);
-				break;
-			default:
-				break;
-			}
+			activation_job job;
+			job.act = act_type;
+			job.values = Y->values;
+			ann_parallel_for(total, ANN_ELEMENT_GRAIN, activation_range, &job);
 		}
 		
 		// Apply dropout to hidden layers (not output layer)
@@ -1466,34 +1632,34 @@ static real sample_loss(const PNetwork pnet, const real *t, const real *y, int n
 	return sum;
 }
 
-//-------------------------------------------
-// Turn the MSE output error delta = T - Y into the gradient with respect to
-// the output pre-activations, -dL/dz, by applying the output activation's
-// derivative. Hidden layers use it the same way to turn dL/da into dL/dz. Needed for MSE with a nonlinear output; cross-entropy with
-// softmax already has -dL/dz = T - Y. Softmax uses its full Jacobian per row:
-// delta_j = y_j * (d_j - sum_i d_i * y_i).
-// Shared with the GPU backends (declared in ann_gpu_backend.h) so every path
-// computes the same output gradient.
-//-------------------------------------------
-void ann_mse_output_delta(Activation_type act, real *delta, const real *Y, const real *Z,
-                          int batch_size, int nodes)
-{
-	int total = batch_size * nodes;
+typedef struct {
+	Activation_type act;
+	real *delta;
+	const real *Y, *Z;
+	int nodes;
+} derivative_job;
 
-	switch (act)
+// delta *= f'(...) for elements [begin, end), or rows [begin, end) for softmax
+static void derivative_range(void *arg, int begin, int end)
+{
+	const derivative_job *job = (const derivative_job *)arg;
+	real *delta = job->delta;
+	const real *Y = job->Y, *Z = job->Z;
+
+	switch (job->act)
 	{
 	case ACTIVATION_SIGMOID:
-		for (int i = 0; i < total; i++)
+		for (int i = begin; i < end; i++)
 			delta[i] *= Y[i] * ((real)1.0 - Y[i]);
 		break;
 
 	case ACTIVATION_TANH:
-		for (int i = 0; i < total; i++)
+		for (int i = begin; i < end; i++)
 			delta[i] *= (real)1.0 - Y[i] * Y[i];
 		break;
 
 	case ACTIVATION_SOFTSIGN:
-		for (int i = 0; i < total; i++)
+		for (int i = begin; i < end; i++)
 		{
 			real d = (real)1.0 - (real)fabs(Y[i]);
 			delta[i] *= d * d;
@@ -1502,29 +1668,29 @@ void ann_mse_output_delta(Activation_type act, real *delta, const real *Y, const
 
 	// branch-free selects so the loops vectorize
 	case ACTIVATION_RELU:
-		for (int i = 0; i < total; i++)
+		for (int i = begin; i < end; i++)
 			delta[i] = Z[i] <= (real)0.0 ? (real)0.0 : delta[i];
 		break;
 
 	case ACTIVATION_LEAKY_RELU:
-		for (int i = 0; i < total; i++)
+		for (int i = begin; i < end; i++)
 			delta[i] = Z[i] <= (real)0.0 ? delta[i] * (real)0.01 : delta[i];
 		break;
 
 	case ACTIVATION_GELU:
-		for (int i = 0; i < total; i++)
+		for (int i = begin; i < end; i++)
 			delta[i] *= gelu_derivative(Z[i]);
 		break;
 
 	case ACTIVATION_SOFTMAX:
-		for (int b = 0; b < batch_size; b++)
+		for (int b = begin; b < end; b++)
 		{
-			real *d = delta + b * nodes;
-			const real *y = Y + b * nodes;
+			real *d = delta + b * job->nodes;
+			const real *y = Y + b * job->nodes;
 			real dot = (real)0.0;
-			for (int n = 0; n < nodes; n++)
+			for (int n = 0; n < job->nodes; n++)
 				dot += d[n] * y[n];
-			for (int n = 0; n < nodes; n++)
+			for (int n = 0; n < job->nodes; n++)
 				d[n] = y[n] * (d[n] - dot);
 		}
 		break;
@@ -1533,6 +1699,31 @@ void ann_mse_output_delta(Activation_type act, real *delta, const real *Y, const
 		// linear output: delta is already -dL/dz
 		break;
 	}
+}
+
+//-------------------------------------------
+// Turn the MSE output error delta = T - Y into the gradient with respect to
+// the output pre-activations, -dL/dz, by applying the output activation's
+// derivative. Hidden layers use it the same way to turn dL/da into dL/dz.
+// Cross-entropy with softmax already has -dL/dz = T - Y. Softmax uses its
+// full Jacobian per row: delta_j = y_j * (d_j - sum_i d_i * y_i).
+// Shared with the GPU backends (declared in ann_gpu_backend.h) so every path
+// computes the same output gradient.
+//-------------------------------------------
+void ann_mse_output_delta(Activation_type act, real *delta, const real *Y, const real *Z,
+                          int batch_size, int nodes)
+{
+	derivative_job job;
+	job.act = act;
+	job.delta = delta;
+	job.Y = Y;
+	job.Z = Z;
+	job.nodes = nodes;
+
+	if (act == ACTIVATION_SOFTMAX)
+		ann_parallel_for(batch_size, ANN_ELEMENT_GRAIN / (nodes > 0 ? nodes : 1), derivative_range, &job);
+	else if (act != ACTIVATION_NULL)
+		ann_parallel_for(batch_size * nodes, ANN_ELEMENT_GRAIN, derivative_range, &job);
 }
 
 //-------------------------------------------
@@ -1803,6 +1994,75 @@ static void apply_regularization(PNetwork pnet)
 }
 
 //--------------------------------------------------------
+// Element-wise optimizer updates for one parameter, over elements
+// [begin, end) (split across threads for large parameters)
+//--------------------------------------------------------
+typedef struct {
+	Layer_param *param;
+	real lr;
+	real beta1;			// RMSProp: beta
+	real beta2;			// RMSProp: 1 - beta
+	real epsilon;
+	real bias_correction1, bias_correction2;	// Adam
+} optimizer_job;
+
+// v = v + g^2, then W = W + lr * g / (sqrt(v) + epsilon)
+static void adagrad_range(void *arg, int begin, int end)
+{
+	const optimizer_job *job = (const optimizer_job *)arg;
+	const real *g = job->param->grad->values;
+	real *v = job->param->v->values, *w = job->param->value->values;
+
+	for (int i = begin; i < end; i++)
+	{
+		real grad = g[i];
+		v[i] += grad * grad;
+		w[i] += job->lr * grad / ((real)sqrt(v[i]) + job->epsilon);
+	}
+}
+
+// v = beta * v + (1 - beta) * g^2, then W = W + lr * g / (sqrt(v) + epsilon)
+static void rmsprop_range(void *arg, int begin, int end)
+{
+	const optimizer_job *job = (const optimizer_job *)arg;
+	const real *g = job->param->grad->values;
+	real *v = job->param->v->values, *w = job->param->value->values;
+
+	for (int i = begin; i < end; i++)
+	{
+		real grad = g[i];
+		v[i] = job->beta1 * v[i] + job->beta2 * grad * grad;
+		w[i] += job->lr * grad / ((real)sqrt(v[i]) + job->epsilon);
+	}
+}
+
+static void adam_range(void *arg, int begin, int end)
+{
+	const optimizer_job *job = (const optimizer_job *)arg;
+	const real *g = job->param->grad->values;
+	real *m = job->param->m->values, *v = job->param->v->values, *w = job->param->value->values;
+	real beta1 = job->beta1, beta2 = job->beta2;
+
+	for (int i = begin; i < end; i++)
+	{
+		real grad = g[i];
+
+		// Update biased first moment estimate: m = beta1 * m + (1 - beta1) * g
+		m[i] = beta1 * m[i] + ((real)1.0 - beta1) * grad;
+
+		// Update biased second moment estimate: v = beta2 * v + (1 - beta2) * g^2
+		v[i] = beta2 * v[i] + ((real)1.0 - beta2) * grad * grad;
+
+		// Compute bias-corrected estimates
+		real mhat = m[i] * job->bias_correction1;
+		real vhat = v[i] * job->bias_correction2;
+
+		// Update: W = W + lr * mhat / (sqrt(vhat) + epsilon)
+		w[i] += job->lr * mhat / ((real)sqrt(vhat) + job->epsilon);
+	}
+}
+
+//--------------------------------------------------------
 // Stochastic Gradient Descent (SGD)
 //
 // update the weights based on gradients
@@ -1880,19 +2140,9 @@ static void optimize_adagrad(PNetwork pnet)
 		PLayer cur = &pnet->layers[layer];
 		for (int p = 0; p < cur->param_count; p++)
 		{
+			optimizer_job job = { &cur->params[p], pnet->learning_rate, (real)0.0, (real)0.0, epsilon, (real)0.0, (real)0.0 };
 			PTensor g = cur->params[p].grad;
-			PTensor v = cur->params[p].v;
-			PTensor w = cur->params[p].value;
-
-			int size = g->rows * g->cols;
-
-			// v = v + g^2, then W = W + lr * g / (sqrt(v) + epsilon)
-			for (int i = 0; i < size; i++)
-			{
-				real grad = g->values[i];
-				v->values[i] += grad * grad;
-				w->values[i] += pnet->learning_rate * grad / ((real)sqrt(v->values[i]) + epsilon);
-			}
+			ann_parallel_for(g->rows * g->cols, ANN_ELEMENT_GRAIN, adagrad_range, &job);
 		}
 	}
 
@@ -1918,20 +2168,9 @@ static void optimize_rmsprop(PNetwork pnet)
 		PLayer cur = &pnet->layers[layer];
 		for (int p = 0; p < cur->param_count; p++)
 		{
+			optimizer_job job = { &cur->params[p], pnet->learning_rate, beta, one_minus_beta, epsilon, (real)0.0, (real)0.0 };
 			PTensor g = cur->params[p].grad;
-			PTensor v = cur->params[p].v;
-			PTensor w = cur->params[p].value;
-
-			int size = g->rows * g->cols;
-
-			// v = beta * v + (1 - beta) * g^2
-			// W = W + lr * g / (sqrt(v) + epsilon)
-			for (int i = 0; i < size; i++)
-			{
-				real grad = g->values[i];
-				v->values[i] = beta * v->values[i] + one_minus_beta * grad * grad;
-				w->values[i] += pnet->learning_rate * grad / ((real)sqrt(v->values[i]) + epsilon);
-			}
+			ann_parallel_for(g->rows * g->cols, ANN_ELEMENT_GRAIN, rmsprop_range, &job);
 		}
 	}
 
@@ -1962,30 +2201,10 @@ static void optimize_adam(PNetwork pnet)
 		PLayer cur = &pnet->layers[layer];
 		for (int p = 0; p < cur->param_count; p++)
 		{
+			optimizer_job job = { &cur->params[p], pnet->learning_rate, beta1, beta2, epsilon,
+			                      bias_correction1, bias_correction2 };
 			PTensor g = cur->params[p].grad;
-			PTensor m = cur->params[p].m;
-			PTensor v = cur->params[p].v;
-			PTensor w = cur->params[p].value;
-
-			int size = g->rows * g->cols;
-
-			for (int i = 0; i < size; i++)
-			{
-				real grad = g->values[i];
-
-				// Update biased first moment estimate: m = beta1 * m + (1 - beta1) * g
-				m->values[i] = beta1 * m->values[i] + ((real)1.0 - beta1) * grad;
-
-				// Update biased second moment estimate: v = beta2 * v + (1 - beta2) * g^2
-				v->values[i] = beta2 * v->values[i] + ((real)1.0 - beta2) * grad * grad;
-
-				// Compute bias-corrected estimates
-				real mhat = m->values[i] * bias_correction1;
-				real vhat = v->values[i] * bias_correction2;
-
-				// Update: W = W + lr * mhat / (sqrt(vhat) + epsilon)
-				w->values[i] += pnet->learning_rate * mhat / ((real)sqrt(vhat) + epsilon);
-			}
+			ann_parallel_for(g->rows * g->cols, ANN_ELEMENT_GRAIN, adam_range, &job);
 		}
 	}
 
@@ -3276,6 +3495,19 @@ Activation_type ann_get_layer_activation(const PNetwork pnet, int layer)
 		return ACTIVATION_NULL;
 
 	return pnet->layers[layer].activation;
+}
+
+//------------------------------
+// set or get the CPU thread count
+//------------------------------
+void ann_set_num_threads(int threads)
+{
+	ann_parallel_set_threads(threads < 0 ? 0 : threads);
+}
+
+int ann_get_num_threads(void)
+{
+	return ann_parallel_get_threads();
 }
 
 //------------------------------

@@ -33,6 +33,7 @@ add_test(NAME test_gradients COMMAND test_gradients)
 add_test(NAME test_comprehensive_callbacks COMMAND test_comprehensive_callbacks)
 add_test(NAME test_training_options COMMAND test_training_options)
 add_test(NAME test_conv COMMAND test_conv)
+add_test(NAME test_threads COMMAND test_threads)
 
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
@@ -157,7 +158,9 @@ if (BUILD_SHARED)
 else()
     add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c ${METAL_SRC} ${CUDA_SRC})
 endif()
-target_link_libraries(libann ${METAL_LIB} ${CUDA_LIBS})
+# ann_parallel_for's worker threads (pthreads; nothing extra on Windows)
+find_package(Threads REQUIRED)
+target_link_libraries(libann ${METAL_LIB} ${CUDA_LIBS} Threads::Threads)
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
 # install rules
@@ -271,3 +274,6 @@ target_link_libraries(test_training_options libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_conv tests/test_conv.c testy/test_main.c)
 target_link_libraries(test_conv libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_threads tests/test_threads.c testy/test_main.c)
+target_link_libraries(test_threads libann ${BLAS_LIB} ${MATH_LIB} Threads::Threads)

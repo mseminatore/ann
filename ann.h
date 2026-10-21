@@ -1184,6 +1184,33 @@ ANN_API int ann_get_layer_shape(const PNetwork pnet, int layer, int *channels, i
 ANN_API int ann_get_layer_settings(const PNetwork pnet, int layer, int *size, int *stride, int *padding);
 
 /**
+ * Set how many CPU threads libann uses for training and batched inference.
+ * 
+ * libann splits its own loops (element-wise work, convolution and pooling,
+ * and its built-in matrix multiply when built without BLAS) across this many
+ * threads, the calling thread included. BLAS calls always stay on the calling
+ * thread, so a threaded BLAS (OpenBLAS, Accelerate, MKL) keeps managing its
+ * own threads and the two never compete. Results do not depend on the thread
+ * count.
+ * 
+ * The setting is global. Call it while no training or prediction is running.
+ * 
+ * @param threads Thread count; 1 runs everything on the calling thread, 0
+ *        restores the default (the ANN_NUM_THREADS environment variable if
+ *        set, else the number of processors)
+ * 
+ * @see ann_get_num_threads()
+ */
+ANN_API void ann_set_num_threads(int threads);
+
+/**
+ * Get the number of CPU threads libann uses (1 when built with ANN_NO_THREADS).
+ * 
+ * @return Thread count, including the calling thread
+ */
+ANN_API int ann_get_num_threads(void);
+
+/**
  * Set where a network's progress output goes (training progress, loading
  * messages, ann_print_props, ...).
  * 

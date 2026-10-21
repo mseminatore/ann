@@ -1303,7 +1303,7 @@ const char* ann_strerror(int error_code)
 /**
  * Set the error logging callback.
  * Installs a callback function to be called on library errors.
- * Pass NULL to disable error logging.
+ * Pass NULL to restore the default (print to stderr).
  */
 void ann_set_error_log_callback(ErrorLogCallback callback)
 {
@@ -1320,7 +1320,7 @@ ErrorLogCallback ann_get_error_log_callback(void)
 }
 
 /**
- * Clear the error logging callback.
+ * Clear the error logging callback, restoring the default stderr output.
  * Equivalent to calling ann_set_error_log_callback(NULL).
  */
 void ann_clear_error_log_callback(void)
@@ -3994,9 +3994,13 @@ static PNetwork load_network(const char *filename, int binary)
 	if (!filename)
 		return NULL;
 
+	const char *function_name = binary ? "ann_load_network_binary" : "ann_load_network";
 	FILE *fptr = fopen(filename, binary ? "rb" : "rt");
 	if (!fptr)
+	{
+		invoke_error_callback(ERR_IO, function_name);
 		return NULL;
+	}
 
 	PNetwork pnet = NULL;
 	int ver, optimizer, loss_type, layer_count;
@@ -4008,7 +4012,8 @@ static PNetwork load_network(const char *filename, int binary)
 	{
 		invoke_error_callback(ERR_INVALID, binary ? "ann_load_network_binary: unsupported file version"
 		                                           : "ann_load_network: unsupported file version");
-		goto fail;
+		fclose(fptr);
+		return NULL;
 	}
 
 	if (!read_int(fptr, binary, &optimizer) ||
@@ -4020,10 +4025,6 @@ static PNetwork load_network(const char *filename, int binary)
 	pnet = ann_make_network(optimizer, loss_type);
 	if (!pnet)
 		goto fail;
-
-	ann_printf(pnet, "%sloading network%s %s%s%s...", 
-		COLOR(ANSI_CYAN), RESET(),
-		COLOR(ANSI_WHITE), filename, RESET());
 
 	// create layers
 	for (int layer = 0; layer < layer_count; layer++)
@@ -4081,8 +4082,6 @@ static PNetwork load_network(const char *filename, int binary)
 		}
 	}
 
-	ann_printf(pnet, "%sdone.%s\n", COLOR(ANSI_GREEN), RESET());
-
 	fclose(fptr);
 
 	// mark network weights as set
@@ -4091,8 +4090,7 @@ static PNetwork load_network(const char *filename, int binary)
 	return pnet;
 
 fail:
-	if (pnet)
-		ann_printf(pnet, "%sfailed.%s\n", COLOR(ANSI_RED), RESET());
+	invoke_error_callback(ERR_INVALID, function_name);
 	fclose(fptr);
 	ann_free_network(pnet);
 	return NULL;

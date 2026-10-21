@@ -177,7 +177,7 @@ ann_get_print_function | get a network's progress output function
 ann_strerror | convert error code to human-readable message
 ann_set_error_log_callback | install error logging callback
 ann_get_error_log_callback | get current error callback
-ann_clear_error_log_callback | disable error logging callback
+ann_clear_error_log_callback | remove the callback, restoring the default stderr output
 
 ## Learning Rate Schedulers
 
@@ -669,7 +669,7 @@ Use `ann_strerror(code)` to convert an error code to a human-readable message.
 
 ## Error Callback
 
-Install a custom callback to receive error notifications:
+By default, library errors are printed to stderr as `[function] Error code: message`. Install a callback to send them somewhere else, or a callback that does nothing to silence them. Either way, functions still return their error code (or `NULL`), so check results as usual.
 
 ```c
 // Define your error handler
@@ -688,7 +688,7 @@ ann_add_layer(net, 0, LAYER_INPUT, ACTIVATION_NULL);  // Error: 0 nodes
 // Get current callback (for chaining)
 ErrorLogCallback prev = ann_get_error_log_callback();
 
-// Disable callback
+// Remove the callback (errors go to stderr again)
 ann_clear_error_log_callback();
 ```
 

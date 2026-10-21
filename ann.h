@@ -521,6 +521,89 @@ ANN_API int ann_export_onnx(const PNetwork pnet, const char *filename);
  */
 ANN_API PNetwork ann_import_onnx(const char *filename);
 
+// ============================================================================
+// INT8 QUANTIZATION AND C HEADER EXPORT (ann_quantize.c)
+// ============================================================================
+
+/**
+ * An int8 version of a trained network (opaque). Weights are int8 with one
+ * scale per output channel; activations are int8 with one scale and zero
+ * point per tensor; sums are int32. See docs/C_EXPORT.md.
+ */
+typedef struct QuantizedNetwork QuantizedNetwork;
+typedef struct QuantizedNetwork *PQuantizedNetwork;
+
+/**
+ * Quantize a trained network to int8.
+ *
+ * Runs the network over the calibration rows to find each layer's value
+ * range; a few hundred representative training samples are usually enough.
+ * Supports dense, conv2d, maxpool2d and flatten layers with any activation
+ * (softmax only on the output layer). The network is not changed.
+ *
+ * @param pnet Trained network
+ * @param calibration_inputs Input rows [samples x input nodes]
+ * @return The int8 model (free with ann_free_quantized), or NULL on error
+ */
+ANN_API PQuantizedNetwork ann_quantize(const PNetwork pnet, const PTensor calibration_inputs);
+
+/**
+ * Free a model made by ann_quantize(). NULL is ignored.
+ */
+ANN_API void ann_free_quantized(PQuantizedNetwork q);
+
+/**
+ * Run the int8 model on real inputs: the inputs are quantized, the model
+ * runs in integer math, and the outputs are dequantized (with softmax
+ * applied if the network's output layer has it). Gives the same results as
+ * the exported header's <prefix>_predict_float().
+ *
+ * @return ERR_OK, ERR_NULL_PTR or ERR_INVALID
+ */
+ANN_API int ann_quantized_predict(const PQuantizedNetwork q, const real *inputs, real *outputs);
+
+/**
+ * Run the int8 model on int8 inputs, giving int8 outputs (softmax outputs
+ * are the int8 logits). Gives the same results as the exported header's
+ * <prefix>_predict().
+ *
+ * @return ERR_OK, ERR_NULL_PTR or ERR_INVALID
+ */
+ANN_API int ann_quantized_predict_int8(const PQuantizedNetwork q, const signed char *inputs, signed char *outputs);
+
+/**
+ * The int8 model's input and output quantization: real = scale * (q - zero_point).
+ * Any output pointer may be NULL.
+ *
+ * @return ERR_OK or ERR_NULL_PTR
+ */
+ANN_API int ann_quantized_get_io_params(const PQuantizedNetwork q, real *in_scale, int *in_zero_point,
+                                        real *out_scale, int *out_zero_point);
+
+/**
+ * Classification accuracy of the int8 model (compare with ann_evaluate_accuracy).
+ *
+ * @return Accuracy in [0, 1], or -1 on bad arguments
+ */
+ANN_API real ann_quantized_evaluate_accuracy(const PQuantizedNetwork q, const PTensor inputs, const PTensor outputs);
+
+/**
+ * Export a model as a self-contained C header for embedded targets.
+ *
+ * With q, writes the int8 model; with q NULL, writes pnet's float32 weights.
+ * The header holds the parameters as static const arrays and small inference
+ * functions (<prefix>_predict, <prefix>_argmax) that run on ann_rt.h, a
+ * header-only runtime with no allocation. Copy ann_rt.h next to the header.
+ *
+ * @param pnet Network to export as float32 (ignored when q is given)
+ * @param q int8 model from ann_quantize(), or NULL
+ * @param filename Output file, e.g. "model.h"
+ * @param prefix C identifier used to name the header's symbols, e.g. "model"
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad prefix, unsupported network) or ERR_IO
+ */
+ANN_API int ann_export_c_header(const PNetwork pnet, const PQuantizedNetwork q, const char *filename,
+                                const char *prefix);
+
 /**
  * Export network architecture as PIKCHR diagram.
  * 

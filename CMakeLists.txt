@@ -151,12 +151,12 @@ endif()
 
 # add the core library (includes hypertuning)
 if (BUILD_SHARED)
-    add_library(libann SHARED ann.c tensor.c ann_hypertune.c json.c ${METAL_SRC} ${CUDA_SRC})
+    add_library(libann SHARED ann.c tensor.c ann_hypertune.c json.c ann_quantize.c ${METAL_SRC} ${CUDA_SRC})
     target_compile_definitions(libann PRIVATE ANN_BUILDING_DLL)
     # export only ANN_API-marked functions (matches Windows dllexport behavior)
     set_target_properties(libann PROPERTIES C_VISIBILITY_PRESET hidden CUDA_VISIBILITY_PRESET hidden)
 else()
-    add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c ${METAL_SRC} ${CUDA_SRC})
+    add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c ann_quantize.c ${METAL_SRC} ${CUDA_SRC})
 endif()
 # ann_parallel_for's worker threads (pthreads; nothing extra on Windows)
 find_package(Threads REQUIRED)
@@ -165,7 +165,7 @@ set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
 # install rules
 install(TARGETS libann ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
-install(FILES ann.h tensor.h ann_config.h ann_hypertune.h json.h ann_gpu_backend.h
+install(FILES ann.h ann_rt.h tensor.h ann_config.h ann_hypertune.h json.h ann_gpu_backend.h
         DESTINATION include/ann)
 
 #
@@ -179,6 +179,9 @@ target_link_libraries(mnist libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(fashion_cnn examples/fashion_cnn.c)
 target_link_libraries(fashion_cnn libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(export_model examples/export_model.c)
+target_link_libraries(export_model libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(mnist_hypertune_tpe examples/mnist_hypertune_tpe.c)
 target_link_libraries(mnist_hypertune_tpe libann ${BLAS_LIB} ${MATH_LIB})
@@ -277,3 +280,32 @@ target_link_libraries(test_conv libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_threads tests/test_threads.c testy/test_main.c)
 target_link_libraries(test_threads libann ${BLAS_LIB} ${MATH_LIB} Threads::Threads)
+
+add_executable(test_quantize tests/test_quantize.c testy/test_main.c)
+target_link_libraries(test_quantize libann ${BLAS_LIB} ${MATH_LIB})
+add_test(NAME test_quantize COMMAND test_quantize)
+
+# C header export: gen_c_export writes model headers with libann, then
+# test_c_export compiles them with only ann_rt.h (no libann) and checks they
+# give libann's results; test_c_export_int8 does the same with ANN_RT_NO_FLOAT
+add_executable(gen_c_export tests/gen_c_export.c)
+target_link_libraries(gen_c_export libann ${BLAS_LIB} ${MATH_LIB})
+set(C_EXPORT_DIR ${CMAKE_CURRENT_BINARY_DIR}/c_export)
+set(C_EXPORT_FILES ${C_EXPORT_DIR}/ann_rt.h ${C_EXPORT_DIR}/expected.h
+    ${C_EXPORT_DIR}/dense_q.h ${C_EXPORT_DIR}/dense_f.h ${C_EXPORT_DIR}/cnn_q.h ${C_EXPORT_DIR}/cnn_f.h)
+add_custom_command(OUTPUT ${C_EXPORT_FILES}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${C_EXPORT_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/ann_rt.h ${C_EXPORT_DIR}/ann_rt.h
+    COMMAND gen_c_export ${C_EXPORT_DIR}
+    DEPENDS gen_c_export ${CMAKE_SOURCE_DIR}/ann_rt.h
+    COMMENT "Exporting test models as C headers")
+foreach(target test_c_export test_c_export_int8)
+    add_executable(${target} tests/test_c_export.c ${C_EXPORT_FILES})
+    target_include_directories(${target} PRIVATE ${C_EXPORT_DIR})
+    if(NOT MSVC)
+        target_compile_options(${target} PRIVATE -std=c99 -Wall -Wextra -pedantic -Werror)
+    endif()
+    add_test(NAME ${target} COMMAND ${target})
+endforeach()
+target_link_libraries(test_c_export ${MATH_LIB})
+target_compile_definitions(test_c_export_int8 PRIVATE ANN_RT_NO_FLOAT)

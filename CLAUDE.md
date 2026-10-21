@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-`libann` is a compact, portable ANSI C library for training and evaluating neural networks. It has two core modules — `tensor` (the math layer over vectors/matrices) and `ann` (the training/inference runtime built on top of `tensor`) — plus `ann_hypertune` (automated hyperparameter search) and `json` (ONNX JSON I/O). All four compile into `libann`. To embed in another project, add only `ann.c` + `tensor.c`, or link `libann`.
+`libann` is a compact, portable ANSI C library for training and evaluating neural networks. It has two core modules — `tensor` (the math layer over vectors/matrices) and `ann` (the training/inference runtime built on top of `tensor`) — plus `ann_hypertune` (automated hyperparameter search), `json` (ONNX JSON I/O) and `ann_quantize` (int8 quantization and C header export). All five compile into `libann`. To embed in another project, add only `ann.c` + `tensor.c`, or link `libann`.
 
 ## Project layout
 
@@ -51,7 +51,7 @@ ctest -R test_tensor              # run a single test by name
 ./test_tensor                     # or run the executable directly
 ```
 
-Test executables: `test_tensor`, `test_network`, `test_activations`, `test_loss_functions`, `test_optimizers`, `test_save_load`, `test_onnx_export`, `test_hypertune`, `test_json`, `test_training_convergence`, `test_online_training`.
+Test executables: `test_tensor`, `test_network`, `test_activations`, `test_loss_functions`, `test_optimizers`, `test_save_load`, `test_onnx_export`, `test_hypertune`, `test_json`, `test_training_convergence`, `test_online_training`, `test_quantize`, `test_c_export` (+ `_int8`; built from headers that `gen_c_export` writes at build time).
 
 Test files define `void test_main(int argc, char *argv[])` and use the `MODULE(...)` / `SUITE(...)` / `TESTEX("name", expr)` macros.
 
@@ -76,4 +76,4 @@ Test files define `void test_main(int argc, char *argv[])` and use the `MODULE(.
 
 ## More detail
 
-For the full API/feature reference and worked examples, see `README.md` and `.github/copilot-instructions.md`. Deeper topic guides live in `docs/`: `ONNX_EXPORT.md`, `HYPERTUNING.md`, `DEBUGGING_TIPS.md`.
+For the full API/feature reference and worked examples, see `README.md` and `.github/copilot-instructions.md`. Deeper topic guides live in `docs/`: `ONNX_EXPORT.md`, `C_EXPORT.md`, `HYPERTUNING.md`, `DEBUGGING_TIPS.md`.

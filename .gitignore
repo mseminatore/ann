@@ -43,6 +43,8 @@ data/mnist_test.csv
 *.onnx
 fashion_q.h
 fashion_f.h
+fashion_cnn.onnx.json
+fashion_cnn.pikchr
 
 # Generated docs
 fashion_mnist.html

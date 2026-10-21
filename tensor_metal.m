@@ -104,8 +104,12 @@ typedef struct {
     id<MTLComputePipelineState> pso_conv_col2im;
     id<MTLComputePipelineState> pso_maxpool_forward;
     id<MTLComputePipelineState> pso_maxpool_backward;
+    id<MTLComputePipelineState> pso_copy_buffer;
     // MPS GEMM kernels by shape, reused across batches
     NSMutableDictionary<NSString *, MPSMatrixMultiplication *> *gemm_cache;
+    // The open compute encoder and its command buffer, see compute_encoder()
+    id<MTLComputeCommandEncoder> enc;
+    id<MTLCommandBuffer> enc_cmd;
     // Per-layer work buffers (conv columns, pool argmax), see layer_scratch()
     NSMutableDictionary<NSNumber *, id<MTLBuffer>> *scratch;
     // Per-batch targets and per-row losses (shared memory)
@@ -395,6 +399,11 @@ int tensor_metal_init(void)
         // row per output position: cols [batch*OH*OW x C*K*K], column index
         // (c*K + i)*K + j, as the CPU path orders them.
         // ----------------------------------------------------------------
+        "kernel void copy_buffer(\n"
+        "    device const float *src [[buffer(0)]],\n"
+        "    device float *dst [[buffer(1)]],\n"
+        "    uint gid [[thread_position_in_grid]]) {\n"
+        "    dst[gid] = src[gid]; }\n"
         "struct WindowDims { uint C, H, W, F, OH, OW, K, S, P, batch; };\n"
         "kernel void conv_im2col(\n"
         "    device const float *x [[buffer(0)]],\n"
@@ -591,11 +600,12 @@ int tensor_metal_init(void)
     g_metal.pso_sum_partials     = make_pso(g_metal.library, "sum_partials");
     g_metal.pso_maxpool_forward  = make_pso(g_metal.library, "maxpool_forward");
     g_metal.pso_maxpool_backward = make_pso(g_metal.library, "maxpool_backward");
+    g_metal.pso_copy_buffer      = make_pso(g_metal.library, "copy_buffer");
 
     if (!g_metal.pso_conv_im2col || !g_metal.pso_conv_output || !g_metal.pso_conv_grad_rows ||
         !g_metal.pso_conv_bias_grad || !g_metal.pso_conv_col2im ||
         !g_metal.pso_conv_weight_grad_partial || !g_metal.pso_sum_partials ||
-        !g_metal.pso_maxpool_forward || !g_metal.pso_maxpool_backward)
+        !g_metal.pso_maxpool_forward || !g_metal.pso_maxpool_backward || !g_metal.pso_copy_buffer)
         return 0;
 
     g_metal.gemm_cache = [NSMutableDictionary dictionary];
@@ -665,6 +675,43 @@ int tensor_metal_download(PTensor t)
 }
 
 //-----------------------------------------------------------
+// Kernels share one compute encoder until something else must be encoded
+// (an MPS GEMM, a blit, or the commit), which calls end_compute() first.
+// A batch has dozens of small kernels and each encoder has a fixed cost, so
+// this matters for small networks. Encoders dispatch serially, so each kernel
+// still sees the writes of the ones before it.
+//-----------------------------------------------------------
+static id<MTLComputeCommandEncoder> compute_encoder(id<MTLCommandBuffer> cmd)
+{
+    if (g_metal.enc && g_metal.enc_cmd == cmd)
+        return g_metal.enc;
+    if (g_metal.enc)
+        [g_metal.enc endEncoding];
+    g_metal.enc = [cmd computeCommandEncoder];
+    g_metal.enc_cmd = cmd;
+    return g_metal.enc;
+}
+
+static void end_compute(void)
+{
+    if (g_metal.enc)
+        [g_metal.enc endEncoding];
+    g_metal.enc = nil;
+    g_metal.enc_cmd = nil;
+}
+
+//-----------------------------------------------------------
+// Commit a command buffer and wait for it; 1 if it completed
+//-----------------------------------------------------------
+static int commit_and_wait(id<MTLCommandBuffer> cmd)
+{
+    end_compute();
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return cmd.status == MTLCommandBufferStatusCompleted;
+}
+
+//-----------------------------------------------------------
 // Dispatch an element-wise activation kernel over a buffer.
 // pso: the compute pipeline state for the activation kernel
 // count: total number of elements (rows * cols)
@@ -674,7 +721,7 @@ static void dispatch_activation(id<MTLCommandBuffer> cmd,
                                 id<MTLBuffer> buf,
                                 NSUInteger count)
 {
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
     [enc setComputePipelineState:pso];
     [enc setBuffer:buf offset:0 atIndex:0];
 
@@ -683,8 +730,7 @@ static void dispatch_activation(id<MTLCommandBuffer> cmd,
 
     [enc dispatchThreads:MTLSizeMake(count, 1, 1)
         threadsPerThreadgroup:MTLSizeMake(tgsize, 1, 1)];
-    [enc endEncoding];
-}
+    }
 
 //-----------------------------------------------------------
 // Dispatch bias_add kernel: buf[b*cols + n] += bias[n]
@@ -697,7 +743,7 @@ static void dispatch_bias_add(id<MTLCommandBuffer> cmd,
                               NSUInteger batch_size,
                               NSUInteger cols)
 {
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
     [enc setComputePipelineState:g_metal.pso_bias_add];
     [enc setBuffer:buf_buf  offset:0 atIndex:0];
     [enc setBuffer:bias_buf offset:0 atIndex:1];
@@ -708,8 +754,7 @@ static void dispatch_bias_add(id<MTLCommandBuffer> cmd,
     MTLSize tgSize = MTLSizeMake(tgw, 1, 1);
 
     [enc dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
-    [enc endEncoding];
-}
+    }
 
 //-----------------------------------------------------------
 // Dispatch softmax_rows kernel: per-row softmax over batch
@@ -722,7 +767,7 @@ static void dispatch_softmax(id<MTLCommandBuffer> cmd,
                              uint32_t cols,
                              NSUInteger batch_size)
 {
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
     [enc setComputePipelineState:g_metal.pso_softmax];
     [enc setBuffer:buf_buf offset:0 atIndex:0];
     [enc setBytes:&cols length:sizeof(uint32_t) atIndex:1];
@@ -731,8 +776,7 @@ static void dispatch_softmax(id<MTLCommandBuffer> cmd,
     // This is correct for any output size and avoids parallel reduction complexity.
     [enc dispatchThreads:MTLSizeMake(batch_size, 1, 1)
         threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-    [enc endEncoding];
-}
+    }
 
 //-----------------------------------------------------------
 // Select the activation PSO for a given activation type.
@@ -803,6 +847,7 @@ static void encode_gemm(id<MTLCommandBuffer> cmd,
     NSUInteger M = trans_a ? a_cols : a_rows;
     NSUInteger K = trans_a ? a_rows : a_cols;
     NSUInteger N = trans_b ? b_rows : b_cols;
+    end_compute();
     [gemm_kernel(trans_a, trans_b, M, N, K, alpha, beta) encodeToCommandBuffer:cmd
                                                                     leftMatrix:gpu_matrix(a, a_rows, a_cols)
                                                                    rightMatrix:gpu_matrix(b, b_rows, b_cols)
@@ -810,13 +855,12 @@ static void encode_gemm(id<MTLCommandBuffer> cmd,
 }
 
 //-----------------------------------------------------------
-// Copy count floats between buffers
+// Copy count floats between buffers (a kernel rather than a blit, so it
+// stays in the open compute encoder)
 //-----------------------------------------------------------
 static void encode_copy(id<MTLCommandBuffer> cmd, id<MTLBuffer> src, id<MTLBuffer> dst, NSUInteger count)
 {
-    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-    [blit copyFromBuffer:src sourceOffset:0 toBuffer:dst destinationOffset:0 size:count * sizeof(float)];
-    [blit endEncoding];
+    dispatch_binary_elementwise(cmd, g_metal.pso_copy_buffer, src, dst, count);
 }
 
 //-----------------------------------------------------------
@@ -848,7 +892,7 @@ static void encode_grid(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> ps
                         id<MTLBuffer> __strong *bufs, int n_bufs, const void *consts, size_t consts_len,
                         MTLSize grid)
 {
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
     [enc setComputePipelineState:pso];
     for (int i = 0; i < n_bufs; i++)
         [enc setBuffer:bufs[i] offset:0 atIndex:(NSUInteger)i];
@@ -858,8 +902,7 @@ static void encode_grid(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> ps
     NSUInteger tw = MIN(pso.threadExecutionWidth, grid.width);
     NSUInteger th = MIN(pso.maxTotalThreadsPerThreadgroup / tw, grid.height);
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
-    [enc endEncoding];
-}
+    }
 
 //-----------------------------------------------------------
 // Work buffers kept per layer between the forward and backward passes of a
@@ -958,14 +1001,13 @@ static int encode_conv_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
         NSUInteger tg = 256;
         while (tg > g_metal.pso_conv_bias_grad.maxTotalThreadsPerThreadgroup)
             tg /= 2;
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
         [enc setComputePipelineState:g_metal.pso_conv_bias_grad];
         [enc setBuffer:dZ offset:0 atIndex:0];
         [enc setBuffer:(__bridge id<MTLBuffer>)l->params[1].grad->gpu_buf offset:0 atIndex:1];
         [enc setBytes:&d length:sizeof(d) atIndex:2];
         [enc dispatchThreadgroups:MTLSizeMake(d.F, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        [enc endEncoding];
-    }
+            }
 
     if (!dX)
         return 1;
@@ -1120,9 +1162,7 @@ static int metal_forward_pass(PNetwork pnet,
         cur_buf = out;
     }
 
-    [cmd commit];
-    [cmd waitUntilCompleted];
-    return cmd.status == MTLCommandBufferStatusCompleted;
+    return commit_and_wait(cmd);
 }
 
 //-----------------------------------------------------------
@@ -1224,6 +1264,27 @@ static int metal_eval_single(PNetwork pnet)
 }
 
 //-----------------------------------------------------------
+// GPU memory one sample needs in a forward pass: each layer's output plus
+// conv im2col columns and output rows (pool argmax fits in the output size)
+static size_t forward_bytes_per_sample(const PNetwork pnet)
+{
+    size_t floats = 0;
+    for (int layer = 0; layer < pnet->layer_count; layer++) {
+        const Layer *l = &pnet->layers[layer];
+        floats += (size_t)l->node_count;
+        if (l->kind == LAYER_KIND_CONV2D)
+            floats += (size_t)l->shape.h * l->shape.w * (l->params[0].value->cols + l->shape.c);
+        else if (l->kind == LAYER_KIND_MAXPOOL2D)
+            floats += (size_t)l->node_count;
+    }
+    return floats * sizeof(float);
+}
+
+// Rows per forward pass are capped so a large batch (conv columns grow with
+// it) is evaluated in pieces instead of failing to allocate
+#define EVAL_BATCH_BYTES ((size_t)256 << 20)
+
+//-----------------------------------------------------------
 // GPU-accelerated batch inference.
 //
 // @param pnet       Trained network (ann_gpu_upload_network() must have been called)
@@ -1242,22 +1303,30 @@ static int metal_eval_batch(const PNetwork pnet, const real *inputs, real *outpu
 
     int input_nodes  = pnet->layers[0].node_count;
     int output_nodes = pnet->layers[pnet->layer_count - 1].node_count;
+    size_t chunk_rows = EVAL_BATCH_BYTES / forward_bytes_per_sample(pnet);
+    int chunk = chunk_rows < 1 ? 1 : (chunk_rows < (size_t)batch_size ? (int)chunk_rows : batch_size);
 
-    size_t in_bytes  = (size_t)batch_size * input_nodes  * sizeof(float);
-    size_t out_bytes = (size_t)batch_size * output_nodes * sizeof(float);
+    for (int start = 0; start < batch_size; start += chunk) {
+        int rows = batch_size - start < chunk ? batch_size - start : chunk;
+        size_t in_bytes  = (size_t)rows * input_nodes  * sizeof(float);
+        size_t out_bytes = (size_t)rows * output_nodes * sizeof(float);
 
-    id<MTLBuffer> input_buf = [g_metal.device newBufferWithBytes:inputs
-                                                          length:in_bytes
-                                                         options:MTLResourceStorageModeShared];
-    id<MTLBuffer> output_buf = [g_metal.device newBufferWithLength:out_bytes
-                                                           options:MTLResourceStorageModeShared];
-    if (!input_buf || !output_buf)
-        return ERR_ALLOC;
+        // release each piece's buffers before the next
+        @autoreleasepool {
+            id<MTLBuffer> input_buf = [g_metal.device newBufferWithBytes:inputs + (size_t)start * input_nodes
+                                                                  length:in_bytes
+                                                                 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> output_buf = [g_metal.device newBufferWithLength:out_bytes
+                                                                   options:MTLResourceStorageModeShared];
+            if (!input_buf || !output_buf)
+                return ERR_ALLOC;
 
-    if (!metal_forward_pass((PNetwork)pnet, input_buf, output_buf, batch_size))
-        return ERR_FAIL;
+            if (!metal_forward_pass((PNetwork)pnet, input_buf, output_buf, rows))
+                return ERR_FAIL;
 
-    memcpy(outputs, [output_buf contents], out_bytes);
+            memcpy(outputs + (size_t)start * output_nodes, [output_buf contents], out_bytes);
+        }
+    }
     return ERR_OK;
 }
 
@@ -1371,7 +1440,7 @@ static void encode_1d(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pso,
                       id<MTLBuffer> __strong *bufs, int n_bufs,
                       const float *consts, int n_consts, NSUInteger count)
 {
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
     [enc setComputePipelineState:pso];
     for (int i = 0; i < n_bufs; i++)
         [enc setBuffer:bufs[i] offset:0 atIndex:(NSUInteger)i];
@@ -1379,8 +1448,7 @@ static void encode_1d(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pso,
         [enc setBytes:&consts[i] length:sizeof(float) atIndex:(NSUInteger)(n_bufs + i)];
     NSUInteger tg = MIN(pso.maxTotalThreadsPerThreadgroup, count);
     [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding];
-}
+    }
 
 //-----------------------------------------------------------
 // Helper: dispatch a 1-D element-wise kernel with 2 buffers.
@@ -1425,15 +1493,14 @@ static void encode_activation_derivative(id<MTLCommandBuffer> cmd, PLayer l, int
     id<MTLBuffer> Z = (__bridge id<MTLBuffer>)l->t_batch_z->gpu_buf;
 
     if (l->activation == ACTIVATION_SOFTMAX) {
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
         uint32_t cols = (uint32_t)l->node_count;
         [enc setComputePipelineState:g_metal.pso_softmax_jacobian];
         [enc setBuffer:dl_dz offset:0 atIndex:0];
         [enc setBuffer:A offset:0 atIndex:1];
         [enc setBytes:&cols length:sizeof(cols) atIndex:2];
         [enc dispatchThreads:MTLSizeMake((NSUInteger)batch_size, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-        [enc endEncoding];
-        return;
+                return;
     }
 
     id<MTLComputePipelineState> pso = pso_for_deriv(l->activation);
@@ -1454,7 +1521,7 @@ static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, in
     uint32_t cols = (uint32_t)out->node_count;
     uint32_t mode = pnet->loss_type == LOSS_MSE ? 0 : (out->activation == ACTIVATION_SIGMOID ? 2 : 1);
 
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
     [enc setComputePipelineState:g_metal.pso_output_delta_loss];
     [enc setBuffer:(__bridge id<MTLBuffer>)out->t_batch_values->gpu_buf offset:0 atIndex:0];
     [enc setBuffer:g_metal.targets_buf offset:0 atIndex:1];
@@ -1464,8 +1531,7 @@ static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, in
     [enc setBytes:&mode length:sizeof(mode) atIndex:5];
     NSUInteger tg = MIN(g_metal.pso_output_delta_loss.maxTotalThreadsPerThreadgroup, (NSUInteger)batch_size);
     [enc dispatchThreads:MTLSizeMake((NSUInteger)batch_size, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding];
-
+    
     if (pnet->loss_type == LOSS_MSE)
         encode_activation_derivative(cmd, out, batch_size);
 }
@@ -1509,7 +1575,7 @@ static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_si
 
             // bias_grad += column sums of dl_dz
             {
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
                 uint32_t bs = (uint32_t)batch_size, n = (uint32_t)nodes;
                 [enc setComputePipelineState:g_metal.pso_bias_grad_sum];
                 [enc setBuffer:dl_dz offset:0 atIndex:0];
@@ -1518,8 +1584,7 @@ static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_si
                 [enc setBytes:&n  length:sizeof(n)  atIndex:3];
                 NSUInteger tg = MIN(g_metal.pso_bias_grad_sum.maxTotalThreadsPerThreadgroup, (NSUInteger)nodes);
                 [enc dispatchThreads:MTLSizeMake((NSUInteger)nodes, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-                [enc endEncoding];
-            }
+                            }
 
             // dl_dz_prev = dl_dz * W  ([batch x nodes] * [nodes x prev_nodes])
             if (dX)
@@ -1693,6 +1758,7 @@ static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_siz
 
     // Zero the gradients
     {
+        end_compute();
         id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
         for (int layer = 1; layer < pnet->layer_count; layer++) {
             PLayer l = &pnet->layers[layer];
@@ -1725,9 +1791,7 @@ static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_siz
     pnet->train_iteration++;
     encode_optimizer(cmd, pnet);
 
-    [cmd commit];
-    [cmd waitUntilCompleted];
-    if (cmd.status != MTLCommandBufferStatusCompleted) {
+    if (!commit_and_wait(cmd)) {
         pnet->train_iteration--;
         return 0;
     }

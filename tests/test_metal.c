@@ -493,6 +493,30 @@ void test_main(int argc, char *argv[])
 
         tensor_free(inputs);
         tensor_free(targets);
+
+        // a batch bigger than one forward pass's memory cap (about 600 rows
+        // of this network) is evaluated in pieces
+        enum { BIG_ROWS = 1000, BIG_IN = 48 * 48 };
+        PTensor big_in = tensor_create(BIG_ROWS, BIG_IN), big_out = tensor_zeros(BIG_ROWS, CNN_CLASSES);
+        srand(5);
+        for (int i = 0; i < BIG_ROWS * BIG_IN; i++)
+            big_in->values[i] = (real)rand() / (real)RAND_MAX;
+        for (int i = 0; i < BIG_ROWS; i++)
+            big_out->values[i * CNN_CLASSES + rand() % CNN_CLASSES] = 1.0f;
+        PNetwork big = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        ann_add_input(big, 1, 48, 48);
+        ann_add_conv2d(big, 16, 3, 1, 1, ACTIVATION_RELU);     // 16x48x48
+        ann_add_maxpool2d(big, 2, 2);                          // 16x24x24
+        ann_add_layer(big, CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+        ann_set_epoch_limit(big, 1);
+        ann_set_batch_size(big, 50);
+        ann_train_network(big, big_in, big_out, BIG_ROWS);
+        ann_gpu_upload_network(big);
+        TESTEX("A large GPU batch is evaluated in pieces and matches the CPU",
+               cnn_gpu_matches_cpu(big, big_in, TOLERANCE));
+        ann_free_network(big);
+        tensor_free(big_in);
+        tensor_free(big_out);
     }
 
     run_gpu_consistency_tests();

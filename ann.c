@@ -3067,18 +3067,39 @@ real ann_evaluate_accuracy(const PNetwork pnet, const PTensor inputs, const PTen
 	}
 
 	int classes = outputs->cols;
-	real *pred = alloca(classes * sizeof(real));
-	int pred_class, act_class;
-
-	for (int i = 0; i < inputs->rows; i++)
+	if (pnet->layer_count < 2 || inputs->cols != pnet->layers[0].node_count ||
+		classes != pnet->layers[pnet->layer_count - 1].node_count)
 	{
-		ann_predict(pnet, &inputs->values[i * inputs->cols], pred);
-		pred_class = ann_class_prediction(pred, classes);
-		act_class = ann_class_prediction(&outputs->values[i * outputs->cols], classes);
-
-		if (pred_class == act_class)
-			correct++;
+		return -1.0;
 	}
+
+	// Predict in chunks so a GPU backend can evaluate many rows per dispatch
+	enum { EVAL_CHUNK = 256 };
+	real *pred = malloc(EVAL_CHUNK * classes * sizeof(real));
+	if (!pred)
+	{
+		invoke_error_callback(ERR_ALLOC, "ann_evaluate_accuracy");
+		return -1.0;
+	}
+
+	for (int start = 0; start < inputs->rows; start += EVAL_CHUNK)
+	{
+		int count = inputs->rows - start < EVAL_CHUNK ? inputs->rows - start : EVAL_CHUNK;
+		if (ann_predict_batch(pnet, &inputs->values[start * inputs->cols], pred, count) != ERR_OK)
+		{
+			free(pred);
+			return -1.0;
+		}
+
+		for (int i = 0; i < count; i++)
+		{
+			int pred_class = ann_class_prediction(pred + i * classes, classes);
+			int act_class = ann_class_prediction(&outputs->values[(start + i) * classes], classes);
+			if (pred_class == act_class)
+				correct++;
+		}
+	}
+	free(pred);
 
 	return (real)correct / inputs->rows;
 }

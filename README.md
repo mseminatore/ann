@@ -642,8 +642,9 @@ overhead across many samples.
 > The GPU backends support only the default `real = float` build. Metal also
 > runs Conv2D, MaxPool2D and Flatten layers; on an M-series Mac a CNN with
 > 32/64 filters trains about 2x faster than the CPU and one with 64/128 about
-> 5x, while very small CNNs (8/16 filters, like `fashion_cnn`) are about even.
-> CUDA runs dense networks only.
+> 5x. Very small CNNs (8/16 filters, like `fashion_cnn`) train at about CPU
+> speed with batches of 128 and slower with batches of 32, but still predict
+> about 7x faster. CUDA runs dense networks only.
 
 See [docs/GPU_INFERENCE.md](docs/GPU_INFERENCE.md) (Metal),
 [docs/GPU_CUDA.md](docs/GPU_CUDA.md) (CUDA), and

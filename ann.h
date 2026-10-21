@@ -1374,9 +1374,11 @@ ANN_API const char* ann_strerror(int error_code);
  *   - error_message: Human-readable message from ann_strerror()
  *   - function_name: Name of the function that generated the error
  * 
- * To disable logging, pass NULL as the callback parameter.
+ * With no callback installed (the default), errors are printed to stderr.
+ * Pass NULL to restore that default; install a callback that does nothing
+ * to silence errors.
  * 
- * @param callback Function pointer to error handler, or NULL to disable
+ * @param callback Function pointer to error handler, or NULL for the default
  * 
  * Example:
  *   void error_handler(int code, const char *msg, const char *func) {
@@ -1397,10 +1399,10 @@ ANN_API void ann_set_error_log_callback(ErrorLogCallback callback);
 ANN_API ErrorLogCallback ann_get_error_log_callback(void);
 
 /**
- * Clear (disable) the error logging callback.
+ * Remove the error logging callback.
  * 
  * Equivalent to calling ann_set_error_log_callback(NULL).
- * After this call, library errors will not trigger callbacks.
+ * After this call, library errors are printed to stderr again.
  * 
  * @see ann_set_error_log_callback
  */

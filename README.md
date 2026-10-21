@@ -322,8 +322,9 @@ Output sizes are `(H + 2*padding - kernel) / stride + 1` for convolutions and
 `(H - pool) / stride + 1` for pooling. Settings that don't fit the input, or
 an activation other than none on pool/flatten layers, return `ERR_INVALID`.
 
-Convolutional networks train on the CPU (`ann_gpu_upload_network()` returns
-`ERR_INVALID` for them), save in model format v2, and export to and import
+Convolutional networks train and run on the GPU with the Metal backend (the
+CUDA backend returns `ERR_INVALID` from `ann_gpu_upload_network()` for them, so
+they stay on the CPU there), save in model format v2, and export to and import
 from ONNX as `Conv`, `MaxPool` and `Flatten` with a `[batch, C, H, W]` input.
 The importer also reads simple CNNs and MLPs exported by other tools, such as
 PyTorch (see [ONNX Export & Import](docs/ONNX_EXPORT.md)). The `fashion_cnn`
@@ -638,7 +639,11 @@ overhead across many samples.
 > datasets of 1,000+ samples, where it is roughly 5–7× faster than the CPU on
 > Apple Silicon. For tiny networks the GPU setup cost dominates and the CPU is
 > faster. The online training API (`ann_train_step()`) always runs on the CPU.
-> The GPU backends support only the default `real = float` build.
+> The GPU backends support only the default `real = float` build. Metal also
+> runs Conv2D, MaxPool2D and Flatten layers; on an M-series Mac a CNN with
+> 32/64 filters trains about 2x faster than the CPU and one with 64/128 about
+> 5x, while very small CNNs (8/16 filters, like `fashion_cnn`) are about even.
+> CUDA runs dense networks only.
 
 See [docs/GPU_INFERENCE.md](docs/GPU_INFERENCE.md) (Metal),
 [docs/GPU_CUDA.md](docs/GPU_CUDA.md) (CUDA), and

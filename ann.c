@@ -67,7 +67,6 @@ ANN_API int ann_gpu_init(void)
     return 0;
 }
 
-static int network_is_dense(const PNetwork pnet);
 static void invoke_error_callback(int error_code, const char *function_name);
 
 ANN_API int ann_gpu_upload_network(PNetwork pnet)
@@ -75,16 +74,19 @@ ANN_API int ann_gpu_upload_network(PNetwork pnet)
     if (!g_gpu_backend)
         return ERR_FAIL;
 
-    // The GPU backends implement dense layers only; other networks stay on the CPU
-    if (!pnet || !network_is_dense(pnet))
+    if (!pnet)
     {
-        invoke_error_callback(pnet ? ERR_INVALID : ERR_NULL_PTR, "ann_gpu_upload_network");
-        return pnet ? ERR_INVALID : ERR_NULL_PTR;
+        invoke_error_callback(ERR_NULL_PTR, "ann_gpu_upload_network");
+        return ERR_NULL_PTR;
     }
 
+    // The backend returns ERR_INVALID for layer kinds it does not implement;
+    // those networks stay on the CPU
     int err = g_gpu_backend->upload_network(pnet);
     if (err == ERR_OK)
         pnet->gpu_stale = 0;
+    else
+        invoke_error_callback(err, "ann_gpu_upload_network");
     return err;
 }
 
@@ -102,11 +104,18 @@ ANN_API void ann_gpu_sync_weights(PNetwork pnet)
 }
 
 #ifdef USE_GPU
-// Weights are on the GPU (dispatch checks layer 1's weights, which every backend uploads)
+// Weights are on the GPU (dispatch checks the first parameter of the first
+// layer that has any, which every backend uploads)
 static int gpu_uploaded(const PNetwork pnet)
 {
-    return g_gpu_backend && pnet->layer_count > 1 &&
-           pnet->layers[1].t_weights && pnet->layers[1].t_weights->gpu_buf;
+    if (!g_gpu_backend)
+        return 0;
+    for (int layer = 1; layer < pnet->layer_count; layer++)
+    {
+        if (pnet->layers[layer].param_count > 0)
+            return pnet->layers[layer].params[0].value->gpu_buf != NULL;
+    }
+    return 0;
 }
 
 // The GPU copy may be used for inference: uploaded and as new as the CPU weights

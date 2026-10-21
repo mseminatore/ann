@@ -59,9 +59,11 @@ typedef struct {
     int (*init)(void);
 
     /**
-     * Upload all network weights and biases to the GPU.
-     * Sets gpu_buf on each layer's t_weights and t_bias tensors.
-     * @return ERR_OK on success, ERR_NULL_PTR / ERR_FAIL on error.
+     * Upload all network parameters to the GPU.
+     * Sets gpu_buf on each layer's params[] values (ann.c checks the first
+     * parameter of the first layer that has any to decide whether to dispatch).
+     * @return ERR_OK on success, ERR_INVALID if the network has a layer kind the
+     *         backend does not implement, ERR_NULL_PTR / ERR_FAIL on error.
      */
     int (*upload_network)(PNetwork pnet);
 

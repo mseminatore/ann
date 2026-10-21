@@ -30,8 +30,9 @@
 //   input 1x28x28 -> conv 8@3x3 relu -> maxpool 2 -> conv 16@3x3 relu
 //   -> maxpool 2 -> flatten -> dense 64 relu -> dense 10 softmax
 //
-// Usage: fashion_cnn [-e epochs] [-b batch] [train.csv] [test.csv]
-// Training runs on the CPU at roughly 10 seconds per epoch; 10 epochs reach
+// Usage: fashion_cnn [-e epochs] [-b batch] [-g] [train.csv] [test.csv]
+// -g trains on the GPU (needs a USE_METAL build). On the CPU training takes
+// roughly 10 seconds per epoch; 10 epochs reach
 // about 90% test accuracy (the MLP in examples/mnist.c gets about 88%).
 //------------------------------------------------------------------------------
 
@@ -45,6 +46,7 @@
 
 static int batch_size = 32;
 static int epoch_count = 3;
+static int use_gpu = 0;     // train on the GPU (-g, needs a USE_METAL build)
 
 //----------------------------------
 // get options from the command line
@@ -58,6 +60,8 @@ static int get_options(int n, char *args[])
 			batch_size = atoi(args[++i]);
 		else if (args[i][1] == 'e' && i + 1 < n)
 			epoch_count = atoi(args[++i]);
+		else if (args[i][1] == 'g')
+			use_gpu = 1;
 	}
 	return i;
 }
@@ -120,6 +124,15 @@ int main(int argc, char *argv[])
 
 	static real lr_decay = 0.9f;
 	ann_set_lr_scheduler(pnet, ann_lr_scheduler_exponential, &lr_decay);
+
+#ifdef USE_GPU
+	// GPU is opt-in at runtime: initialize it, then upload the network before training
+	if (use_gpu && (!ann_gpu_init() || ERR_OK != ann_gpu_upload_network(pnet)))
+		puts("GPU unavailable, training on CPU");
+#else
+	if (use_gpu)
+		puts("GPU support not compiled in, using CPU");
+#endif
 
 	// train the network
 	ann_train_network(pnet, x_train, y_train, x_train->rows);

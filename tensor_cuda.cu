@@ -151,6 +151,11 @@ static int cuda_upload_network(PNetwork pnet)
     if (!pnet || !g_cuda.initialized)
         return ERR_NULL_PTR;
 
+    // The CUDA kernels implement dense layers only; other networks stay on the CPU
+    for (int layer = 0; layer < pnet->layer_count; layer++)
+        if (pnet->layers[layer].kind != LAYER_KIND_DENSE)
+            return ERR_INVALID;
+
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];

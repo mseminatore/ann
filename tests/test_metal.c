@@ -21,6 +21,7 @@
 
 #ifdef USE_METAL
 
+#define GC_GPU_SUPPORTS_CNN
 #include "gpu_consistency.h"
 
 //-----------------------------------------------------------
@@ -96,6 +97,109 @@ static int arrays_close(const real *a, const real *b, int n, real tol)
         if (diff > tol) return 0;
     }
     return 1;
+}
+
+//-----------------------------------------------------------
+// CNN helpers. The network covers each layer kind and the window cases the
+// kernels handle: a padded, strided conv, overlapping pool windows, a second
+// conv, flatten and dense layers.
+//-----------------------------------------------------------
+#define CNN_SAMPLES 32
+#define CNN_INPUTS  (2 * 9 * 9)
+#define CNN_CLASSES 3
+
+static PNetwork make_cnn(real conv_dropout)
+{
+    PNetwork net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+    if (!net) return NULL;
+
+    ann_add_input(net, 2, 9, 9);
+    ann_add_conv2d(net, 4, 3, 2, 1, ACTIVATION_RELU);   // 4x5x5
+    ann_add_maxpool2d(net, 3, 1);                       // 4x3x3, overlapping windows
+    ann_add_conv2d(net, 5, 2, 1, 0, ACTIVATION_TANH);   // 5x2x2
+    ann_add_flatten(net);                               // 20
+    ann_add_layer(net, 6, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+    ann_add_layer(net, CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    ann_set_learning_rate(net, 0.01f);
+    ann_set_convergence(net, 0.0f);     // run every epoch
+    ann_set_epoch_limit(net, 5);
+    ann_set_batch_size(net, 8);
+    if (conv_dropout > 0.0f)
+        ann_set_layer_dropout(net, 1, conv_dropout);
+    return net;
+}
+
+static void make_cnn_data(PTensor *inputs, PTensor *targets)
+{
+    srand(1234);
+    *inputs  = tensor_create(CNN_SAMPLES, CNN_INPUTS);
+    *targets = tensor_zeros(CNN_SAMPLES, CNN_CLASSES);
+    for (int i = 0; i < CNN_SAMPLES * CNN_INPUTS; i++)
+        (*inputs)->values[i] = (real)rand() / (real)RAND_MAX;
+    for (int i = 0; i < CNN_SAMPLES; i++)
+        (*targets)->values[i * CNN_CLASSES + rand() % CNN_CLASSES] = 1.0f;
+}
+
+// Train with a fixed seed so weight init, shuffling and dropout masks match
+static real train_cnn(PNetwork net, PTensor inputs, PTensor targets)
+{
+    srand(42);
+    return ann_train_network(net, inputs, targets, CNN_SAMPLES);
+}
+
+// Compare every parameter, plus optimizer state when with_state is set
+static int cnn_nets_close(PNetwork a, PNetwork b, real tol, int with_state)
+{
+    for (int l = 1; l < a->layer_count; l++) {
+        PLayer la = &a->layers[l], lb = &b->layers[l];
+        for (int p = 0; p < la->param_count; p++) {
+            if (!gc_tensors_close(la->params[p].value, lb->params[p].value, tol))
+                return 0;
+            if (with_state && (!gc_tensors_close(la->params[p].m, lb->params[p].m, tol) ||
+                               !gc_tensors_close(la->params[p].v, lb->params[p].v, tol)))
+                return 0;
+        }
+    }
+    return 1;
+}
+
+// The first parameter of the first layer that has any: what dispatch checks
+static PTensor first_param(PNetwork net)
+{
+    for (int l = 1; l < net->layer_count; l++)
+        if (net->layers[l].param_count > 0)
+            return net->layers[l].params[0].value;
+    return NULL;
+}
+
+// GPU ann_predict()/ann_predict_batch() agree with a CPU forward pass over
+// the same weights (forced by hiding the buffer dispatch checks)
+static int cnn_gpu_matches_cpu(PNetwork net, const PTensor inputs, real tol)
+{
+    int in_nodes = net->layers[0].node_count;
+    int out_nodes = net->layers[net->layer_count - 1].node_count;
+    int n = inputs->rows * out_nodes;
+    real *gpu = malloc(n * sizeof(real)), *gpu_batch = malloc(n * sizeof(real)), *cpu = malloc(n * sizeof(real));
+    int ok = gpu && gpu_batch && cpu;
+
+    if (ok) {
+        for (int i = 0; i < inputs->rows; i++)
+            ann_predict(net, &inputs->values[i * in_nodes], &gpu[i * out_nodes]);
+        ok = ann_predict_batch(net, inputs->values, gpu_batch, inputs->rows) == ERR_OK;
+
+        PTensor w = first_param(net);
+        void *saved = w->gpu_buf;
+        w->gpu_buf = NULL;
+        for (int i = 0; i < inputs->rows; i++)
+            ann_predict(net, &inputs->values[i * in_nodes], &cpu[i * out_nodes]);
+        w->gpu_buf = saved;
+
+        ok = ok && arrays_close(gpu, cpu, n, tol) && arrays_close(gpu_batch, cpu, n, tol);
+    }
+    free(gpu);
+    free(gpu_batch);
+    free(cpu);
+    return ok;
 }
 
 #define TOLERANCE 1e-4f
@@ -321,6 +425,75 @@ void test_main(int argc, char *argv[])
     tensor_free(sync_inputs);
     tensor_free(sync_targets);
     ann_free_network(sync_net);
+
+    // ========================================================================
+    SUITE("GPU CNN Training and Inference");
+    // ========================================================================
+    {
+        PTensor inputs, targets;
+        make_cnn_data(&inputs, &targets);
+
+        PNetwork cpu_net = make_cnn(0.0f), gpu_net = make_cnn(0.0f);
+        TESTEX("Uploading a CNN returns ERR_OK", ann_gpu_upload_network(gpu_net) == ERR_OK);
+        TESTEX("and puts the conv weights on the GPU", gpu_net->layers[1].params[0].value->gpu_buf != NULL);
+
+        real cpu_loss = train_cnn(cpu_net, inputs, targets);
+        real gpu_loss = train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU CNN training loss is finite and matches the CPU's",
+               isfinite(gpu_loss) && fabsf(gpu_loss - cpu_loss) < 1e-3f);
+        TESTEX("GPU CNN training matches CPU training (weights and Adam state)",
+               cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        TESTEX("GPU CNN inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
+        // dropout on the first conv layer: masks drawn on the CPU, applied on the GPU
+        cpu_net = make_cnn(0.25f);
+        gpu_net = make_cnn(0.25f);
+        ann_gpu_upload_network(gpu_net);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU CNN dropout training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
+        // a wide conv (32 filters over 32 channels): its weight gradient is
+        // large enough to use the MPS GEMM rather than split sums
+        cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        gpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        PNetwork wide[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(wide[i], 2, 9, 9);
+            ann_add_conv2d(wide[i], 32, 3, 1, 1, ACTIVATION_RELU);  // 32x9x9
+            ann_add_conv2d(wide[i], 32, 3, 2, 0, ACTIVATION_RELU);  // 32x4x4, 32*32*3*3 weights
+            ann_add_layer(wide[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(wide[i], 0.001f);
+            ann_set_convergence(wide[i], 0.0f);
+            ann_set_epoch_limit(wide[i], 3);
+            ann_set_batch_size(wide[i], 8);
+        }
+        ann_gpu_upload_network(gpu_net);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU wide-conv training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        TESTEX("GPU wide-conv inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
+        // pooling straight off the input: the first layer has no parameters
+        PNetwork pool_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        ann_add_input(pool_net, 2, 9, 9);
+        ann_add_maxpool2d(pool_net, 2, 2);                  // 2x4x4
+        ann_add_layer(pool_net, CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+        ann_set_epoch_limit(pool_net, 2);
+        train_cnn(pool_net, inputs, targets);
+        TESTEX("A network starting with a pool layer uploads", ann_gpu_upload_network(pool_net) == ERR_OK);
+        TESTEX("and its GPU inference matches the CPU", cnn_gpu_matches_cpu(pool_net, inputs, TOLERANCE));
+        ann_free_network(pool_net);
+
+        tensor_free(inputs);
+        tensor_free(targets);
+    }
 
     run_gpu_consistency_tests();
 }

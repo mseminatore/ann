@@ -4,7 +4,8 @@
 // Checks that the CPU and GPU copies of a network's weights stay in step
 // across ann_train_network(), dropout, and the online training API.
 // Included by each GPU backend's test file (test_metal.c, test_cuda.c);
-// call run_gpu_consistency_tests() after ann_gpu_init() succeeds.
+// call run_gpu_consistency_tests() after ann_gpu_init() succeeds. A backend
+// that runs CNNs defines GC_GPU_SUPPORTS_CNN before including this file.
 //-----------------------------------------------------------
 
 #ifndef GPU_CONSISTENCY_H
@@ -246,6 +247,7 @@ static void run_gpu_consistency_tests(void)
         tensor_free(vout);
     }
 
+#ifndef GC_GPU_SUPPORTS_CNN
     // ========================================================================
     SUITE("Non-Dense Networks Stay on the CPU");
     // ========================================================================
@@ -271,6 +273,7 @@ static void run_gpu_consistency_tests(void)
         tensor_free(tout);
         ann_free_network(conv);
     }
+#endif
 
     // ========================================================================
     SUITE("GPU/CPU Weight Consistency - Online Training");

@@ -3,6 +3,8 @@
 libann supports GPU-accelerated inference on macOS using [Apple Metal](https://developer.apple.com/metal/) and Metal Performance Shaders (MPS). This enables forward-pass computation on the GPU, which is most beneficial for **batch inference** over many samples.
 
 > **Note**: Metal GPU support includes both **inference and training**. Forward pass, backward pass, and optimizer updates all run on the GPU when weights are uploaded.
+>
+> All layer kinds run on the GPU: dense, Conv2D, MaxPool2D and Flatten. A convolution is an im2col step plus one MPS GEMM for the whole batch; max pooling records each window's argmax for the backward pass. GPU results match the CPU within float precision. Conv networks gain the most with wider layers (32+ filters); for very small CNNs the CPU is about as fast.
 
 ## Requirements
 
@@ -18,7 +20,7 @@ cmake -DUSE_METAL=1 ..
 cmake --build .
 ```
 
-The Metal shader library (`shaders.metal`) is compiled automatically as part of the build.
+The Metal kernels are compiled from source at runtime by `ann_gpu_init()` (the source is embedded in `tensor_metal.m`), so no separate shader build step is needed.
 
 To verify Metal is active:
 ```bash
@@ -245,8 +247,8 @@ All libann activations are supported in the GPU path:
 
 ## Troubleshooting
 
-**"Failed to load shader library"**  
-The Metal shader binary was not found. Ensure the build includes `shaders.metal` and that `cmake -DUSE_METAL=1` was used. The `.metallib` file must be in the app bundle or working directory.
+**"[Metal] Failed to compile shader source"**  
+`ann_gpu_init()` compiles the kernels embedded in `tensor_metal.m` at runtime and prints the compiler's error. This usually means the kernel source was edited and no longer compiles; `ann_gpu_init()` returns 0 and libann uses the CPU.
 
 **GPU predict doesn't match CPU**  
 Check for float precision differences — GPU uses 32-bit float throughout. Results should match within ~1e-4. If diverging significantly, ensure weights are uploaded correctly with `ann_gpu_upload_network()`.

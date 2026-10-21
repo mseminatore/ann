@@ -160,6 +160,9 @@ ann_get_layer_settings | get a conv/pool layer's kernel or pool size, stride and
 ann_set_num_threads | set how many CPU threads libann uses (0 = default)
 ann_get_num_threads | get the CPU thread count
 ann_export_onnx | export trained network to ONNX JSON format
+ann_quantize | quantize a trained network to int8 (calibrated on sample inputs)
+ann_quantized_predict | run the int8 model (also `_predict_int8`, `_evaluate_accuracy`)
+ann_export_c_header | export an int8 or float32 model as a standalone C header
 ann_import_onnx | import network from ONNX JSON file
 ann_export_pikchr | export network architecture as PIKCHR diagram
 ann_export_learning_curve | export training history as CSV
@@ -326,6 +329,23 @@ The importer also reads simple CNNs and MLPs exported by other tools, such as
 PyTorch (see [ONNX Export & Import](docs/ONNX_EXPORT.md)). The `fashion_cnn`
 example trains a two-convolution network on Fashion-MNIST to about 90% test
 accuracy.
+
+## int8 Quantization and C Export
+
+`ann_quantize()` converts a trained network to int8 (per-channel weights,
+calibrated activation ranges), and `ann_export_c_header()` writes it as a C
+header that runs with only `ann_rt.h`: integer-only math, no `malloc`, builds
+freestanding for microcontrollers. A float32 export is also available. On
+Fashion-MNIST, int8 accuracy stays within 0.2 points of float32 with 4x less
+parameter memory. See [int8 Quantization & C Export](docs/C_EXPORT.md) and
+`examples/export_model.c`.
+
+```c
+PQuantizedNetwork q = ann_quantize(pnet, calibration_inputs);
+printf("int8 accuracy %g\n", ann_quantized_evaluate_accuracy(q, x_test, y_test));
+ann_export_c_header(NULL, q, "model.h", "model");    // then: model_predict(in, out, workspace)
+ann_free_quantized(q);
+```
 
 ## Saved Model Formats
 

@@ -118,6 +118,59 @@
 
 #include "ann_parallel.h"
 
+// Accelerate's BLAS threading can be set per thread (macOS 15+): range
+// functions run with it single-threaded (see ann_parallel.h)
+#if defined(USE_BLAS) && defined(__APPLE__) && defined(CBLAS_ENUM_DEFINED_H) && defined(__has_include)
+#	if __has_include(<vecLib/thread_api.h>)
+#		include <vecLib/thread_api.h>
+#		define ANN_BLAS_THREADING
+#	elif __has_include(<thread_api.h>)
+#		include <thread_api.h>
+#		define ANN_BLAS_THREADING
+#	endif
+#endif
+
+//------------------------------
+// make this thread's BLAS calls single-threaded; returns the previous
+// setting for blas_threading_restore, or -1 when there is none
+//------------------------------
+static int blas_threading_single(void)
+{
+#ifdef ANN_BLAS_THREADING
+	if (__builtin_available(macOS 15.0, iOS 18.0, *))
+	{
+		int previous = (int)BLASGetThreading();
+		BLASSetThreading(BLAS_THREADING_SINGLE_THREADED);
+		return previous;
+	}
+#endif
+	return -1;
+}
+
+static void blas_threading_restore(int previous)
+{
+#ifdef ANN_BLAS_THREADING
+	if (previous >= 0)
+		if (__builtin_available(macOS 15.0, iOS 18.0, *))
+			BLASSetThreading((enum BLAS_THREADING)previous);
+#else
+	(void)previous;
+#endif
+}
+
+int ann_parallel_blas_ok(void)
+{
+#if !defined(USE_BLAS)
+	return 1;
+#elif defined(ANN_BLAS_THREADING)
+	if (__builtin_available(macOS 15.0, iOS 18.0, *))
+		return 1;
+	return 0;
+#else
+	return 0;
+#endif
+}
+
 //------------------------------
 // the BLAS library this file was built with: ANN_BLAS_NAME when the build
 // defines it, else recognized from the build flags and the BLAS header
@@ -243,6 +296,7 @@ static void *pool_worker(void *arg)
 #endif
 {
 	(void)arg;
+	blas_threading_single();
 	pool_lock(&g_pool.lock);
 	for (;;)
 	{
@@ -356,13 +410,8 @@ static int parallel_may_split(int count, int grain)
 	return g_pool.threads > 1 && count >= 2 * (grain < 1 ? 1 : grain);
 }
 
-void ann_parallel_for(int count, int grain, ann_range_func fn, void *ctx)
+static void parallel_run(int count, int grain, ann_range_func fn, void *ctx)
 {
-	if (count <= 0)
-		return;
-	if (grain < 1)
-		grain = 1;
-
 	pool_init();
 
 	// at most one chunk per thread, and each chunk at least `grain` indices
@@ -420,6 +469,17 @@ void ann_parallel_for(int count, int grain, ann_range_func fn, void *ctx)
 	pool_unlock(&g_pool.lock);
 }
 
+void ann_parallel_for(int count, int grain, ann_range_func fn, void *ctx)
+{
+	if (count <= 0)
+		return;
+
+	// the calling thread runs ranges too (see ann_parallel.h)
+	int blas_threading = blas_threading_single();
+	parallel_run(count, grain < 1 ? 1 : grain, fn, ctx);
+	blas_threading_restore(blas_threading);
+}
+
 void ann_parallel_set_threads(int threads)
 {
 	pool_init();
@@ -451,7 +511,11 @@ void ann_parallel_for(int count, int grain, ann_range_func fn, void *ctx)
 {
 	(void)grain;
 	if (count > 0)
+	{
+		int blas_threading = blas_threading_single();
 		fn(ctx, 0, count);
+		blas_threading_restore(blas_threading);
+	}
 }
 
 void ann_parallel_set_threads(int threads)

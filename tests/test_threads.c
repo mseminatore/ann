@@ -193,9 +193,19 @@ void test_main(int argc, char *argv[])
     {
         const char *names[2] = {"Dense", "CNN"};
         for (int cnn = 0; cnn < 2; cnn++) {
-            size_t n1, n4, n8;
+            size_t n1, n4, n8, again_n;
             ann_set_num_threads(1);
             real *one = train_params(cnn, &n1);
+            // a BLAS library may not repeat its own results (Accelerate
+            // doesn't), and then no thread count can match another
+            real *again = train_params(cnn, &again_n);
+            int repeatable = again_n == n1 && memcmp(one, again, n1 * sizeof(real)) == 0;
+            free(again);
+            if (!repeatable) {
+                printf("\t%s: the BLAS library's results vary from run to run; not compared\n", names[cnn]);
+                free(one);
+                continue;
+            }
             ann_set_num_threads(4);
             real *four = train_params(cnn, &n4);
             ann_set_num_threads(8);

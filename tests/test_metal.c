@@ -537,6 +537,18 @@ void test_main(int argc, char *argv[])
         }
         TESTEX("GPU conv and dense training matches the CPU's with each activation", acts_match);
 
+        // input noise is drawn on the CPU for each batch, so both paths see the same inputs
+        cpu_net = make_cnn(0.0f);
+        gpu_net = make_cnn(0.0f);
+        ann_set_input_noise(cpu_net, NOISE_GAUSSIAN, 0.3f, 0.0f, 1.0f);
+        ann_set_input_noise(gpu_net, NOISE_GAUSSIAN, 0.3f, 0.0f, 1.0f);
+        ann_gpu_upload_network(gpu_net);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU training with input noise matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
         // pooling straight off the input: the first layer has no parameters
         PNetwork pool_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
         ann_add_input(pool_net, 2, 9, 9);

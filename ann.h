@@ -165,6 +165,17 @@ typedef enum {
 } Loss_type;
 
 //------------------------------
+// Noise added to the inputs of training batches (e.g. for denoising
+// autoencoders); see ann_set_input_noise()
+//------------------------------
+typedef enum {
+	NOISE_NONE,							// no noise (default)
+	NOISE_GAUSSIAN,						// add normal noise with standard deviation `amount`
+	NOISE_MASKING,						// set each input to 0 with probability `amount`
+	NOISE_SALT_PEPPER					// set each input to low or high (equally likely) with probability `amount`
+} Noise_type;
+
+//------------------------------
 // SGD optimization kernels
 //------------------------------
 typedef enum {
@@ -315,6 +326,11 @@ struct Network
 	real es_min_delta;					// minimum loss decrease that counts as an improvement
 	int es_restore_best;				// restore the best epoch's weights when training ends
 	unsigned best_epoch;				// epoch with the lowest monitored loss in the last run (0 = none)
+
+	// Input noise for training batches (see ann_set_input_noise)
+	Noise_type noise_type;				// NOISE_NONE when disabled
+	real noise_amount;					// standard deviation, or probability per input
+	real noise_low, noise_high;			// clamp range when low < high; salt-and-pepper values
 };
 
 //------------------------------
@@ -1223,6 +1239,53 @@ ANN_API void ann_set_dropout(PNetwork pnet, real rate);
  * @note Setting dropout on input or output layers has no effect.
  */
 ANN_API void ann_set_layer_dropout(PNetwork pnet, int layer, real rate);
+
+// ============================================================================
+// INPUT NOISE
+// ============================================================================
+
+/**
+ * Corrupt the inputs of every training batch, e.g. to train a denoising
+ * autoencoder: the network sees noisy inputs and learns to output the clean
+ * targets.
+ * 
+ * Noise is applied to a copy of each batch in ann_train_network() and
+ * ann_train_step(), drawn fresh every time (so each epoch sees new noise),
+ * on the CPU and with rand() like dropout, so GPU training and any thread
+ * count give the same results. Predictions, evaluation and validation use
+ * the inputs as given. The setting is not saved with the model.
+ * 
+ * @param pnet Network to configure
+ * @param type NOISE_NONE, NOISE_GAUSSIAN, NOISE_MASKING or NOISE_SALT_PEPPER
+ * @param amount Gaussian: standard deviation (>= 0). Masking and salt-and-pepper:
+ *               probability that an input is changed, in [0, 1]
+ * @param low, high When low < high, noisy values are clamped to [low, high] (e.g.
+ *                  0 and 1 for pixel data); pass 0, 0 for no clamp. Salt-and-pepper
+ *                  sets inputs to low or high, so it needs low < high.
+ * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for a bad type, amount or range
+ */
+ANN_API int ann_set_input_noise(PNetwork pnet, Noise_type type, real amount, real low, real high);
+
+/**
+ * Get the input noise settings.
+ * 
+ * @param pnet Network to query
+ * @param type, amount, low, high Receive the settings (any may be NULL)
+ * @return ERR_OK or ERR_NULL_PTR
+ */
+ANN_API int ann_get_input_noise(const PNetwork pnet, Noise_type *type, real *amount, real *low, real *high);
+
+/**
+ * Apply the network's input noise to values, as training does to each batch;
+ * e.g. to make noisy test inputs for evaluating a denoising autoencoder.
+ * Does nothing when the noise type is NOISE_NONE.
+ * 
+ * @param pnet Network whose noise settings to use
+ * @param values Values to corrupt in place
+ * @param count Number of values
+ * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for a negative count
+ */
+ANN_API int ann_apply_input_noise(const PNetwork pnet, real *values, int count);
 
 /**
  * Set training/inference mode for the network.

@@ -72,6 +72,14 @@ static void capture_print(const char *msg)
         strcat(g_printed, msg);
 }
 
+static int g_train_errors;
+static void count_train_errors(int code, const char *msg, const char *fn)
+{
+    (void)msg;
+    if (code == ERR_INVALID && strcmp(fn, "ann_train_network") == 0)
+        g_train_errors++;
+}
+
 void test_main(int argc, char *argv[])
 {
     (void)argc;
@@ -309,6 +317,15 @@ void test_main(int argc, char *argv[])
         TESTEX("Training rejects inputs with the wrong column count", ann_train_network(net, wide, y, 4) == 0.0f);
         TESTEX("Training rejects targets with the wrong column count", ann_train_network(net, x, wide, 4) == 0.0f);
         tensor_free(wide);
+
+        // rows must be the data's row count; each mismatch is reported
+        g_train_errors = 0;
+        ann_set_error_log_callback(count_train_errors);
+        TESTEX("Training rejects a row count that differs from the data's",
+               ann_train_network(net, x, y, 3) == 0.0f && ann_train_network(net, x, y3, 4) == 0.0f &&
+               ann_train_network(net, x, y, 0) == 0.0f);
+        TESTEX("and reports each one to the error callback", g_train_errors == 3);
+        ann_clear_error_log_callback();
         TESTEX("Best epoch is 0 before training", ann_get_best_epoch(net) == 0);
         ann_free_network(net);
 

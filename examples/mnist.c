@@ -42,7 +42,7 @@ static int threads = -1;
 static int batch_size = 32;
 static int epoch_count = 5;
 static int export_onnx = 0;
-static int use_gpu = 0;     // train on the GPU (-g, needs a USE_METAL or USE_CUDA build)
+static int use_gpu = 0;     // train on the GPU (-g, needs a USE_METAL, USE_CUDA or USE_VULKAN build)
 
 //----------------------------------
 // get options from the command line

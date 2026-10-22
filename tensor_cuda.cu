@@ -932,6 +932,7 @@ static int cuda_train_finish(PNetwork pnet, real *loss_sum)
 }
 
 extern "C" GpuBackend cuda_backend = {
+    "CUDA",
     cuda_backend_init,
     cuda_upload_network,
     cuda_free_network,

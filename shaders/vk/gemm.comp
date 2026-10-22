@@ -1,0 +1,109 @@
+#version 450
+// Row-major SGEMM: C[M x N] = alpha * op(A) * op(B) + beta * C
+//   op(A) [M x K] is A, or A^T when TRANS_A (A stored [K x M])
+//   op(B) [K x N] is B, or B^T when TRANS_B (B stored [N x K])
+// The host builds one pipeline per (TRANS_A, TRANS_B) pair it uses. Each
+// 16x16 workgroup computes a 64x64 tile of C, each invocation a 4x4 block of
+// it, staging 16-deep slices of op(A) and op(B) in shared memory. When beta
+// is 0, C is written without being read, so it may hold anything.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(constant_id = 0) const uint TRANS_A = 0;
+layout(constant_id = 1) const uint TRANS_B = 0;
+
+layout(std430, binding = 0) readonly buffer BufA { float a[]; };
+layout(std430, binding = 1) readonly buffer BufB { float b[]; };
+layout(std430, binding = 2) buffer BufC { float c[]; };
+
+layout(push_constant) uniform Params {
+    uint M, N, K;
+    float alpha, beta;
+} pc;
+
+#define TILE 64
+#define DEPTH 16
+
+// +1 pads the rows so the loads, which write down a column, avoid bank conflicts
+shared float tile_a[DEPTH][TILE + 1];
+shared float tile_b[DEPTH][TILE + 1];
+
+float load_a(uint m, uint k)
+{
+    if (m >= pc.M || k >= pc.K)
+        return 0.0;
+    return TRANS_A != 0 ? a[k * pc.M + m] : a[m * pc.K + k];
+}
+
+float load_b(uint k, uint n)
+{
+    if (k >= pc.K || n >= pc.N)
+        return 0.0;
+    return TRANS_B != 0 ? b[n * pc.K + k] : b[k * pc.N + n];
+}
+
+void main()
+{
+    uint tx = gl_LocalInvocationID.x;
+    uint ty = gl_LocalInvocationID.y;
+    uint tid = ty * 16 + tx;
+    uint row0 = gl_WorkGroupID.y * TILE;
+    uint col0 = gl_WorkGroupID.x * TILE;
+
+    float acc[4][4];
+    for (uint i = 0; i < 4; i++)
+        for (uint j = 0; j < 4; j++)
+            acc[i][j] = 0.0;
+
+    for (uint k0 = 0; k0 < pc.K; k0 += DEPTH)
+    {
+        // 256 invocations load the 16x64 slices, 4 elements each. Consecutive
+        // invocations take consecutive addresses in the stored matrix: along
+        // k when A is not transposed (row-major [M x K]), along m when it is.
+        for (uint e = 0; e < 4; e++)
+        {
+            uint idx = tid + e * 256;
+            uint k, m, n;
+            if (TRANS_A != 0) { k = idx / TILE; m = idx % TILE; }
+            else              { m = idx / DEPTH; k = idx % DEPTH; }
+            tile_a[k][m] = load_a(row0 + m, k0 + k);
+
+            if (TRANS_B != 0) { n = idx / DEPTH; k = idx % DEPTH; }
+            else              { k = idx / TILE; n = idx % TILE; }
+            tile_b[k][n] = load_b(k0 + k, col0 + n);
+        }
+        barrier();
+
+        // Invocation (tx, ty) owns rows ty + 16i and columns tx + 16j of the tile
+        for (uint k = 0; k < DEPTH; k++)
+        {
+            float av[4], bv[4];
+            for (uint i = 0; i < 4; i++)
+                av[i] = tile_a[k][ty + 16 * i];
+            for (uint j = 0; j < 4; j++)
+                bv[j] = tile_b[k][tx + 16 * j];
+            for (uint i = 0; i < 4; i++)
+                for (uint j = 0; j < 4; j++)
+                    acc[i][j] += av[i] * bv[j];
+        }
+        barrier();
+    }
+
+    for (uint i = 0; i < 4; i++)
+    {
+        uint r = row0 + ty + 16 * i;
+        if (r >= pc.M)
+            continue;
+        for (uint j = 0; j < 4; j++)
+        {
+            uint col = col0 + tx + 16 * j;
+            if (col >= pc.N)
+                continue;
+            uint o = r * pc.N + col;
+            float v = pc.alpha * acc[i][j];
+            if (pc.beta != 0.0)
+                v += pc.beta * c[o];
+            c[o] = v;
+        }
+    }
+}

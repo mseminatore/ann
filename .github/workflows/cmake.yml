@@ -35,3 +35,26 @@ jobs:
 
     - name: Test
       run: ctest --test-dir build --output-on-failure --timeout 180 -C Release
+
+  # The Vulkan backend on lavapipe, Mesa's Vulkan driver that runs on the CPU, so the GPU
+  # code paths are checked against the CPU without a GPU on the runner
+  vulkan:
+    name: Linux (x64, Vulkan on lavapipe)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Vulkan
+      run: sudo apt-get update && sudo apt-get install -y libvulkan-dev glslc mesa-vulkan-drivers
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_VULKAN=1
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Test
+      run: ctest --test-dir build --output-on-failure --timeout 300 -C Release

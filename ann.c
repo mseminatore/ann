@@ -54,16 +54,60 @@ GpuBackend *g_gpu_backend = NULL;
 // Backends register themselves by providing a GpuBackend instance.
 //-----------------------------------------------------------
 
-ANN_API int ann_gpu_init(void)
-{
 #ifdef USE_METAL
-    extern GpuBackend metal_backend;
-    if (metal_backend.init()) { g_gpu_backend = &metal_backend; printf("[ann] Using Metal GPU backend\n"); return 1; }
+extern GpuBackend metal_backend;
 #endif
 #ifdef USE_CUDA
-    extern GpuBackend cuda_backend;
-    if (cuda_backend.init()) { g_gpu_backend = &cuda_backend; printf("[ann] Using CUDA GPU backend\n"); return 1; }
+extern GpuBackend cuda_backend;
 #endif
+#ifdef USE_VULKAN
+extern GpuBackend vulkan_backend;
+#endif
+
+// The compiled-in GPU backends, in the order ann_gpu_init() tries them
+static GpuBackend *const g_gpu_backends[] = {
+#ifdef USE_METAL
+    &metal_backend,
+#endif
+#ifdef USE_CUDA
+    &cuda_backend,
+#endif
+#ifdef USE_VULKAN
+    &vulkan_backend,
+#endif
+    NULL
+};
+
+// 1 if a and b are equal ignoring case
+static int names_match(const char *a, const char *b)
+{
+    while (*a && tolower((unsigned char)*a) == tolower((unsigned char)*b))
+        a++, b++;
+    return tolower((unsigned char)*a) == tolower((unsigned char)*b);
+}
+
+//-----------------------------------------------------------
+// Start the first compiled-in GPU backend that initializes, or only the one
+// the ANN_GPU environment variable names ("none" keeps everything on the CPU)
+//-----------------------------------------------------------
+ANN_API int ann_gpu_init(void)
+{
+    const char *want = getenv("ANN_GPU");
+    if (want && !*want)
+        want = NULL;
+
+    for (int i = 0; g_gpu_backends[i]; i++)
+    {
+        GpuBackend *backend = g_gpu_backends[i];
+        if (want && !names_match(want, backend->name))
+            continue;
+        if (backend->init())
+        {
+            g_gpu_backend = backend;
+            printf("[ann] Using %s GPU backend\n", backend->name);
+            return 1;
+        }
+    }
     printf("[ann] Using CPU backend\n");
     return 0;
 }
@@ -4524,13 +4568,11 @@ int ann_get_backend_info(Backend_info *info)
 		return ERR_NULL_PTR;
 
 	info->blas = ann_blas_backend_name();
-#if defined(USE_METAL)
-	info->gpu = "Metal";
-#elif defined(USE_CUDA)
-	info->gpu = "CUDA";
-#else
-	info->gpu = "none";
-#endif
+	// the running backend, else the first one compiled in
+	if (g_gpu_backend)
+		info->gpu = g_gpu_backend->name;
+	else
+		info->gpu = g_gpu_backends[0] ? g_gpu_backends[0]->name : "none";
 	info->gpu_active = g_gpu_backend != NULL;
 	info->threads = ann_get_num_threads();
 	info->real_bytes = (int)sizeof(real);

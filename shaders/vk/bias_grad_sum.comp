@@ -1,0 +1,24 @@
+#version 450
+#include "common.glsl"
+// bias_grad[col] += sum over rows of dl_dz[row][col], one invocation per column
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer BufDelta { float dl_dz[]; };
+layout(std430, binding = 1) buffer BufGrad { float bias_grad[]; };
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint cols;
+} pc;
+
+void main()
+{
+    GRID_LOOP(col, pc.cols)
+    {
+        float s = 0.0;
+        for (uint r = 0; r < pc.rows; r++)
+            s += dl_dz[r * pc.cols + col];
+        bias_grad[col] += s;
+    }
+}

@@ -1,0 +1,34 @@
+#version 450
+#include "common.glsl"
+// Softmax of each row of a [rows x cols] buffer, in place; one invocation per row
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Buf { float y[]; };
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint cols;
+} pc;
+
+void main()
+{
+    GRID_LOOP(row, pc.rows)
+    {
+        uint o = row * pc.cols;
+        float mx = y[o];
+        for (uint n = 1; n < pc.cols; n++)
+            mx = max(mx, y[o + n]);
+
+        float s = 0.0;
+        for (uint n = 0; n < pc.cols; n++)
+        {
+            float e = exp(y[o + n] - mx);
+            y[o + n] = e;
+            s += e;
+        }
+        if (s > 0.0)
+            for (uint n = 0; n < pc.cols; n++)
+                y[o + n] /= s;
+    }
+}

@@ -1,0 +1,26 @@
+#version 450
+#include "common.glsl"
+// MSE through a softmax output: d = y * (d - sum(d * y)) per row, in place
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer BufDelta { float d[]; };
+layout(std430, binding = 1) readonly buffer BufY { float y[]; };
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint cols;
+} pc;
+
+void main()
+{
+    GRID_LOOP(row, pc.rows)
+    {
+        uint o = row * pc.cols;
+        float dot = 0.0;
+        for (uint n = 0; n < pc.cols; n++)
+            dot += d[o + n] * y[o + n];
+        for (uint n = 0; n < pc.cols; n++)
+            d[o + n] = y[o + n] * (d[o + n] - dot);
+    }
+}

@@ -2166,6 +2166,7 @@ static int pooled_train_finish(PNetwork pnet, real *loss_sum)
 }
 
 GpuBackend metal_backend = {
+    "Metal",                 /* name           */
     pooled_init,             /* init           */
     pooled_upload_network,   /* upload_network */
     pooled_free_network,     /* free_network   */

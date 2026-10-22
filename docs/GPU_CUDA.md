@@ -99,19 +99,13 @@ additional GPU vendors with no interface changes:
 
 - The eight vtable slots operate only on `PNetwork` and host `real *` arrays; each tensor's GPU
   handle is an opaque `void *gpu_buf`. No API-specific types leak into `ann.c`.
-- `ann.c` contains zero backend-specific code outside the `#ifdef` blocks in `ann_gpu_init()`.
-  Adding a backend means: a new implementation file that exports a `GpuBackend` instance, one
-  `#ifdef` block in `ann_gpu_init()`, and a `-DUSE_xxx` CMake option (mirroring the CUDA block).
+- `ann.c` contains no backend-specific code outside the backend list in `ann_gpu_init()`.
+  Adding a backend means: a new implementation file that exports a `GpuBackend` instance, an
+  entry in that list, its `USE_xxx` define in the `USE_GPU` condition in `ann_config.h`, and a
+  `-DUSE_xxx` CMake option (mirroring the CUDA block).
 - Dispatch granularity is whole-batch (`eval_batch` / `train_batch`), so any compute API fits.
 
-Concrete paths:
-
-- **AMD (ROCm/HIP):** HIP is source-compatible with CUDA. `tensor_cuda.cu` can be `hipify`-d to
-  `tensor_hip`, with `cublas` → `hipblas`/`rocblas`; the kernels carry over unchanged.
-- **Intel (oneAPI):** a `tensor_sycl` backend using SYCL / Level Zero plus **oneMKL** for GEMM.
-- **Cross-vendor:** a single **Vulkan compute** or **OpenCL** backend would cover NVIDIA, AMD,
-  and Intel at once.
-
-Minor (non-blocking) gaps for future work: `ann_gpu_init()` selects a backend at compile time on
-a first-success-wins basis (no runtime selection among multiple compiled-in backends), and the
-float-only limitation above applies to every backend.
+AMD and Intel GPUs are covered by the **Vulkan** backend (`-DUSE_VULKAN=1`, see
+[GPU_VULKAN.md](GPU_VULKAN.md)), which also runs on NVIDIA. A build can include CUDA and Vulkan
+together: `ann_gpu_init()` tries Metal, CUDA, then Vulkan, and the `ANN_GPU` environment
+variable picks one. The float-only limitation above applies to every backend.

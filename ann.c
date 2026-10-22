@@ -2947,8 +2947,6 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 		// iterate over all batches
 		for (int batch = 0; batch < batch_count; batch++)
 		{
-			zero_gradients(pnet);
-
 			// Assemble batch input matrix into layers[0].t_batch_values
 			PTensor batch_input = pnet->layers[0].t_batch_values;
 			for (unsigned b = 0; b < actual_batch_size; b++)
@@ -2971,15 +2969,20 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 
 		// Batched forward + backward + optimize (CPU or GPU path)
 #ifdef USE_GPU
-			// GPU handles forward + backward + optimizer + train_iteration++
+			// GPU handles forward + backward + optimizer + train_iteration++.
+			// It queues the step and returns, so the next batch is assembled
+			// while the GPU runs this one; the losses arrive with train_finish.
 			int gpu_done = 0;
 			if (use_gpu_training)
 			{
 				make_dropout_masks(pnet, actual_batch_size);
-				gpu_done = g_gpu_backend->train_batch(pnet, batch_targets, actual_batch_size, &loss);
+				gpu_done = g_gpu_backend->train_batch(pnet, batch_targets, actual_batch_size);
 				if (!gpu_done)
 				{
 					// GPU failed: finish on the CPU, starting from the GPU's latest weights
+					real done_loss = (real)0.0;
+					g_gpu_backend->train_finish(pnet, &done_loss);
+					epoch_loss += done_loss;
 					g_gpu_backend->sync_weights(pnet);
 					use_gpu_training = 0;
 					pnet->gpu_stale = 1;
@@ -2988,16 +2991,31 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 			if (!gpu_done)
 #endif
 			{
+				zero_gradients(pnet);
 				loss = train_batch_cpu(pnet, actual_batch_size, batch_targets);
+				epoch_loss += loss;
 			}
-
-			epoch_loss += loss;
 
 			// Progress indicator: buffer instead of per-batch I/O
 			if (batch % progress_step == 0 && progress_len < 60)
 				progress[progress_len++] = '=';
 		}
 		progress[progress_len] = '\0';
+#ifdef USE_GPU
+		// collect the losses of the GPU steps still running
+		if (use_gpu_training)
+		{
+			real gpu_loss = (real)0.0;
+			if (!g_gpu_backend->train_finish(pnet, &gpu_loss))
+			{
+				// a step failed: go on on the CPU from the GPU's latest weights
+				g_gpu_backend->sync_weights(pnet);
+				use_gpu_training = 0;
+				pnet->gpu_stale = 1;
+			}
+			epoch_loss += gpu_loss;
+		}
+#endif
 		loss = epoch_loss / (real)batch_count;
 
 		// Validation loss (-1 when there is no validation set). ann_predict_batch

@@ -783,12 +783,18 @@ static void cuda_optimizer_step(PNetwork pnet)
     }
 }
 
+// Losses of the steps since cuda_train_finish(); steps run synchronously
+static real g_cuda_loss_sum = 0.0f;
+
 //-----------------------------------------------------------
 // One mini-batch: forward + backward + optimizer.  Mirrors
-// metal_train_batch().  Returns 1 if handled, 0 to fall back to CPU.
+// metal_train_batch(), but completes the step before returning.
+// Returns 1 if handled, 0 to fall back to CPU.
 //-----------------------------------------------------------
-static int cuda_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, real *loss_out)
+static int cuda_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
 {
+    real batch_loss = 0.0f;
+
     if (!pnet || !g_cuda.initialized)
         return 0;
     if (pnet->layer_count < 2 || !pnet->layers[1].t_weights || !pnet->layers[1].t_weights->gpu_buf)
@@ -881,7 +887,7 @@ static int cuda_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size
             ? (real)loss_sum / (real)(batch_size * output_nodes)
             : (real)loss_sum / (real)batch_size;
 
-        if (loss_out) *loss_out = total_loss;
+        batch_loss = total_loss;
 
         // MSE needs the output activation's derivative (matches
         // ann_mse_output_delta on the CPU); cross-entropy with softmax does not
@@ -911,6 +917,17 @@ static int cuda_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size
     if (!cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize(train_batch)"))
         return 0;
 
+    g_cuda_loss_sum += batch_loss;
+    return 1;
+}
+
+// Every step already completed in cuda_train_batch(); report their losses
+static int cuda_train_finish(PNetwork pnet, real *loss_sum)
+{
+    (void)pnet;
+    if (loss_sum)
+        *loss_sum = g_cuda_loss_sum;
+    g_cuda_loss_sum = 0.0f;
     return 1;
 }
 
@@ -923,6 +940,7 @@ extern "C" GpuBackend cuda_backend = {
     cuda_eval_single,
     cuda_eval_batch,
     cuda_train_batch,
+    cuda_train_finish,
 };
 
 #endif /* USE_CUDA */

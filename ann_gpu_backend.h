@@ -101,14 +101,27 @@ typedef struct {
     int (*eval_batch)(const PNetwork pnet, const real *inputs, real *outputs, int batch_size);
 
     /**
-     * One mini-batch: forward pass + backward pass + optimizer update.
-     * Increments pnet->train_iteration for bias correction (Adam).
+     * Submit one mini-batch: forward pass + backward pass + optimizer update.
+     * Increments pnet->train_iteration for bias correction (Adam). The batch
+     * is read from layers[0].t_batch_values, batch_targets and the layers'
+     * dropout masks before this returns, so the caller can refill them at
+     * once; the GPU may still be running the step (it queues behind earlier
+     * ones), and its loss is collected by train_finish().
      * @param batch_targets Tensor of target labels for this batch
      * @param batch_size    Number of samples in the batch
-     * @param loss_out      Written with the mean loss for this batch
-     * @return 1 if GPU handled the batch, 0 to fall back to CPU.
+     * @return 1 if the GPU took the batch, 0 to fall back to the CPU (call
+     *         train_finish() first, to collect the steps already submitted).
      */
-    int (*train_batch)(PNetwork pnet, PTensor batch_targets, int batch_size, real *loss_out);
+    int (*train_batch)(PNetwork pnet, PTensor batch_targets, int batch_size);
+
+    /**
+     * Wait for every step train_batch() submitted.
+     * @param loss_sum Written with the sum of their batch losses (each the
+     *                 batch mean, as on the CPU) since the last train_finish()
+     * @return 1 if they all completed, 0 if any failed (the weights then hold
+     *         the completed steps' updates).
+     */
+    int (*train_finish)(PNetwork pnet, real *loss_sum);
 } GpuBackend;
 
 /**

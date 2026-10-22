@@ -687,8 +687,9 @@ static int ensure_rows(PTensor *t, int rows, int cols)
 //------------------------------
 // Conv2D: check settings and shape, allocate W [F x C*k*k], b [1 x F]
 // and one sample's column gradient [C*k*k x OH*OW]. The forward pass keeps
-// each sample's im2col columns in t_scratch[0] (one row per sample) for the
-// backward pass; it grows to the batch size on first use.
+// each sample's im2col columns in t_scratch[0] (one row per sample, or one
+// batch matrix; see conv_job) for the backward pass; it grows to the batch
+// size on first use.
 //------------------------------
 static int conv_setup(PNetwork pnet, int layer)
 {
@@ -742,9 +743,10 @@ static void conv_valid_range(int width, int out_width, int s, int p, int j, int 
 
 //------------------------------
 // copy one sample's input patches into columns: col[(c*k + i)*k + j][oh*OW + ow]
-// = x[c][oh*s - p + i][ow*s - p + j], or 0 in the padding
+// = x[c][oh*s - p + i][ow*s - p + j], or 0 in the padding; ld is col's row
+// stride (OH*OW for one sample's matrix, more when samples sit side by side)
 //------------------------------
-static void conv_im2col(const Layer *layer, const real *x, real *col)
+static void conv_im2col(const Layer *layer, const real *x, real *col, size_t ld)
 {
 	Layer_shape in = layer->in_shape;
 	int k = layer->config[CONV_KERNEL], s = layer->config[CONV_STRIDE], p = layer->config[CONV_PADDING];
@@ -754,7 +756,7 @@ static void conv_im2col(const Layer *layer, const real *x, real *col)
 		for (int i = 0; i < k; i++)
 			for (int j = 0; j < k; j++)
 			{
-				real *row = col + ((c * k + i) * k + j) * oh_n * ow_n;
+				real *row = col + ((c * k + i) * k + j) * ld;
 				int lo, hi;
 				conv_valid_range(in.w, ow_n, s, p, j, &lo, &hi);
 
@@ -785,7 +787,7 @@ static void conv_im2col(const Layer *layer, const real *x, real *col)
 //------------------------------
 // the reverse of conv_im2col: add each column entry back to its input position
 //------------------------------
-static void conv_col2im(const Layer *layer, const real *col, real *x)
+static void conv_col2im(const Layer *layer, const real *col, size_t ld, real *x)
 {
 	Layer_shape in = layer->in_shape;
 	int k = layer->config[CONV_KERNEL], s = layer->config[CONV_STRIDE], p = layer->config[CONV_PADDING];
@@ -795,7 +797,7 @@ static void conv_col2im(const Layer *layer, const real *col, real *x)
 		for (int i = 0; i < k; i++)
 			for (int j = 0; j < k; j++)
 			{
-				const real *row = col + ((c * k + i) * k + j) * oh_n * ow_n;
+				const real *row = col + ((c * k + i) * k + j) * ld;
 				int lo, hi;
 				conv_valid_range(in.w, ow_n, s, p, j, &lo, &hi);
 
@@ -820,8 +822,13 @@ static void conv_col2im(const Layer *layer, const real *col, real *x)
 // Conv2D work split across threads (see ann_parallel.h). Samples are
 // independent in the forward pass and for dX; dW and db are split by filter
 // and still summed over samples in order, so results match a serial run.
-// Without BLAS the per-sample GEMMs run inside the threads; with BLAS they
-// stay on the calling thread, which leaves BLAS's own threading alone.
+// Each sample's GEMMs run inside the threads, through BLAS too when range
+// functions may call it (ann_parallel_blas_ok). Otherwise, with BLAS, each
+// product is one GEMM for the whole batch on the calling thread, which
+// leaves BLAS's own threading alone, and the threads copy the samples'
+// columns and outputs in and out of the batch matrices (a GEMM per sample
+// on the calling thread was too small for BLAS: Accelerate spent its time
+// waking threads).
 //------------------------------
 typedef struct {
 	PLayer layer;
@@ -829,6 +836,7 @@ typedef struct {
 	real *y;			// layer output (forward) or dZ (backward)
 	real *dx;			// gradient for the layer below (backward), or NULL
 	int rows;
+	int batched;		// the batch GEMMs (conv_batch_*) compute dW
 } conv_job;
 
 // one sample's im2col columns, kept from the forward pass
@@ -867,46 +875,14 @@ static void conv_forward_samples(void *arg, int begin, int end)
 	for (int b = begin; b < end; b++)
 	{
 		Tensor col = conv_columns(layer, b);
-		conv_im2col(layer, job->x + b * in_nodes, col.values);
-#ifndef USE_BLAS
+		conv_im2col(layer, job->x + b * in_nodes, col.values, col.cols);
 		Tensor y = tensor_view(job->y + b * layer->node_count, layer->shape.c, col.cols);
 		tensor_gemm((real)1.0, layer->params[0].value, &col, (real)0.0, &y);
 		conv_add_bias(layer, y.values);
-#endif
 	}
 }
 
-//------------------------------
-// Conv2D forward, per sample: Y_s [F x OH*OW] = W [F x C*k*k] * im2col(X_s) + b
-// (rows of Y_s are channels, so the result is already in C, H, W order)
-//------------------------------
-static void conv_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
-{
-	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
-	conv_job job;
-
-	if (ensure_rows(&layer->t_scratch[0], rows, patch * positions) != ERR_OK)
-		return;
-
-	job.layer = layer;
-	job.x = X->values;
-	job.y = Y->values;
-	job.dx = NULL;
-	job.rows = rows;
-	ann_parallel_for(rows, 1, conv_forward_samples, &job);
-
-#ifdef USE_BLAS
-	for (int b = 0; b < rows; b++)
-	{
-		Tensor col = conv_columns(layer, b);
-		Tensor y = tensor_view(Y->values + b * layer->node_count, layer->shape.c, positions);
-		tensor_gemm((real)1.0, layer->params[0].value, &col, (real)0.0, &y);
-		conv_add_bias(layer, y.values);
-	}
-#endif
-}
-
-// dW and db for filters [begin, end), summed over the samples in order
+// dW (unless batched) and db for filters [begin, end), summed over the samples in order
 static void conv_filter_grads(void *arg, int begin, int end)
 {
 	const conv_job *job = (const conv_job *)arg;
@@ -917,13 +893,14 @@ static void conv_filter_grads(void *arg, int begin, int end)
 	for (int b = 0; b < job->rows; b++)
 	{
 		const real *dz = job->y + b * layer->node_count;
-#ifndef USE_BLAS
-		PTensor dW = layer->params[0].grad;
-		Tensor col = conv_columns(layer, b);
-		Tensor dz_rows = tensor_view((real *)dz + begin * positions, end - begin, positions);
-		Tensor dW_rows = tensor_view(dW->values + begin * dW->cols, end - begin, dW->cols);
-		tensor_gemm_transB((real)1.0, &dz_rows, &col, (real)1.0, &dW_rows);
-#endif
+		if (!job->batched)
+		{
+			PTensor dW = layer->params[0].grad;
+			Tensor col = conv_columns(layer, b);
+			Tensor dz_rows = tensor_view((real *)dz + begin * positions, end - begin, positions);
+			Tensor dW_rows = tensor_view(dW->values + begin * dW->cols, end - begin, dW->cols);
+			tensor_gemm_transB((real)1.0, &dz_rows, &col, (real)1.0, &dW_rows);
+		}
 		for (int f = begin; f < end; f++)
 		{
 			const real *dz_row = dz + f * positions;
@@ -943,18 +920,140 @@ static void conv_input_grads(void *arg, int begin, int end)
 	for (int b = begin; b < end; b++)
 	{
 		Tensor dcol = conv_column_grads(layer, b);
-#ifndef USE_BLAS
 		Tensor dz = tensor_view(job->y + b * layer->node_count, layer->shape.c, dcol.cols);
 		tensor_gemm_transA((real)1.0, layer->params[0].value, &dz, (real)0.0, &dcol);
-#endif
 		memset(job->dx + b * in_nodes, 0, in_nodes * sizeof(real));
-		conv_col2im(layer, dcol.values, job->dx + b * in_nodes);
+		conv_col2im(layer, dcol.values, dcol.cols, job->dx + b * in_nodes);
 	}
+}
+
+#ifdef USE_BLAS
+//------------------------------
+// The batch matrices, with sample b in columns [b*OH*OW, (b+1)*OH*OW):
+// t_scratch[0] holds the columns [C*k*k x rows*OH*OW] from the forward pass,
+// and t_scratch[1] the column gradients [C*k*k x rows*OH*OW] followed by the
+// outputs (forward) or dZ (backward) [F x rows*OH*OW]
+//------------------------------
+static Tensor conv_batch_columns(const Layer *layer, int rows)
+{
+	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
+	return tensor_view(layer->t_scratch[0]->values, patch, rows * positions);
+}
+
+static Tensor conv_batch_column_grads(const Layer *layer, int rows)
+{
+	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
+	return tensor_view(layer->t_scratch[1]->values, patch, rows * positions);
+}
+
+static Tensor conv_batch_outputs(const Layer *layer, int rows)
+{
+	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
+	return tensor_view(layer->t_scratch[1]->values + (size_t)patch * rows * positions, layer->shape.c,
+	                   rows * positions);
+}
+
+// im2col for samples [begin, end) into the batch columns
+static void conv_batch_im2col(void *arg, int begin, int end)
+{
+	const conv_job *job = (const conv_job *)arg;
+	PLayer layer = job->layer;
+	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+	size_t positions = (size_t)layer->shape.h * layer->shape.w;
+	Tensor cols = conv_batch_columns(layer, job->rows);
+
+	for (int b = begin; b < end; b++)
+		conv_im2col(layer, job->x + b * in_nodes, cols.values + b * positions, cols.cols);
+}
+
+// Y_b [F x OH*OW] = sample b's columns of the batch outputs, plus the bias
+static void conv_batch_output(void *arg, int begin, int end)
+{
+	const conv_job *job = (const conv_job *)arg;
+	PLayer layer = job->layer;
+	const real *bias = layer->params[1].value->values;
+	int positions = layer->shape.h * layer->shape.w;
+	Tensor out = conv_batch_outputs(layer, job->rows);
+
+	for (int b = begin; b < end; b++)
+		for (int f = 0; f < layer->shape.c; f++)
+		{
+			const real *src = out.values + (size_t)f * out.cols + (size_t)b * positions;
+			real *dst = job->y + b * layer->node_count + f * positions;
+			for (int i = 0; i < positions; i++)
+				dst[i] = src[i] + bias[f];
+		}
+}
+
+// dZ_b into sample b's columns of the batch dZ
+static void conv_batch_gather_grads(void *arg, int begin, int end)
+{
+	const conv_job *job = (const conv_job *)arg;
+	PLayer layer = job->layer;
+	int positions = layer->shape.h * layer->shape.w;
+	Tensor dz = conv_batch_outputs(layer, job->rows);
+
+	for (int b = begin; b < end; b++)
+		for (int f = 0; f < layer->shape.c; f++)
+			memcpy(dz.values + (size_t)f * dz.cols + (size_t)b * positions,
+			       job->y + b * layer->node_count + f * positions, positions * sizeof(real));
+}
+
+// dX for samples [begin, end): col2im of each sample's columns of the batch
+// column gradient
+static void conv_batch_input_grads(void *arg, int begin, int end)
+{
+	const conv_job *job = (const conv_job *)arg;
+	PLayer layer = job->layer;
+	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+	size_t positions = (size_t)layer->shape.h * layer->shape.w;
+	Tensor dcols = conv_batch_column_grads(layer, job->rows);
+
+	for (int b = begin; b < end; b++)
+	{
+		memset(job->dx + b * in_nodes, 0, in_nodes * sizeof(real));
+		conv_col2im(layer, dcols.values + b * positions, dcols.cols, job->dx + b * in_nodes);
+	}
+}
+#endif
+
+//------------------------------
+// Conv2D forward, per sample: Y_s [F x OH*OW] = W [F x C*k*k] * im2col(X_s) + b
+// (rows of Y_s are channels, so the result is already in C, H, W order)
+//------------------------------
+static void conv_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
+	conv_job job;
+
+	job.layer = layer;
+	job.x = X->values;
+	job.y = Y->values;
+	job.dx = NULL;
+	job.rows = rows;
+	job.batched = !ann_parallel_blas_ok();
+
+	if (ensure_rows(&layer->t_scratch[0], rows, patch * positions) != ERR_OK)
+		return;
+#ifdef USE_BLAS
+	if (job.batched)
+	{
+		if (ensure_rows(&layer->t_scratch[1], rows, (patch + layer->shape.c) * positions) != ERR_OK)
+			return;
+		ann_parallel_for(rows, 1, conv_batch_im2col, &job);
+		Tensor cols = conv_batch_columns(layer, rows), out = conv_batch_outputs(layer, rows);
+		tensor_gemm((real)1.0, layer->params[0].value, &cols, (real)0.0, &out);
+		ann_parallel_for(rows, 1, conv_batch_output, &job);
+		return;
+	}
+#endif
+	ann_parallel_for(rows, 1, conv_forward_samples, &job);
 }
 
 //------------------------------
 // Conv2D backward, per sample: dW += dZ_s * col_s^T, db += row sums of dZ_s,
-// and dX_s = col2im(W^T * dZ_s), with col_s kept from the forward pass
+// and dX_s = col2im(W^T * dZ_s), with col_s kept from the forward pass (or,
+// batched, dW and the column gradients are one GEMM each over the batch)
 //------------------------------
 static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
 {
@@ -967,28 +1066,27 @@ static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTens
 	job.y = dZ->values;
 	job.dx = dX ? dX->values : NULL;
 	job.rows = rows;
+	job.batched = !ann_parallel_blas_ok();
 
 #ifdef USE_BLAS
-	for (int b = 0; b < rows; b++)
+	if (job.batched)
 	{
-		Tensor col = conv_columns(layer, b);
-		Tensor dz = tensor_view(dZ->values + b * layer->node_count, layer->shape.c, positions);
-		tensor_gemm_transB((real)1.0, &dz, &col, (real)1.0, layer->params[0].grad);
+		// the forward pass sized the batch matrices
+		Tensor cols = conv_batch_columns(layer, rows), dz = conv_batch_outputs(layer, rows);
+		ann_parallel_for(rows, 1, conv_batch_gather_grads, &job);
+		tensor_gemm_transB((real)1.0, &dz, &cols, (real)1.0, layer->params[0].grad);
+		ann_parallel_for(layer->shape.c, 1, conv_filter_grads, &job);
+		if (!dX)
+			return;
+		Tensor dcols = conv_batch_column_grads(layer, rows);
+		tensor_gemm_transA((real)1.0, layer->params[0].value, &dz, (real)0.0, &dcols);
+		ann_parallel_for(rows, 1, conv_batch_input_grads, &job);
+		return;
 	}
 #endif
 	ann_parallel_for(layer->shape.c, 1, conv_filter_grads, &job);
-
 	if (!dX || ensure_rows(&layer->t_scratch[1], rows, patch * positions) != ERR_OK)
 		return;
-
-#ifdef USE_BLAS
-	for (int b = 0; b < rows; b++)
-	{
-		Tensor dcol = conv_column_grads(layer, b);
-		Tensor dz = tensor_view(dZ->values + b * layer->node_count, layer->shape.c, positions);
-		tensor_gemm_transA((real)1.0, layer->params[0].value, &dz, (real)0.0, &dcol);
-	}
-#endif
 	ann_parallel_for(rows, 1, conv_input_grads, &job);
 }
 

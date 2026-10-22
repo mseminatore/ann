@@ -175,15 +175,19 @@ if ( USE_VULKAN )
                     -I ${CMAKE_SOURCE_DIR}/shaders/vk
                     -o ${VULKAN_SPV_DIR}/${shader}.spv ${CMAKE_SOURCE_DIR}/shaders/vk/${shader}.comp
             DEPENDS shaders/vk/${shader}.comp shaders/vk/common.glsl
-            COMMENT "Compiling Vulkan shader ${shader}.comp")
+            COMMENT "Compiling Vulkan shader ${shader}.comp"
+            VERBATIM)
         list(APPEND VULKAN_SPV_FILES ${VULKAN_SPV_DIR}/${shader}.spv)
     endforeach()
+    # the names go comma-separated: a ';' list would end the command in a Unix shell
+    string(REPLACE ";" "," VULKAN_SHADER_NAMES "${VULKAN_SHADERS}")
     add_custom_command(
         OUTPUT ${VULKAN_SPV_DIR}/shaders_vk_spv.h
-        COMMAND ${CMAKE_COMMAND} -DSPV_DIR=${VULKAN_SPV_DIR} "-DNAMES=${VULKAN_SHADERS}"
+        COMMAND ${CMAKE_COMMAND} -DSPV_DIR=${VULKAN_SPV_DIR} -DNAMES=${VULKAN_SHADER_NAMES}
                 -DOUT=${VULKAN_SPV_DIR}/shaders_vk_spv.h -P ${CMAKE_SOURCE_DIR}/cmake/embed_spirv.cmake
         DEPENDS ${VULKAN_SPV_FILES} cmake/embed_spirv.cmake
-        COMMENT "Embedding Vulkan shaders")
+        COMMENT "Embedding Vulkan shaders"
+        VERBATIM)
     set(VULKAN_SRC tensor_vulkan.c ${VULKAN_SPV_DIR}/shaders_vk_spv.h)
     # dlopen() on Linux/macOS
     set(VULKAN_LIBS ${CMAKE_DL_LIBS})

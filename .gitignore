@@ -52,8 +52,6 @@ fashion_dae.png
 fashion_mnist.html
 fashion_mnist.pikchr
 fashion_mnist.svg
-IMPROVEMENTS.md
-STRERROR_IMPLEMENTATION.md
 
 # Object files
 *.o

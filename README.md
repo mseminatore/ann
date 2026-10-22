@@ -378,10 +378,10 @@ ann_train_network(net, x_train, x_train, x_train->rows);  // targets are the inp
 A dense bottleneck turns back into an image with `ann_add_reshape`, e.g.
 `... -> ann_add_layer(net, 392, ...) -> ann_add_reshape(net, 8, 7, 7) -> ann_add_upsample2d(net, 2) -> ...`.
 
-Convolutional networks train and run on the GPU with the Metal backend (the
-CUDA backend returns `ERR_INVALID` from `ann_gpu_upload_network()` for them, so
-they stay on the CPU there; so do networks with upsample or reshape layers,
-on both backends, for now), save in model format v2, and export to and import
+Convolutional networks, including ones with upsample and reshape layers,
+train and run on the GPU with the Metal backend (the CUDA backend returns
+`ERR_INVALID` from `ann_gpu_upload_network()` for them, so they stay on the
+CPU there), save in model format v2, and export to and import
 from ONNX as `Conv`, `MaxPool`, `Flatten`, `Resize` (nearest) and `Reshape`
 with a `[batch, C, H, W]` input.
 The importer also reads simple CNNs and MLPs exported by other tools, such as

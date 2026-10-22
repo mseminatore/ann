@@ -16,6 +16,13 @@
 
 static void quiet(const char *s) { (void)s; }
 
+static char g_printed[2048];
+static void capture(const char *msg)
+{
+    size_t len = strlen(g_printed);
+    snprintf(g_printed + len, sizeof(g_printed) - len, "%s", msg);
+}
+
 #define ROWS 64
 
 // A CNN (conv, pool) or a dense network large enough for its GEMMs to be split
@@ -141,6 +148,37 @@ void test_main(int argc, char *argv[])
         TESTEX("ann_set_num_threads(1) runs serially", ann_get_num_threads() == 1);
         ann_set_num_threads(0);
         TESTEX("ann_set_num_threads(0) restores the default", ann_get_num_threads() == initial);
+    }
+
+    SUITE("Backend Info");
+    {
+        Backend_info info;
+        TESTEX("ann_get_backend_info rejects NULL", ann_get_backend_info(NULL) == ERR_NULL_PTR);
+        ann_set_num_threads(3);
+        TESTEX("reports the thread count and number size", ann_get_backend_info(&info) == ERR_OK &&
+               info.threads == 3 && info.real_bytes == (int)sizeof(real));
+#if defined(USE_BLAS)
+        TESTEX("and a BLAS library", info.blas && strcmp(info.blas, "none") != 0);
+#else
+        TESTEX("and no BLAS library", info.blas && strcmp(info.blas, "none") == 0);
+#endif
+#if defined(USE_METAL)
+        TESTEX("and the Metal GPU backend, not started", strcmp(info.gpu, "Metal") == 0 && !info.gpu_active);
+#elif defined(USE_CUDA)
+        TESTEX("and the CUDA GPU backend, not started", strcmp(info.gpu, "CUDA") == 0 && !info.gpu_active);
+#else
+        TESTEX("and no GPU backend", strcmp(info.gpu, "none") == 0 && !info.gpu_active);
+#endif
+
+        // training prints the same as its Backend line
+        g_printed[0] = '\0';
+        PNetwork net = make_net(0);
+        net->print_func = capture;
+        ann_print_props(net);
+        TESTEX("ann_print_props prints the CPU backend with its threads",
+               strstr(g_printed, "Backend:") && strstr(g_printed, "CPU, 3 threads, "));
+        ann_free_network(net);
+        ann_set_num_threads(0);
     }
 
     SUITE("Results Do Not Depend on the Thread Count");

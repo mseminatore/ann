@@ -162,6 +162,7 @@ ann_get_layer_shape | get a layer's output shape (channels, height, width)
 ann_get_layer_settings | get a conv/pool layer's kernel or pool size, stride and padding
 ann_set_num_threads | set how many CPU threads libann uses (0 = default)
 ann_get_num_threads | get the CPU thread count
+ann_get_backend_info | report the BLAS library, GPU backend, thread count and number size of this build
 ann_export_onnx | export trained network to ONNX JSON format
 ann_quantize | quantize a trained network to int8 (calibrated on sample inputs)
 ann_quantized_predict | run the int8 model (also `_predict_int8`, `_evaluate_accuracy`)
@@ -601,6 +602,17 @@ int n = ann_get_num_threads();
 
 The default is the `ANN_NUM_THREADS` environment variable if set, otherwise
 the number of processors.
+
+Training prints what it runs on, e.g. `Backend: CPU, 8 threads, no BLAS`,
+`Backend: CPU, 8 threads, Accelerate BLAS` or `Backend: Metal GPU`, and
+`ann_get_backend_info()` reports the same for your own code:
+
+```c
+Backend_info info;
+ann_get_backend_info(&info);
+printf("BLAS %s, GPU %s (%s), %d threads, %d-byte reals\n", info.blas, info.gpu,
+       info.gpu_active ? "started" : "not started", info.threads, info.real_bytes);
+```
 
 - **BLAS libraries keep their own threads.** BLAS calls (OpenBLAS, Accelerate,
   MKL, CBLAS) always run on the calling thread and libann's workers never call

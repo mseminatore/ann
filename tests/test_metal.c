@@ -85,6 +85,14 @@ static PNetwork make_small_classifier(void)
     return net;
 }
 
+// ann_print_props() output, for checking its Backend line
+static char g_props[2048];
+static void capture_props(const char *msg)
+{
+    size_t len = strlen(g_props);
+    snprintf(g_props + len, sizeof(g_props) - len, "%s", msg);
+}
+
 //-----------------------------------------------------------
 // Helper: compare two float arrays within tolerance
 //-----------------------------------------------------------
@@ -221,6 +229,20 @@ void test_main(int argc, char *argv[])
     {
         COMMENT("Metal GPU not available - skipping remaining GPU tests");
         return;
+    }
+
+    {
+        Backend_info info;
+        TESTEX("ann_get_backend_info reports Metal, started",
+               ann_get_backend_info(&info) == ERR_OK && strcmp(info.gpu, "Metal") == 0 && info.gpu_active == 1);
+
+        g_props[0] = '\0';
+        PNetwork net = make_small_classifier();
+        net->print_func = capture_props;
+        ann_gpu_upload_network(net);
+        ann_print_props(net);
+        TESTEX("An uploaded network prints Backend: Metal GPU", strstr(g_props, "Metal GPU") != NULL);
+        ann_free_network(net);
     }
 
     // ========================================================================

@@ -49,4 +49,8 @@ void ann_parallel_for(int count, int grain, ann_range_func fn, void *ctx);
 void ann_parallel_set_threads(int threads);
 int  ann_parallel_get_threads(void);
 
+// The BLAS library tensor.c was built with, for ann_get_backend_info() (internal, implemented
+// in tensor.c, where the BLAS header is included)
+const char *ann_blas_backend_name(void);
+
 #endif /* __ANN_PARALLEL_H */

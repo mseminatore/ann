@@ -805,15 +805,16 @@ ANN_API int ann_gpu_upload_network(PNetwork pnet);
 ANN_API void ann_gpu_free_network(PNetwork pnet);
 
 /**
- * Run batch inference on the GPU.
+ * Run inference on many samples at once.
  * 
- * Performs forward propagation for `batch_size` samples simultaneously,
- * leveraging GPU parallelism. This is the primary way to benefit from
- * GPU acceleration — single-sample inference has high transfer overhead.
+ * Performs forward propagation for `batch_size` samples. When the network is
+ * uploaded to a GPU (ann_gpu_init() and ann_gpu_upload_network()) the batch
+ * runs there; otherwise it runs on the CPU's batched forward pass, in chunks
+ * of up to 256 rows (the training batch size while training is in progress).
+ * Either way it is much faster than calling ann_predict() per sample.
+ * Dropout is never applied.
  * 
- * Requires: ann_gpu_init() and ann_gpu_upload_network() called first.
- * 
- * @param pnet       Trained network with weights on GPU
+ * @param pnet       Trained network
  * @param inputs     Row-major input array [batch_size × input_node_count]
  * @param outputs    Row-major output array [batch_size × output_node_count] (written)
  * @param batch_size Number of samples to process simultaneously

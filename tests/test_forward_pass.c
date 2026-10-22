@@ -155,6 +155,85 @@ void test_main(int argc, char* argv[])
         ann_free_network(net);
     }
 
+    SUITE("ann_predict_batch() (CPU) in Chunks");
+    {
+        // 600 rows span several chunks and end with a partial one
+        enum { ROWS = 600 };
+        static real big_in[ROWS * 3], big_out[ROWS * 2];
+        for (int i = 0; i < ROWS * 3; i++)
+            big_in[i] = (real)sin(0.37 * i);
+
+        PNetwork net = fp_make_net(ACTIVATION_RELU, ACTIVATION_SOFTMAX);
+        ann_set_layer_dropout(net, 1, 0.5f);
+        TESTEX("A 600-row batch returns ERR_OK",
+               (ann_predict_batch(net, big_in, big_out, ROWS) == ERR_OK));
+
+        double worst = 0.0;
+        for (int s = 0; s < ROWS; s++) {
+            real y[2];
+            ann_predict(net, &big_in[s * 3], y);
+            for (int k = 0; k < 2; k++)
+                if (fabs(y[k] - big_out[s * 2 + k]) > worst) worst = fabs(y[k] - big_out[s * 2 + k]);
+        }
+        TESTEX("Every row matches ann_predict() (dropout is not applied)", worst < FP_TOL);
+
+        // During online training the batch tensors keep the training batch size
+        ann_set_batch_size(net, 8);
+        TESTEX("ann_train_begin() succeeds", (ann_train_begin(net) == ERR_OK));
+        TESTEX("A batch predicted mid-training returns ERR_OK",
+               (ann_predict_batch(net, big_in, big_out, ROWS) == ERR_OK));
+        TESTEX("Mid-training prediction leaves the training batch size",
+               (net->current_batch_size == 8 && net->layers[0].t_batch_values->rows == 8));
+
+        worst = 0.0;
+        for (int s = 0; s < ROWS; s++) {
+            real y[2];
+            ann_predict(net, &big_in[s * 3], y);
+            for (int k = 0; k < 2; k++)
+                if (fabs(y[k] - big_out[s * 2 + k]) > worst) worst = fabs(y[k] - big_out[s * 2 + k]);
+        }
+        TESTEX("Mid-training batch rows match ann_predict()", worst < FP_TOL);
+
+        real targets[8 * 2];
+        for (int i = 0; i < 8; i++) { targets[i * 2] = (real)(i & 1); targets[i * 2 + 1] = (real)!(i & 1); }
+        real loss = ann_train_step(net, big_in, targets, 8);
+        TESTEX("Training continues after a mid-training prediction", (loss > 0.0f && !isnan(loss)));
+        ann_train_end(net);
+        ann_free_network(net);
+    }
+
+    SUITE("ann_confusion_matrix() Uses Batched Prediction");
+    {
+        enum { ROWS = 300 };
+        PTensor x = tensor_create(ROWS, 3), t = tensor_zeros(ROWS, 2);
+        for (int i = 0; i < ROWS * 3; i++)
+            x->values[i] = (real)sin(0.37 * i);
+
+        PNetwork net = fp_make_net(ACTIVATION_TANH, ACTIVATION_SOFTMAX);
+        int etp = 0, efp = 0, etn = 0, efn = 0;
+        for (int s = 0; s < ROWS; s++) {
+            real y[2];
+            int actual = (s % 3) == 0;
+            t->values[s * 2 + actual] = 1.0f;
+            ann_predict(net, &x->values[s * 3], y);
+            int predicted = y[1] > y[0];
+            if (actual && predicted) etp++;
+            else if (!actual && predicted) efp++;
+            else if (!actual) etn++;
+            else efn++;
+        }
+
+        int tp, fp, tn, fn;
+        ann_confusion_matrix(net, x, t, &tp, &fp, &tn, &fn);
+        TESTEX("Counts match per-sample predictions",
+               (tp == etp && fp == efp && tn == etn && fn == efn));
+        TESTEX("Counts cover every row", (tp + fp + tn + fn == ROWS));
+
+        ann_free_network(net);
+        tensor_free(x);
+        tensor_free(t);
+    }
+
     SUITE("Boundary Conditions");
     {
         PNetwork net = fp_make_net(ACTIVATION_SIGMOID, ACTIVATION_SOFTMAX);

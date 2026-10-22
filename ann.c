@@ -3159,24 +3159,38 @@ real ann_confusion_matrix(PNetwork pnet, PTensor inputs, PTensor outputs,
 	
 	if (inputs->rows != outputs->rows || outputs->cols != 2)
 		return (real)0.0;
+
+	if (pnet->layer_count < 2 || inputs->cols != pnet->layers[0].node_count ||
+		pnet->layers[pnet->layer_count - 1].node_count != 2)
+		return (real)0.0;
 	
 	int true_pos = 0, false_pos = 0, true_neg = 0, false_neg = 0;
-	real pred[2];
-	
-	for (int i = 0; i < inputs->rows; i++)
+
+	// Predict in chunks, as ann_evaluate_accuracy() does
+	enum { EVAL_CHUNK = 256 };
+	real pred[EVAL_CHUNK * 2];
+
+	for (int start = 0; start < inputs->rows; start += EVAL_CHUNK)
 	{
-		ann_predict(pnet, &inputs->values[i * inputs->cols], pred);
-		int pred_class = pred[1] > pred[0] ? 1 : 0;
-		int actual_class = outputs->values[i * 2 + 1] > outputs->values[i * 2] ? 1 : 0;
-		
-		if (actual_class == 1 && pred_class == 1)
-			true_pos++;
-		else if (actual_class == 0 && pred_class == 1)
-			false_pos++;
-		else if (actual_class == 0 && pred_class == 0)
-			true_neg++;
-		else
-			false_neg++;
+		int count = inputs->rows - start < EVAL_CHUNK ? inputs->rows - start : EVAL_CHUNK;
+		if (ann_predict_batch(pnet, &inputs->values[start * inputs->cols], pred, count) != ERR_OK)
+			return (real)0.0;
+
+		for (int i = 0; i < count; i++)
+		{
+			int row = start + i;
+			int pred_class = pred[i * 2 + 1] > pred[i * 2] ? 1 : 0;
+			int actual_class = outputs->values[row * 2 + 1] > outputs->values[row * 2] ? 1 : 0;
+			
+			if (actual_class == 1 && pred_class == 1)
+				true_pos++;
+			else if (actual_class == 0 && pred_class == 1)
+				false_pos++;
+			else if (actual_class == 0 && pred_class == 0)
+				true_neg++;
+			else
+				false_neg++;
+		}
 	}
 	
 	if (tp) *tp = true_pos;
@@ -3799,10 +3813,69 @@ int ann_predict(const PNetwork pnet, const real *inputs, real *outputs)
 }
 
 //-----------------------------------------------------------
+// Set the row count of every layer's forward batch tensors (t_batch_values,
+// t_batch_z). A count below the allocated size runs a short chunk through
+// eval_network_batched() without reallocating.
+//-----------------------------------------------------------
+static void set_batch_rows(PNetwork pnet, int rows)
+{
+	for (int layer = 0; layer < pnet->layer_count; layer++)
+	{
+		pnet->layers[layer].t_batch_values->rows = rows;
+		if (pnet->layers[layer].t_batch_z)
+			pnet->layers[layer].t_batch_z->rows = rows;
+	}
+}
+
+//-----------------------------------------------------------
+// CPU batch inference: runs the batched forward pass over chunks of rows.
+// The chunk is the allocated batch size. Outside training the batch tensors
+// grow to PREDICT_CHUNK rows; during training they are left at the training
+// batch size, since the training loop reuses them.
+//-----------------------------------------------------------
+#define PREDICT_CHUNK 256
+
+static int predict_batch_cpu(PNetwork pnet, const real *inputs, real *outputs, int batch_size)
+{
+	int in_nodes  = pnet->layers[0].node_count;
+	int out_nodes = pnet->layers[pnet->layer_count - 1].node_count;
+	unsigned want = batch_size < PREDICT_CHUNK ? (unsigned)batch_size : PREDICT_CHUNK;
+
+	if (pnet->current_batch_size < want && (!pnet->is_training || pnet->current_batch_size == 0))
+	{
+		int err = ensure_batch_tensors(pnet, want);
+		if (err != ERR_OK)
+			return err;
+	}
+
+	int chunk = (int)pnet->current_batch_size;
+	PTensor X = pnet->layers[0].t_batch_values;
+	PTensor Y = pnet->layers[pnet->layer_count - 1].t_batch_values;
+
+	// Inference never applies dropout
+	int was_training = pnet->is_training;
+	pnet->is_training = 0;
+
+	for (int start = 0; start < batch_size; start += chunk)
+	{
+		int count = batch_size - start < chunk ? batch_size - start : chunk;
+
+		memcpy(X->values, inputs + (size_t)start * in_nodes, (size_t)count * in_nodes * sizeof(real));
+		set_batch_rows(pnet, count);
+		eval_network_batched(pnet, count);
+		memcpy(outputs + (size_t)start * out_nodes, Y->values, (size_t)count * out_nodes * sizeof(real));
+	}
+
+	set_batch_rows(pnet, chunk);
+	pnet->is_training = was_training;
+	return ERR_OK;
+}
+
+//-----------------------------------------------------------
 // GPU batch inference (ann_predict_batch)
 //
 // Runs forward pass on `batch_size` samples in parallel on the GPU.
-// Falls back to sequential CPU inference if Metal is not available.
+// Otherwise runs the CPU batched forward pass in chunks.
 //
 // @param pnet       Network with weights (GPU-uploaded for acceleration)
 // @param inputs     [batch_size x input_nodes] row-major flat array
@@ -3830,18 +3903,7 @@ int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, in
 		return g_gpu_backend->eval_batch(pnet, inputs, outputs, batch_size);
 #endif
 
-	// CPU fallback: sequential single-sample prediction
-	int in_nodes  = pnet->layers[0].node_count;
-	int out_nodes = pnet->layers[pnet->layer_count - 1].node_count;
-
-	for (int i = 0; i < batch_size; i++)
-	{
-		int err = ann_predict(pnet, inputs + i * in_nodes, outputs + i * out_nodes);
-		if (err != ERR_OK)
-			return err;
-	}
-
-	return ERR_OK;
+	return predict_batch_cpu(pnet, inputs, outputs, batch_size);
 }
 
 //================================================================================================

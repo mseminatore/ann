@@ -99,12 +99,17 @@ typedef struct {
     id<MTLComputePipelineState> pso_conv_output;
     id<MTLComputePipelineState> pso_conv_grad_rows;
     id<MTLComputePipelineState> pso_conv_bias_grad;
-    id<MTLComputePipelineState> pso_conv_weight_grad_partial;
+    id<MTLComputePipelineState> pso_conv_weight_grad_lanes;
+    id<MTLComputePipelineState> pso_conv_weight_grad_lanes_vec4;
     id<MTLComputePipelineState> pso_sum_partials;
     id<MTLComputePipelineState> pso_conv_col2im;
     id<MTLComputePipelineState> pso_maxpool_forward;
     id<MTLComputePipelineState> pso_maxpool_backward;
     id<MTLComputePipelineState> pso_copy_buffer;
+    id<MTLComputePipelineState> pso_transpose;
+    // Transposed copies of GEMM right-hand operands, by source buffer (see
+    // encode_gemm)
+    NSMapTable<id<MTLBuffer>, id<MTLBuffer>> *transposed;
     // MPS GEMM kernels by shape, reused across batches
     NSMutableDictionary<NSString *, MPSMatrixMultiplication *> *gemm_cache;
     // The open compute encoder and its command buffer, see compute_encoder()
@@ -169,13 +174,31 @@ int tensor_metal_init(void)
     static const char *kShaderSource =
         "#include <metal_stdlib>\n"
         "using namespace metal;\n"
+        // An activation applied as part of another kernel; act is an
+        // Activation_type (the ACT_* values are defined ahead of this source),
+        // and anything else, softmax included, passes x through. Same math as
+        // the activation_* kernels below.
+        "inline float activate(float x, uint act) {\n"
+        "    switch (act) {\n"
+        "    case ACT_SIGMOID: return 1.0f / (1.0f + exp(-x));\n"
+        "    case ACT_RELU: return max(0.0f, x);\n"
+        "    case ACT_LEAKY_RELU: return x > 0.0f ? x : 0.01f * x;\n"
+        "    case ACT_TANH: return tanh(x);\n"
+        "    case ACT_SOFTSIGN: return x / (1.0f + fabs(x));\n"
+        "    case ACT_GELU: return 0.5f * x * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x)));\n"
+        "    default: return x; } }\n"
+        // y = activate(y + bias), first saving y + bias in z when save_z
         "kernel void bias_add(\n"
         "    device float *buf [[buffer(0)]],\n"
         "    device const float *bias [[buffer(1)]],\n"
+        "    device float *z [[buffer(2)]],\n"
+        "    constant uint2 &act_save_z [[buffer(3)]],\n"
         "    uint2 gid [[thread_position_in_grid]],\n"
         "    uint2 dims [[threads_per_grid]]) {\n"
-        "    uint b = gid.y; uint n = gid.x;\n"
-        "    buf[b * dims.x + n] += bias[n]; }\n"
+        "    uint i = gid.y * dims.x + gid.x;\n"
+        "    float v = buf[i] + bias[gid.x];\n"
+        "    if (act_save_z.y) z[i] = v;\n"
+        "    buf[i] = activate(v, act_save_z.x); }\n"
         "kernel void activation_sigmoid(\n"
         "    device float *buf [[buffer(0)]], uint gid [[thread_position_in_grid]]) {\n"
         "    buf[gid] = 1.0f / (1.0f + exp(-buf[gid])); }\n"
@@ -210,7 +233,8 @@ int tensor_metal_init(void)
         "        for (uint n = 0; n < cols; n++) buf[offset + n] /= s; }\n"
         // ----------------------------------------------------------------
         // Activation derivative kernels (training backward pass)
-        // buf0 = dl_dz [batch*nodes], buf1 = activations or pre-act z [batch*nodes]
+        // buf0 = dl_dz [batch*nodes], buf1 = activations, or for GELU the
+        // values before activation (z) [batch*nodes]
         // Each kernel multiplies dl_dz[i] by the local derivative.
         // ----------------------------------------------------------------
         "kernel void deriv_sigmoid(\n"
@@ -218,16 +242,17 @@ int tensor_metal_init(void)
         "    device const float *a [[buffer(1)]],\n"
         "    uint gid [[thread_position_in_grid]]) {\n"
         "    float ai = a[gid]; dl_dz[gid] *= ai * (1.0f - ai); }\n"
+        // ReLU and leaky ReLU: a > 0 exactly when z > 0
         "kernel void deriv_relu(\n"
         "    device float *dl_dz [[buffer(0)]],\n"
-        "    device const float *z [[buffer(1)]],\n"
+        "    device const float *a [[buffer(1)]],\n"
         "    uint gid [[thread_position_in_grid]]) {\n"
-        "    dl_dz[gid] *= (z[gid] > 0.0f ? 1.0f : 0.0f); }\n"
+        "    dl_dz[gid] *= (a[gid] > 0.0f ? 1.0f : 0.0f); }\n"
         "kernel void deriv_leaky_relu(\n"
         "    device float *dl_dz [[buffer(0)]],\n"
-        "    device const float *z [[buffer(1)]],\n"
+        "    device const float *a [[buffer(1)]],\n"
         "    uint gid [[thread_position_in_grid]]) {\n"
-        "    dl_dz[gid] *= (z[gid] > 0.0f ? 1.0f : 0.01f); }\n"
+        "    dl_dz[gid] *= (a[gid] > 0.0f ? 1.0f : 0.01f); }\n"
         "kernel void deriv_tanh(\n"
         "    device float *dl_dz [[buffer(0)]],\n"
         "    device const float *a [[buffer(1)]],\n"
@@ -404,29 +429,46 @@ int tensor_metal_init(void)
         "    device float *dst [[buffer(1)]],\n"
         "    uint gid [[thread_position_in_grid]]) {\n"
         "    dst[gid] = src[gid]; }\n"
+        // dst [cols x rows] = src [rows x cols]^T; grid (cols, rows)
+        "kernel void transpose(\n"
+        "    device const float *src [[buffer(0)]],\n"
+        "    device float *dst [[buffer(1)]],\n"
+        "    uint2 gid [[thread_position_in_grid]],\n"
+        "    uint2 dims [[threads_per_grid]]) {\n"
+        "    dst[gid.x * dims.y + gid.y] = src[gid.y * dims.x + gid.x]; }\n"
         "struct WindowDims { uint C, H, W, F, OH, OW, K, S, P, batch; };\n"
+        // one thread per (sample, channel, output position) writes that
+        // position's K*K column values; grid (OW, OH, batch*C)
         "kernel void conv_im2col(\n"
         "    device const float *x [[buffer(0)]],\n"
         "    device float *cols [[buffer(1)]],\n"
         "    constant WindowDims &d [[buffer(2)]],\n"
-        "    uint2 gid [[thread_position_in_grid]]) {\n"
-        "    uint kk = d.K * d.K, pos_n = d.OH * d.OW;\n"
-        "    uint b = gid.y / pos_n, pos = gid.y % pos_n, c = gid.x / kk, r = gid.x % kk;\n"
-        "    int ih = int((pos / d.OW) * d.S + r / d.K) - int(d.P);\n"
-        "    int iw = int((pos % d.OW) * d.S + r % d.K) - int(d.P);\n"
-        "    float v = 0.0f;\n"
-        "    if (ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W))\n"
-        "        v = x[((b * d.C + c) * d.H + uint(ih)) * d.W + uint(iw)];\n"
-        "    cols[gid.y * d.C * kk + gid.x] = v; }\n"
-        // rows [batch*P x F] + bias -> y [batch][F][P]; grid (P, F, batch)
+        "    uint3 gid [[thread_position_in_grid]]) {\n"
+        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.K;\n"
+        "    device const float *xs = x + gid.z * d.H * d.W;\n"
+        "    device float *out = cols + ((b * d.OH + gid.y) * d.OW + gid.x) * d.C * kk + c * kk;\n"
+        "    int ih0 = int(gid.y * d.S) - int(d.P), iw0 = int(gid.x * d.S) - int(d.P);\n"
+        "    for (uint i = 0; i < d.K; i++) {\n"
+        "        int ih = ih0 + int(i);\n"
+        "        bool row_in = ih >= 0 && ih < int(d.H);\n"
+        "        for (uint j = 0; j < d.K; j++) {\n"
+        "            int iw = iw0 + int(j);\n"
+        "            out[i * d.K + j] = row_in && iw >= 0 && iw < int(d.W) ? xs[ih * int(d.W) + iw] : 0.0f; } } }\n"
+        // rows [batch*P x F] + bias -> y [batch][F][P], activated as in
+        // bias_add (z gets the values before activation when save_z);
+        // grid (P, F, batch)
         "kernel void conv_output(\n"
         "    device const float *rows [[buffer(0)]],\n"
         "    device const float *bias [[buffer(1)]],\n"
         "    device float *y [[buffer(2)]],\n"
+        "    device float *z [[buffer(3)]],\n"
+        "    constant uint2 &act_save_z [[buffer(4)]],\n"
         "    uint3 gid [[thread_position_in_grid]],\n"
         "    uint3 dims [[threads_per_grid]]) {\n"
-        "    uint pos_n = dims.x, f_n = dims.y;\n"
-        "    y[(gid.z * f_n + gid.y) * pos_n + gid.x] = rows[(gid.z * pos_n + gid.x) * f_n + gid.y] + bias[gid.y]; }\n"
+        "    uint pos_n = dims.x, f_n = dims.y, i = (gid.z * f_n + gid.y) * pos_n + gid.x;\n"
+        "    float v = rows[(gid.z * pos_n + gid.x) * f_n + gid.y] + bias[gid.y];\n"
+        "    if (act_save_z.y) z[i] = v;\n"
+        "    y[i] = activate(v, act_save_z.x); }\n"
         // dz [batch][F][P] -> rows [batch*P x F]; grid (P, F, batch)
         "kernel void conv_grad_rows(\n"
         "    device const float *dz [[buffer(0)]],\n"
@@ -454,22 +496,80 @@ int tensor_metal_init(void)
         "        if (t < w) part[t] += part[t + w];\n"
         "        threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
         "    if (t == 0) db[f] += part[0]; }\n"
-        // dW [F x C*K*K] += dz_rows^T * cols, a sum over batch*OH*OW rows
-        // with few outputs, so it is split: partial[chunk][f][k] sums one
-        // chunk of rows (grid (C*K*K, F, chunks); n.x = rows, n.y = rows per
-        // chunk), then sum_partials adds the chunks into dW
-        "kernel void conv_weight_grad_partial(\n"
+        // dW [F x P] += dz_rows^T * cols (P = C*K*K), a sum over batch*OH*OW rows
+        // with few outputs (F*P < 8192). Threadgroups (p blocks, f blocks of 16,
+        // row chunks) of (PX, Y) threads: a thread takes one p, so a SIMD group
+        // reads cols rows contiguously, keeps the sums for its 16 filters, and
+        // takes every Y-th row of the chunk (n = rows, rows per chunk, F, P); the
+        // threadgroup then adds up its Y sums. With one chunk the sums are added to
+        // dW, else stored in partial[chunk][F][P] for sum_partials. The _vec4
+        // version, for F % 4 == 0, reads dz_rows as float4.
+        "kernel void conv_weight_grad_lanes(\n"
         "    device const float *dz_rows [[buffer(0)]],\n"
         "    device const float *cols [[buffer(1)]],\n"
-        "    device float *partial [[buffer(2)]],\n"
-        "    constant uint2 &n [[buffer(3)]],\n"
-        "    uint3 gid [[thread_position_in_grid]],\n"
-        "    uint3 dims [[threads_per_grid]]) {\n"
-        "    uint patch = dims.x, f_n = dims.y, r1 = min((gid.z + 1) * n.y, n.x);\n"
-        "    float s = 0.0f;\n"
-        "    for (uint r = gid.z * n.y; r < r1; r++)\n"
-        "        s += dz_rows[r * f_n + gid.y] * cols[r * patch + gid.x];\n"
-        "    partial[(gid.z * f_n + gid.y) * patch + gid.x] = s; }\n"
+        "    device float *out [[buffer(2)]],\n"
+        "    constant uint4 &n [[buffer(3)]],\n"
+        "    uint3 tg [[threadgroup_position_in_grid]],\n"
+        "    uint3 tgs [[threadgroups_per_grid]],\n"
+        "    uint3 tid [[thread_position_in_threadgroup]],\n"
+        "    uint3 tpg [[threads_per_threadgroup]]) {\n"
+        "    threadgroup float red[16 * 256];\n"
+        "    uint F = n.z, P = n.w, PX = tpg.x, Y = tpg.y;\n"
+        "    uint p = tg.x * PX + tid.x, f0 = tg.y * 16, fb = min(16u, F - f0);\n"
+        "    uint r1 = min((tg.z + 1) * n.y, n.x);\n"
+        "    float acc[16];\n"
+        "    for (uint i = 0; i < 16; i++) acc[i] = 0.0f;\n"
+        "    if (p < P)\n"
+        "        for (uint r = tg.z * n.y + tid.y; r < r1; r += Y) {\n"
+        "            float c = cols[r * P + p];\n"
+        "            device const float *d = dz_rows + r * F + f0;\n"
+        "            for (uint i = 0; i < 16; i++)\n"
+        "                if (i < fb) acc[i] += d[i] * c; }\n"
+        "    for (uint i = 0; i < 16; i++) red[(tid.y * 16 + i) * PX + tid.x] = acc[i];\n"
+        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "    for (uint o = tid.y * PX + tid.x; o < 16 * PX; o += PX * Y) {\n"
+        "        uint i = o / PX, x = o % PX, pp = tg.x * PX + x, f = f0 + i;\n"
+        "        if (pp >= P || i >= fb) continue;\n"
+        "        float s = 0.0f;\n"
+        "        for (uint y = 0; y < Y; y++) s += red[(y * 16 + i) * PX + x];\n"
+        "        if (tgs.z == 1) out[f * P + pp] += s;\n"
+        "        else out[(tg.z * F + f) * P + pp] = s; } }\n"
+        "kernel void conv_weight_grad_lanes_vec4(\n"
+        "    device const float *dz_rows [[buffer(0)]],\n"
+        "    device const float *cols [[buffer(1)]],\n"
+        "    device float *out [[buffer(2)]],\n"
+        "    constant uint4 &n [[buffer(3)]],\n"
+        "    uint3 tg [[threadgroup_position_in_grid]],\n"
+        "    uint3 tgs [[threadgroups_per_grid]],\n"
+        "    uint3 tid [[thread_position_in_threadgroup]],\n"
+        "    uint3 tpg [[threads_per_threadgroup]]) {\n"
+        "    threadgroup float4 red[4 * 256];\n"
+        "    uint F4 = n.z / 4, P = n.w, PX = tpg.x, Y = tpg.y;\n"
+        "    uint p = tg.x * PX + tid.x, fb4 = min(4u, F4 - tg.y * 4);\n"
+        "    uint r1 = min((tg.z + 1) * n.y, n.x);\n"
+        "    float4 acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };\n"
+        "    if (p < P) {\n"
+        "        device const float4 *d = (device const float4 *)dz_rows + tg.y * 4;\n"
+        "        if (fb4 == 4)\n"
+        "            for (uint r = tg.z * n.y + tid.y; r < r1; r += Y) {\n"
+        "                float c = cols[r * P + p];\n"
+        "                acc[0] += d[r * F4] * c; acc[1] += d[r * F4 + 1] * c;\n"
+        "                acc[2] += d[r * F4 + 2] * c; acc[3] += d[r * F4 + 3] * c; }\n"
+        "        else\n"
+        "            for (uint r = tg.z * n.y + tid.y; r < r1; r += Y) {\n"
+        "                float c = cols[r * P + p];\n"
+        "                for (uint i = 0; i < fb4; i++) acc[i] += d[r * F4 + i] * c; } }\n"
+        "    for (uint i = 0; i < 4; i++) red[(tid.y * 4 + i) * PX + tid.x] = acc[i];\n"
+        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "    for (uint o = tid.y * PX + tid.x; o < 4 * PX; o += PX * Y) {\n"
+        "        uint i = o / PX, x = o % PX, pp = tg.x * PX + x;\n"
+        "        if (pp >= P || i >= fb4) continue;\n"
+        "        float4 s = 0.0f;\n"
+        "        for (uint y = 0; y < Y; y++) s += red[(y * 4 + i) * PX + x];\n"
+        "        for (uint j = 0; j < 4; j++) {\n"
+        "            uint f = tg.y * 16 + i * 4 + j;\n"
+        "            if (tgs.z == 1) out[f * P + pp] += s[j];\n"
+        "            else out[(tg.z * n.z + f) * P + pp] = s[j]; } } }\n"
         "kernel void sum_partials(\n"
         "    device const float *partial [[buffer(0)]],\n"
         "    device float *out [[buffer(1)]],\n"
@@ -535,7 +635,11 @@ int tensor_metal_init(void)
         "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n";
 
     NSError *err = nil;
-    NSString *src = [NSString stringWithUTF8String:kShaderSource];
+    NSString *src = [NSString stringWithFormat:
+        @"#define ACT_SIGMOID %d\n#define ACT_RELU %d\n#define ACT_LEAKY_RELU %d\n"
+        @"#define ACT_TANH %d\n#define ACT_SOFTSIGN %d\n#define ACT_GELU %d\n%s",
+        ACTIVATION_SIGMOID, ACTIVATION_RELU, ACTIVATION_LEAKY_RELU, ACTIVATION_TANH,
+        ACTIVATION_SOFTSIGN, ACTIVATION_GELU, kShaderSource];
     g_metal.library = [g_metal.device newLibraryWithSource:src options:nil error:&err];
     if (!g_metal.library) {
         fprintf(stderr, "[Metal] Failed to compile shader source: %s\n",
@@ -596,19 +700,24 @@ int tensor_metal_init(void)
     g_metal.pso_conv_grad_rows   = make_pso(g_metal.library, "conv_grad_rows");
     g_metal.pso_conv_bias_grad   = make_pso(g_metal.library, "conv_bias_grad");
     g_metal.pso_conv_col2im      = make_pso(g_metal.library, "conv_col2im");
-    g_metal.pso_conv_weight_grad_partial = make_pso(g_metal.library, "conv_weight_grad_partial");
+    g_metal.pso_conv_weight_grad_lanes = make_pso(g_metal.library, "conv_weight_grad_lanes");
+    g_metal.pso_conv_weight_grad_lanes_vec4 = make_pso(g_metal.library, "conv_weight_grad_lanes_vec4");
     g_metal.pso_sum_partials     = make_pso(g_metal.library, "sum_partials");
     g_metal.pso_maxpool_forward  = make_pso(g_metal.library, "maxpool_forward");
     g_metal.pso_maxpool_backward = make_pso(g_metal.library, "maxpool_backward");
     g_metal.pso_copy_buffer      = make_pso(g_metal.library, "copy_buffer");
+    g_metal.pso_transpose        = make_pso(g_metal.library, "transpose");
 
     if (!g_metal.pso_conv_im2col || !g_metal.pso_conv_output || !g_metal.pso_conv_grad_rows ||
         !g_metal.pso_conv_bias_grad || !g_metal.pso_conv_col2im ||
-        !g_metal.pso_conv_weight_grad_partial || !g_metal.pso_sum_partials ||
-        !g_metal.pso_maxpool_forward || !g_metal.pso_maxpool_backward || !g_metal.pso_copy_buffer)
+        !g_metal.pso_conv_weight_grad_lanes || !g_metal.pso_conv_weight_grad_lanes_vec4 ||
+        !g_metal.pso_sum_partials ||
+        !g_metal.pso_maxpool_forward || !g_metal.pso_maxpool_backward || !g_metal.pso_copy_buffer ||
+        !g_metal.pso_transpose)
         return 0;
 
     g_metal.gemm_cache = [NSMutableDictionary dictionary];
+    g_metal.transposed = [NSMapTable strongToStrongObjectsMapTable];
     g_metal.scratch = [NSMutableDictionary dictionary];
     g_metal.initialized = 1;
     return 1;
@@ -622,6 +731,8 @@ void tensor_metal_release_buffer(void *gpu_buf)
 {
     if (gpu_buf)
     {
+        // Drop its transposed copy, if any, which also holds a reference
+        [g_metal.transposed removeObjectForKey:(__bridge id<MTLBuffer>)gpu_buf];
         // Hand the retained reference back to ARC, which releases it
         CFBridgingRelease(gpu_buf);
     }
@@ -733,20 +844,27 @@ static void dispatch_activation(id<MTLCommandBuffer> cmd,
     }
 
 //-----------------------------------------------------------
-// Dispatch bias_add kernel: buf[b*cols + n] += bias[n]
+// Dispatch bias_add kernel: buf[b*cols + n] = activate(buf[b*cols + n] + bias[n])
 // buf_buf: [batch x cols] output matrix
 // bias_buf: [cols] bias vector
+// act: the activation to apply (softmax is left to dispatch_softmax)
+// z_buf: where to save the values before activation, or nil
 //-----------------------------------------------------------
 static void dispatch_bias_add(id<MTLCommandBuffer> cmd,
                               id<MTLBuffer> buf_buf,
                               id<MTLBuffer> bias_buf,
                               NSUInteger batch_size,
-                              NSUInteger cols)
+                              NSUInteger cols,
+                              Activation_type act,
+                              id<MTLBuffer> z_buf)
 {
+    uint32_t act_save_z[2] = { (uint32_t)act, z_buf != nil };
     id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
     [enc setComputePipelineState:g_metal.pso_bias_add];
     [enc setBuffer:buf_buf  offset:0 atIndex:0];
     [enc setBuffer:bias_buf offset:0 atIndex:1];
+    [enc setBuffer:z_buf ? z_buf : buf_buf offset:0 atIndex:2];
+    [enc setBytes:act_save_z length:sizeof(act_save_z) atIndex:3];
 
     MTLSize gridSize = MTLSizeMake(cols, batch_size, 1);
     NSUInteger tgw = g_metal.pso_bias_add.maxTotalThreadsPerThreadgroup;
@@ -797,6 +915,9 @@ static id<MTLComputePipelineState> pso_for_activation(Activation_type act)
 static void dispatch_binary_elementwise(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pso,
                                         id<MTLBuffer> buf0, id<MTLBuffer> buf1, NSUInteger count);
 static id<MTLBuffer> gpu_scratch(id<MTLBuffer> buf, size_t bytes);
+static void encode_grid(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pso,
+                        id<MTLBuffer> __strong *bufs, int n_bufs, const void *consts, size_t consts_len,
+                        MTLSize grid);
 
 //-----------------------------------------------------------
 // A cached MPS GEMM kernel: C = alpha * op(A) * op(B) + beta * C, with
@@ -847,6 +968,23 @@ static void encode_gemm(id<MTLCommandBuffer> cmd,
     NSUInteger M = trans_a ? a_cols : a_rows;
     NSUInteger K = trans_a ? a_rows : a_cols;
     NSUInteger N = trans_b ? b_rows : b_cols;
+    // A transposed right operand (the weights, in forward passes) is copied
+    // transposed first: MPS was about twice as slow with transposeRight on an
+    // Intel Iris Plus 655 (e.g. 0.63 vs 0.28 ms for an 86528x8x9 conv GEMM),
+    // and the copy is one small kernel in the open compute encoder
+    if (trans_b) {
+        id<MTLBuffer> bt = gpu_scratch([g_metal.transposed objectForKey:b], b_rows * b_cols * sizeof(float));
+        if (bt) {
+            [g_metal.transposed setObject:bt forKey:b];
+            id<MTLBuffer> bufs[2] = { b, bt };
+            encode_grid(cmd, g_metal.pso_transpose, bufs, 2, NULL, 0, MTLSizeMake(b_cols, b_rows, 1));
+            b = bt;
+            NSUInteger rows = b_rows;
+            b_rows = b_cols;
+            b_cols = rows;
+            trans_b = NO;
+        }
+    }
     end_compute();
     [gemm_kernel(trans_a, trans_b, M, N, K, alpha, beta) encodeToCommandBuffer:cmd
                                                                     leftMatrix:gpu_matrix(a, a_rows, a_cols)
@@ -929,7 +1067,7 @@ static id<MTLBuffer> layer_scratch(int layer, int slot, size_t bytes)
 // rearranged to [batch][F][OH*OW]
 //-----------------------------------------------------------
 static int encode_conv_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
-                               id<MTLBuffer> X, id<MTLBuffer> Y)
+                               id<MTLBuffer> X, id<MTLBuffer> Y, id<MTLBuffer> Z)
 {
     PLayer l = &pnet->layers[layer];
     WindowDims d = window_dims(pnet, layer, batch_size);
@@ -940,17 +1078,23 @@ static int encode_conv_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int laye
         return 0;
 
     id<MTLBuffer> im2col_bufs[2] = { X, cols };
-    encode_grid(cmd, g_metal.pso_conv_im2col, im2col_bufs, 2, &d, sizeof(d), MTLSizeMake(patch, rows, 1));
+    encode_grid(cmd, g_metal.pso_conv_im2col, im2col_bufs, 2, &d, sizeof(d),
+                MTLSizeMake(d.OW, d.OH, (NSUInteger)batch_size * d.C));
     encode_gemm(cmd, cols, rows, patch, NO, (__bridge id<MTLBuffer>)l->params[0].value->gpu_buf, d.F, patch, YES,
                 out_rows, 1.0, 0.0);
-    id<MTLBuffer> out_bufs[3] = { out_rows, (__bridge id<MTLBuffer>)l->params[1].value->gpu_buf, Y };
-    encode_grid(cmd, g_metal.pso_conv_output, out_bufs, 3, NULL, 0, MTLSizeMake(positions, d.F, (NSUInteger)batch_size));
+    uint32_t act_save_z[2] = { (uint32_t)l->activation, Z != nil };
+    id<MTLBuffer> out_bufs[4] = { out_rows, (__bridge id<MTLBuffer>)l->params[1].value->gpu_buf, Y, Z ? Z : Y };
+    encode_grid(cmd, g_metal.pso_conv_output, out_bufs, 4, act_save_z, sizeof(act_save_z),
+                MTLSizeMake(positions, d.F, (NSUInteger)batch_size));
     return 1;
 }
 
 // Weight gradients with fewer outputs (F*C*K*K) than this use split sums
 // (measured on Apple silicon: faster below ~4K outputs, slower above ~16K)
 #define CONV_SPLIT_OUTPUTS 8192
+// Threadgroups to aim for in the split weight gradient (measured on an Intel
+// Iris Plus 655: 16 to 64 are within 25% of each other; more is slower)
+#define CONV_SPLIT_GROUPS 64
 
 //-----------------------------------------------------------
 // Conv2D backward for a batch: dW += dZ_rows^T * cols, db += sums of dZ,
@@ -974,26 +1118,39 @@ static int encode_conv_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
 
     // dW += dz_rows^T * cols. With few outputs, each summing many rows, a
     // GEMM runs with little parallelism, so below CONV_SPLIT_OUTPUTS the rows
-    // are split into chunks (enough for about 64K threads) whose partial sums
-    // are then added up; larger layers use the (tiled) MPS GEMM.
+    // are split into chunks, about CONV_SPLIT_GROUPS threadgroups in all,
+    // whose partial sums are then added up; larger layers use the (tiled)
+    // MPS GEMM.
     NSUInteger outputs = d.F * patch;
+    id<MTLBuffer> dW = (__bridge id<MTLBuffer>)l->params[0].grad->gpu_buf;
     if (outputs >= CONV_SPLIT_OUTPUTS)
-        encode_gemm(cmd, dz_rows, rows, d.F, YES, cols, rows, patch, NO,
-                    (__bridge id<MTLBuffer>)l->params[0].grad->gpu_buf, 1.0, 1.0);
+        encode_gemm(cmd, dz_rows, rows, d.F, YES, cols, rows, patch, NO, dW, 1.0, 1.0);
     else {
-        NSUInteger chunks = MIN(MAX(65536 / outputs, (NSUInteger)1), rows);
-        uint32_t n[2] = { (uint32_t)rows, (uint32_t)((rows + chunks - 1) / chunks) };
+        id<MTLComputePipelineState> pso = d.F % 4 == 0 ? g_metal.pso_conv_weight_grad_lanes_vec4
+                                                       : g_metal.pso_conv_weight_grad_lanes;
+        NSUInteger threads = MIN((NSUInteger)256, pso.maxTotalThreadsPerThreadgroup);
+        NSUInteger px = patch <= threads ? patch : threads / 2, y = threads / px;
+        NSUInteger blocks = ((patch + px - 1) / px) * ((d.F + 15) / 16);
+        NSUInteger chunks = MIN(MAX(CONV_SPLIT_GROUPS / blocks, (NSUInteger)1), (rows + y - 1) / y);
+        uint32_t n[4] = { (uint32_t)rows, (uint32_t)((rows + chunks - 1) / chunks), d.F, (uint32_t)patch };
         chunks = (rows + n[1] - 1) / n[1];
         uint32_t chunk_count = (uint32_t)chunks;
-        id<MTLBuffer> partial = layer_scratch(layer, SCRATCH_PARTIAL, chunks * outputs * sizeof(float));
-        if (!partial)
+        id<MTLBuffer> partial = dW;
+        if (chunks > 1 && !(partial = layer_scratch(layer, SCRATCH_PARTIAL, chunks * outputs * sizeof(float))))
             return 0;
-        id<MTLBuffer> partial_bufs[3] = { dz_rows, cols, partial };
-        encode_grid(cmd, g_metal.pso_conv_weight_grad_partial, partial_bufs, 3, n, sizeof(n),
-                    MTLSizeMake(patch, d.F, chunks));
-        id<MTLBuffer> sum_bufs[2] = { partial, (__bridge id<MTLBuffer>)l->params[0].grad->gpu_buf };
-        encode_grid(cmd, g_metal.pso_sum_partials, sum_bufs, 2, &chunk_count, sizeof(chunk_count),
-                    MTLSizeMake(outputs, 1, 1));
+        id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:dz_rows offset:0 atIndex:0];
+        [enc setBuffer:cols offset:0 atIndex:1];
+        [enc setBuffer:partial offset:0 atIndex:2];
+        [enc setBytes:n length:sizeof(n) atIndex:3];
+        [enc dispatchThreadgroups:MTLSizeMake((patch + px - 1) / px, (d.F + 15) / 16, chunks)
+            threadsPerThreadgroup:MTLSizeMake(px, y, 1)];
+        if (chunks > 1) {
+            id<MTLBuffer> sum_bufs[2] = { partial, dW };
+            encode_grid(cmd, g_metal.pso_sum_partials, sum_bufs, 2, &chunk_count, sizeof(chunk_count),
+                        MTLSizeMake(outputs, 1, 1));
+        }
     }
 
     // one threadgroup per filter; the kernel's reduction needs a power of two
@@ -1089,17 +1246,27 @@ static int encode_layer_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
         return 0;
     }
 
+    // Only GELU's derivative needs the values before activation (ReLU's and
+    // leaky ReLU's read the sign from the output), so Z is saved only for it
+    if (dst->activation != ACTIVATION_GELU)
+        Z = nil;
+
+    // Dense and conv layers apply their activation (other than softmax) as
+    // they add the bias
+    int activated = 0;
     switch (dst->kind) {
     case LAYER_KIND_DENSE: {
         int in_nodes = pnet->layers[layer - 1].node_count;
         encode_gemm(cmd, X, batch_size, in_nodes, NO, (__bridge id<MTLBuffer>)dst->t_weights->gpu_buf,
                     out_nodes, in_nodes, YES, Y, 1.0, 0.0);
         dispatch_bias_add(cmd, Y, (__bridge id<MTLBuffer>)dst->t_bias->gpu_buf, (NSUInteger)batch_size,
-                          (NSUInteger)out_nodes);
+                          (NSUInteger)out_nodes, dst->activation, Z);
+        activated = 1;
         break;
     }
     case LAYER_KIND_CONV2D:
-        if (!encode_conv_forward(cmd, pnet, layer, batch_size, X, Y)) return 0;
+        if (!encode_conv_forward(cmd, pnet, layer, batch_size, X, Y, Z)) return 0;
+        activated = 1;
         break;
     case LAYER_KIND_MAXPOOL2D:
         if (!encode_maxpool_forward(cmd, pnet, layer, batch_size, X, Y)) return 0;
@@ -1111,13 +1278,12 @@ static int encode_layer_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
         return 0;
     }
 
-    if (Z)
-        encode_copy(cmd, Y, Z, count);
-
     if (dst->activation == ACTIVATION_SOFTMAX) {
         dispatch_softmax(cmd, Y, (uint32_t)out_nodes, (NSUInteger)batch_size);
-    } else if (dst->activation != ACTIVATION_NULL) {
+    } else if (!activated && dst->activation != ACTIVATION_NULL) {
         id<MTLComputePipelineState> pso = pso_for_activation(dst->activation);
+        if (Z)
+            encode_copy(cmd, Y, Z, count);
         if (pso)
             dispatch_activation(cmd, pso, Y, count);
     }
@@ -1506,9 +1672,9 @@ static void encode_activation_derivative(id<MTLCommandBuffer> cmd, PLayer l, int
     id<MTLComputePipelineState> pso = pso_for_deriv(l->activation);
     if (!pso)
         return;
-    int uses_z = l->activation == ACTIVATION_RELU || l->activation == ACTIVATION_LEAKY_RELU ||
-                 l->activation == ACTIVATION_GELU;
-    dispatch_binary_elementwise(cmd, pso, dl_dz, uses_z ? Z : A, count);
+    // the forward pass saves Z only for GELU; ReLU's and leaky ReLU's
+    // derivatives test z > 0, which is a > 0
+    dispatch_binary_elementwise(cmd, pso, dl_dz, l->activation == ACTIVATION_GELU ? Z : A, count);
 }
 
 //-----------------------------------------------------------

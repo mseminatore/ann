@@ -167,8 +167,9 @@ static void run_gpu_consistency_tests(void)
     srand(1234);
     gc_train(gpu_net);
 
-    TESTEX("Dropout network trains on the GPU (mask uploaded)",
-           (gpu_net->layers[1].t_dropout_mask && gpu_net->layers[1].t_dropout_mask->gpu_buf));
+    // training on the CPU (e.g. after a GPU failure) would leave the GPU copy stale
+    TESTEX("Dropout network trains on the GPU",
+           gpu_net->layers[1].params[0].value->gpu_buf != NULL && !gpu_net->gpu_stale);
     TESTEX("GPU dropout training matches CPU dropout training",
            gc_nets_close(cpu_net, gpu_net, 1e-3f, 0));
 

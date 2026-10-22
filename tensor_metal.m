@@ -56,6 +56,9 @@
 //-----------------------------------------------------------
 // Internal GPU context (singleton)
 //-----------------------------------------------------------
+// Training steps that can be in flight at once (see metal_train_batch)
+#define TRAIN_SLOTS 2
+
 typedef struct {
     id<MTLDevice>              device;
     id<MTLCommandQueue>        queue;
@@ -119,15 +122,58 @@ typedef struct {
     id<MTLCommandBuffer> enc_cmd;
     // Per-layer work buffers (conv columns, pool argmax), see layer_scratch()
     NSMutableDictionary<NSNumber *, id<MTLBuffer>> *scratch;
-    // Per-batch targets and per-row losses (shared memory)
-    id<MTLBuffer> targets_buf;
-    id<MTLBuffer> row_loss_buf;
+    // Training steps in flight: metal_train_batch() commits a step without
+    // waiting, so the CPU prepares the next batch while the GPU runs this one.
+    // Each slot has its own copies of what the CPU writes for a step (inputs,
+    // targets, dropout masks) and reads back (per-row losses).
+    struct {
+        id<MTLCommandBuffer> cmd;       // nil when the slot is free
+        id<MTLBuffer> inputs, targets, row_loss;
+        NSMutableDictionary<NSNumber *, id<MTLBuffer>> *masks;  // by layer
+        int batch_size;
+        int divisor;                    // batch loss = sum of row losses / divisor
+    } slots[TRAIN_SLOTS];
+    int next_slot;                      // the slot the next step uses (the older pending one)
+    real loss_sum;                      // losses of the steps finished since metal_train_finish()
+    int train_failed;                   // a step since metal_train_finish() did not complete
     int initialized;
     int training_buffers_ready;   // 1 once gpu_alloc_training_buffers() succeeds
     int training_batch_size;      // batch size for which training buffers are allocated
 } MetalContext;
 
 static MetalContext g_metal = {0};
+
+//-----------------------------------------------------------
+// Wait for a slot's training step, then add its batch loss (averaged as on
+// the CPU) to g_metal.loss_sum, or flag the failure
+//-----------------------------------------------------------
+static void finish_slot(int s)
+{
+    id<MTLCommandBuffer> cmd = g_metal.slots[s].cmd;
+    if (!cmd)
+        return;
+    [cmd waitUntilCompleted];
+    if (cmd.status == MTLCommandBufferStatusCompleted) {
+        const float *row_loss = (const float *)[g_metal.slots[s].row_loss contents];
+        real total = 0.0f;
+        for (int b = 0; b < g_metal.slots[s].batch_size; b++)
+            total += row_loss[b];
+        g_metal.loss_sum += total / (real)g_metal.slots[s].divisor;
+    } else
+        g_metal.train_failed = 1;
+    g_metal.slots[s].cmd = nil;
+}
+
+//-----------------------------------------------------------
+// Wait for every training step in flight, oldest first. Anything that reads
+// or replaces GPU state the steps use (weights, training buffers) calls this
+// first.
+//-----------------------------------------------------------
+static void finish_all_slots(void)
+{
+    for (int i = 0; i < TRAIN_SLOTS; i++)
+        finish_slot((g_metal.next_slot + i) % TRAIN_SLOTS);
+}
 
 //-----------------------------------------------------------
 // Helper: create a compute pipeline state from a kernel name
@@ -1387,6 +1433,7 @@ static int metal_upload_network(PNetwork pnet)
 {
     if (!pnet || !g_metal.initialized)
         return ERR_NULL_PTR;
+    finish_all_slots();
 
     // Every layer kind in ann.h is implemented; reject any added later
     for (int layer = 0; layer < pnet->layer_count; layer++) {
@@ -1413,6 +1460,7 @@ static int metal_upload_network(PNetwork pnet)
 static void metal_free_network(PNetwork pnet)
 {
     if (!pnet) return;
+    finish_all_slots();
 
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
@@ -1441,6 +1489,7 @@ static int metal_eval_single(PNetwork pnet)
 {
     if (!pnet || !g_metal.initialized)
         return 0;
+    finish_all_slots();     // inference shares the layers' work buffers with training
 
     // Check that weights are on GPU
     if (!network_on_gpu(pnet))
@@ -1510,6 +1559,7 @@ static int metal_eval_batch(const PNetwork pnet, const real *inputs, real *outpu
 {
     if (!pnet || !inputs || !outputs || batch_size <= 0)
         return ERR_NULL_PTR;
+    finish_all_slots();     // inference shares the layers' work buffers with training
 
     if (!g_metal.initialized)
         return ERR_FAIL;
@@ -1597,18 +1647,27 @@ static id<MTLBuffer> gpu_scratch(id<MTLBuffer> buf, size_t bytes)
 }
 
 //-----------------------------------------------------------
-// The dropout mask for a hidden layer in this batch, copied to the GPU.
-// ann.c draws the masks before each batch. Returns nil when the layer
-// does not use dropout.
+// This step's dropout mask for a hidden layer, copied from the one ann.c drew
+// into the slot's own buffer (a step still running may be reading the last
+// one). Returns nil when the layer does not use dropout.
 //-----------------------------------------------------------
-static id<MTLBuffer> gpu_dropout_mask(PNetwork pnet, PLayer l, int batch_size)
+static id<MTLBuffer> slot_dropout_mask(int s, PNetwork pnet, int layer, int batch_size)
 {
+    PLayer l = &pnet->layers[layer];
     PTensor m = l->t_dropout_mask;
     if (!pnet->is_training || l->dropout_rate <= 0.0f || !m ||
         m->rows != batch_size || m->cols != l->node_count)
         return nil;
-    if (!gpu_upload_shared_buf(m)) return nil;
-    return (__bridge id<MTLBuffer>)m->gpu_buf;
+
+    size_t bytes = (size_t)batch_size * l->node_count * sizeof(float);
+    if (!g_metal.slots[s].masks)
+        g_metal.slots[s].masks = [NSMutableDictionary dictionary];
+    id<MTLBuffer> buf = gpu_scratch(g_metal.slots[s].masks[@(layer)], bytes);
+    if (!buf)
+        return nil;
+    g_metal.slots[s].masks[@(layer)] = buf;
+    memcpy([buf contents], m->values, bytes);
+    return buf;
 }
 
 //-----------------------------------------------------------
@@ -1728,7 +1787,8 @@ static void encode_activation_derivative(id<MTLCommandBuffer> cmd, PLayer l, int
 // Encode the output layer's delta (t - y, then the activation derivative for
 // MSE; cross-entropy with softmax/sigmoid needs none) and each row's loss
 //-----------------------------------------------------------
-static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_size)
+static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_size,
+                                     id<MTLBuffer> targets, id<MTLBuffer> row_loss)
 {
     PLayer out = &pnet->layers[pnet->layer_count - 1];
     uint32_t cols = (uint32_t)out->node_count;
@@ -1737,9 +1797,9 @@ static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, in
     id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
     [enc setComputePipelineState:g_metal.pso_output_delta_loss];
     [enc setBuffer:(__bridge id<MTLBuffer>)out->t_batch_values->gpu_buf offset:0 atIndex:0];
-    [enc setBuffer:g_metal.targets_buf offset:0 atIndex:1];
+    [enc setBuffer:targets offset:0 atIndex:1];
     [enc setBuffer:(__bridge id<MTLBuffer>)out->t_batch_dl_dz->gpu_buf offset:0 atIndex:2];
-    [enc setBuffer:g_metal.row_loss_buf offset:0 atIndex:3];
+    [enc setBuffer:row_loss offset:0 atIndex:3];
     [enc setBytes:&cols length:sizeof(cols) atIndex:4];
     [enc setBytes:&mode length:sizeof(mode) atIndex:5];
     NSUInteger tg = MIN(g_metal.pso_output_delta_loss.maxTotalThreadsPerThreadgroup, (NSUInteger)batch_size);
@@ -1758,7 +1818,8 @@ static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, in
 //      dl_dz_prev (not for layer 1, whose input needs none)
 // Returns 0 if a work buffer could not be allocated.
 //-----------------------------------------------------------
-static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_size)
+static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_size, id<MTLBuffer> input,
+                           NSDictionary<NSNumber *, id<MTLBuffer>> *masks)
 {
     for (int li = pnet->layer_count - 1; li >= 1; li--) {
         PLayer layer      = &pnet->layers[li];
@@ -1768,11 +1829,11 @@ static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_si
         NSUInteger count = (NSUInteger)batch_size * nodes;
 
         id<MTLBuffer> dl_dz  = (__bridge id<MTLBuffer>)layer->t_batch_dl_dz->gpu_buf;
-        id<MTLBuffer> A_prev = (__bridge id<MTLBuffer>)prev_layer->t_batch_values->gpu_buf;
+        id<MTLBuffer> A_prev = li == 1 ? input : (__bridge id<MTLBuffer>)prev_layer->t_batch_values->gpu_buf;
         id<MTLBuffer> dX = li > 1 ? (__bridge id<MTLBuffer>)prev_layer->t_batch_dl_dz->gpu_buf : nil;
 
         if (li < pnet->layer_count - 1) {
-            id<MTLBuffer> mask = gpu_dropout_mask(pnet, layer, batch_size);
+            id<MTLBuffer> mask = masks[@(li)];
             if (mask) {
                 id<MTLBuffer> bufs[3] = { dl_dz, (__bridge id<MTLBuffer>)layer->t_batch_values->gpu_buf, mask };
                 encode_1d(cmd, g_metal.pso_dropout_backward, bufs, 3, NULL, 0, count);
@@ -1913,6 +1974,7 @@ static void encode_optimizer(id<MTLCommandBuffer> cmd, PNetwork pnet)
 static void metal_sync_weights(PNetwork pnet)
 {
     if (!pnet || !g_metal.initialized) return;
+    finish_all_slots();
 
     for (int layer = 1; layer < pnet->layer_count; layer++) {
         PLayer l = &pnet->layers[layer];
@@ -1933,43 +1995,54 @@ static void metal_sync_weights(PNetwork pnet)
 // metal_train_batch()
 // Top-level GPU training hook called from ann_train_network(). The batch
 // inputs are in layers[0].t_batch_values and the dropout masks are drawn.
-// Returns 1 when the GPU trained the batch (loss in *loss_out), 0 to fall
-// back to the CPU.
+// Copies them into a free slot, encodes the step and commits it without
+// waiting: the CPU assembles the next batch while the GPU runs this one,
+// and metal_train_finish() collects the losses. Returns 1 when the GPU took
+// the batch, 0 to fall back to the CPU.
 //-----------------------------------------------------------
-static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, real *loss_out)
+static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
 {
     if (!pnet || !g_metal.initialized) return 0;
     if (!network_on_gpu(pnet)) return 0;
     if (!pnet->layers[0].t_batch_values) return 0;
 
-    // Lazy-alloc training buffers on first call (or if batch size changed)
-    if (!g_metal.training_buffers_ready || g_metal.training_batch_size != batch_size) {
-        g_metal.training_buffers_ready = 0;
-        if (!gpu_alloc_training_buffers(pnet, batch_size)) return 0;
-    }
+    // The slot's previous step must be done before its buffers are reused
+    int s = g_metal.next_slot;
+    finish_slot(s);
+    if (g_metal.train_failed) return 0;
 
     int output_layer_idx = pnet->layer_count - 1;
     int input_nodes  = pnet->layers[0].node_count;
     int output_nodes = pnet->layers[output_layer_idx].node_count;
 
-    // Defensive re-allocation for stale backend state across network lifetimes.
-    if (!pnet->layers[0].t_batch_values->gpu_buf ||
-        !pnet->layers[output_layer_idx].t_batch_values ||
-        !pnet->layers[output_layer_idx].t_batch_values->gpu_buf ||
-        !pnet->layers[output_layer_idx].t_batch_dl_dz ||
-        !pnet->layers[output_layer_idx].t_batch_dl_dz->gpu_buf) {
+    // Lazy-alloc training buffers on first call, if the batch size changed,
+    // or for stale backend state across network lifetimes; steps in flight
+    // use them, so they finish first
+    PLayer out = &pnet->layers[output_layer_idx];
+    if (!g_metal.training_buffers_ready || g_metal.training_batch_size != batch_size ||
+        !out->t_batch_values || !out->t_batch_values->gpu_buf || !out->t_batch_dl_dz || !out->t_batch_dl_dz->gpu_buf) {
+        finish_all_slots();
+        if (g_metal.train_failed) return 0;
         g_metal.training_buffers_ready = 0;
         if (!gpu_alloc_training_buffers(pnet, batch_size)) return 0;
     }
 
-    // Inputs and targets go into shared buffers before anything is encoded
+    // This step's inputs, targets and dropout masks, in the slot's buffers
+    size_t input_bytes = (size_t)batch_size * input_nodes * sizeof(float);
     size_t target_bytes = (size_t)batch_size * output_nodes * sizeof(float);
-    g_metal.targets_buf  = gpu_scratch(g_metal.targets_buf, target_bytes);
-    g_metal.row_loss_buf = gpu_scratch(g_metal.row_loss_buf, (size_t)batch_size * sizeof(float));
-    id<MTLBuffer> in_buf = (__bridge id<MTLBuffer>)pnet->layers[0].t_batch_values->gpu_buf;
-    if (!g_metal.targets_buf || !g_metal.row_loss_buf || ![in_buf contents]) return 0;
-    memcpy([in_buf contents], pnet->layers[0].t_batch_values->values, (size_t)batch_size * input_nodes * sizeof(float));
-    memcpy([g_metal.targets_buf contents], batch_targets->values, target_bytes);
+    g_metal.slots[s].inputs   = gpu_scratch(g_metal.slots[s].inputs, input_bytes);
+    g_metal.slots[s].targets  = gpu_scratch(g_metal.slots[s].targets, target_bytes);
+    g_metal.slots[s].row_loss = gpu_scratch(g_metal.slots[s].row_loss, (size_t)batch_size * sizeof(float));
+    if (!g_metal.slots[s].inputs || !g_metal.slots[s].targets || !g_metal.slots[s].row_loss) return 0;
+    memcpy([g_metal.slots[s].inputs contents], pnet->layers[0].t_batch_values->values, input_bytes);
+    memcpy([g_metal.slots[s].targets contents], batch_targets->values, target_bytes);
+
+    NSMutableDictionary<NSNumber *, id<MTLBuffer>> *masks = [NSMutableDictionary dictionary];
+    for (int layer = 1; layer < output_layer_idx; layer++) {
+        id<MTLBuffer> mask = slot_dropout_mask(s, pnet, layer, batch_size);
+        if (mask)
+            masks[@(layer)] = mask;
+    }
 
     id<MTLCommandBuffer> cmd = [g_metal.queue commandBuffer];
 
@@ -1992,39 +2065,48 @@ static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_siz
     // Forward pass, saving pre-activations; dropout on hidden layers
     for (int layer = 1; layer < pnet->layer_count; layer++) {
         PLayer dst = &pnet->layers[layer];
-        id<MTLBuffer> mask = layer < output_layer_idx ? gpu_dropout_mask(pnet, dst, batch_size) : nil;
-        if (!encode_layer_forward(cmd, pnet, layer, batch_size,
-                                  (__bridge id<MTLBuffer>)pnet->layers[layer - 1].t_batch_values->gpu_buf,
-                                  (__bridge id<MTLBuffer>)dst->t_batch_values->gpu_buf,
-                                  (__bridge id<MTLBuffer>)dst->t_batch_z->gpu_buf, mask))
+        id<MTLBuffer> X = layer == 1 ? g_metal.slots[s].inputs
+                                     : (__bridge id<MTLBuffer>)pnet->layers[layer - 1].t_batch_values->gpu_buf;
+        if (!encode_layer_forward(cmd, pnet, layer, batch_size, X, (__bridge id<MTLBuffer>)dst->t_batch_values->gpu_buf,
+                                  (__bridge id<MTLBuffer>)dst->t_batch_z->gpu_buf, masks[@(layer)])) {
+            end_compute();
             return 0;
+        }
     }
 
-    encode_output_delta_loss(cmd, pnet, batch_size);
-    if (!encode_backward(cmd, pnet, batch_size))
+    encode_output_delta_loss(cmd, pnet, batch_size, g_metal.slots[s].targets, g_metal.slots[s].row_loss);
+    if (!encode_backward(cmd, pnet, batch_size, g_metal.slots[s].inputs, masks)) {
+        end_compute();
         return 0;
+    }
 
     // Adam's bias correction counts this batch
     pnet->train_iteration++;
     encode_optimizer(cmd, pnet);
 
-    if (!commit_and_wait(cmd)) {
-        pnet->train_iteration--;
-        return 0;
-    }
-
-    // Loss: averaged the same way as the CPU path
-    const float *row_loss = (const float *)[g_metal.row_loss_buf contents];
-    real total_loss = 0.0f;
-    for (int b = 0; b < batch_size; b++)
-        total_loss += row_loss[b];
-    if (pnet->loss_type == LOSS_MSE)
-        total_loss /= (real)(batch_size * output_nodes);
-    else
-        total_loss /= (real)batch_size;
-    if (loss_out) *loss_out = total_loss;
-
+    end_compute();
+    [cmd commit];
+    g_metal.slots[s].cmd = cmd;
+    g_metal.slots[s].batch_size = batch_size;
+    g_metal.slots[s].divisor = pnet->loss_type == LOSS_MSE ? batch_size * output_nodes : batch_size;
+    g_metal.next_slot = (s + 1) % TRAIN_SLOTS;
     return 1;
+}
+
+//-----------------------------------------------------------
+// Wait for the steps metal_train_batch() submitted; *loss_sum gets the sum
+// of their batch losses. Returns 0 if any failed.
+//-----------------------------------------------------------
+static int metal_train_finish(PNetwork pnet, real *loss_sum)
+{
+    (void)pnet;
+    finish_all_slots();
+    if (loss_sum)
+        *loss_sum = g_metal.loss_sum;
+    int ok = !g_metal.train_failed;
+    g_metal.loss_sum = 0.0f;
+    g_metal.train_failed = 0;
+    return ok;
 }
 
 //-----------------------------------------------------------
@@ -2073,9 +2155,14 @@ static int pooled_eval_batch(const PNetwork pnet, const real *inputs, real *outp
     @autoreleasepool { return metal_eval_batch(pnet, inputs, outputs, batch_size); }
 }
 
-static int pooled_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size, real *loss_out)
+static int pooled_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
 {
-    @autoreleasepool { return metal_train_batch(pnet, batch_targets, batch_size, loss_out); }
+    @autoreleasepool { return metal_train_batch(pnet, batch_targets, batch_size); }
+}
+
+static int pooled_train_finish(PNetwork pnet, real *loss_sum)
+{
+    @autoreleasepool { return metal_train_finish(pnet, loss_sum); }
 }
 
 GpuBackend metal_backend = {
@@ -2087,6 +2174,7 @@ GpuBackend metal_backend = {
     pooled_eval_single,      /* eval_single    */
     pooled_eval_batch,       /* eval_batch     */
     pooled_train_batch,      /* train_batch    */
+    pooled_train_finish,     /* train_finish   */
 };
 
 #endif /* USE_METAL */

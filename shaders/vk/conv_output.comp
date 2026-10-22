@@ -1,0 +1,33 @@
+#version 450
+#include "common.glsl"
+// Conv output: rows [batch*OH*OW x F] (the GEMM's result) + bias, rearranged
+// to y [batch][F][OH*OW] and activated as bias_act.comp does (z gets the
+// values before activation when save_z is set)
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufRows { float rows[]; };
+layout(std430, binding = 1) readonly buffer BufBias { float bias[]; };
+layout(std430, binding = 2) writeonly buffer BufY { float y[]; };
+layout(std430, binding = 3) writeonly buffer BufZ { float z[]; };
+
+layout(push_constant) uniform Params {
+    WindowDims d;
+    uint act;
+    uint save_z;
+} pc;
+
+void main()
+{
+    WindowDims d = pc.d;
+    uint positions = d.OH * d.OW;
+    GRID_LOOP(i, d.batch * d.F * positions)
+    {
+        uint pos = i % positions, t = i / positions;
+        uint f = t % d.F, b = t / d.F;
+        float v = rows[(b * positions + pos) * d.F + f] + bias[f];
+        if (pc.save_z != 0)
+            z[i] = v;
+        y[i] = activate(v, pc.act);
+    }
+}

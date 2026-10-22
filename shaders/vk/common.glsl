@@ -34,6 +34,35 @@ float activate(float x, uint act)
     }
 }
 
+// The activation's derivative from x, which is the activation's output, or for
+// GELU the value before activation (z). ReLU and leaky ReLU test a > 0, which
+// is z > 0. ACT_NULL and softmax (whose Jacobian is a row operation) give 1.
+float derivative(float x, uint act)
+{
+    switch (act)
+    {
+    case ACT_SIGMOID:    return x * (1.0 - x);
+    case ACT_RELU:       return x > 0.0 ? 1.0 : 0.0;
+    case ACT_LEAKY_RELU: return x > 0.0 ? 1.0 : 0.01;
+    case ACT_TANH:       return 1.0 - x * x;
+    case ACT_SOFTSIGN:   { float s = 1.0 - abs(x); return s * s; }
+    case ACT_GELU:
+    {
+        float t = safe_tanh(0.7978845608 * (x + 0.044715 * x * x * x));
+        return 0.5 * (1.0 + t) + 0.5 * x * (1.0 - t * t) * 0.7978845608 * (1.0 + 3.0 * 0.044715 * x * x);
+    }
+    default:             return 1.0;
+    }
+}
+
+// A conv, pool or upsample layer's geometry: input C x H x W, output F x OH x OW,
+// kernel (or pool window, or upsample scale) K, stride S, padding P.
+// Activations are [batch][channels][height][width]. Matches WindowDims in tensor_vulkan.c.
+struct WindowDims
+{
+    uint C, H, W, F, OH, OW, K, S, P, batch;
+};
+
 // Grid-stride loop over n items: the host caps the workgroup count at the
 // device limit (65535 on many GPUs), so each invocation may handle several
 #define GRID_LOOP(i, n) \

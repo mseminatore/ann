@@ -1,0 +1,36 @@
+#version 450
+#include "common.glsl"
+// MaxPool forward: each output takes its window's largest input (the first on
+// ties, scanning as the CPU does) and records the input's index within the
+// sample in arg, for the backward pass. C == F; there is no padding.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufX { float x[]; };
+layout(std430, binding = 1) writeonly buffer BufY { float y[]; };
+layout(std430, binding = 2) writeonly buffer BufArg { uint arg[]; };
+
+layout(push_constant) uniform Params { WindowDims d; } pc;
+
+void main()
+{
+    WindowDims d = pc.d;
+    GRID_LOOP(out_i, d.batch * d.C * d.OH * d.OW)
+    {
+        uint ow = out_i % d.OW, t = out_i / d.OW;
+        uint oh = t % d.OH;
+        uint plane = t / d.OH;      // sample * C + channel
+        uint xs = plane * d.H * d.W;
+
+        uint row0 = oh * d.S * d.W + ow * d.S, best = row0;
+        for (uint i = 0; i < d.K; i++)
+            for (uint j = 0; j < d.K; j++)
+            {
+                uint idx = row0 + i * d.W + j;
+                if (x[xs + idx] > x[xs + best])
+                    best = idx;
+            }
+        y[out_i] = x[xs + best];
+        arg[out_i] = (plane % d.C) * d.H * d.W + best;
+    }
+}

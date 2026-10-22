@@ -1,8 +1,7 @@
 #version 450
 #include "common.glsl"
 // dl_dz[i] *= f'(...) for the activation act. src holds the activations, or
-// for GELU the values before activation (z). ReLU and leaky ReLU test a > 0,
-// which is z > 0.
+// for GELU the values before activation (z); see derivative() in common.glsl.
 
 layout(local_size_x = 256) in;
 
@@ -17,24 +16,5 @@ layout(push_constant) uniform Params {
 void main()
 {
     GRID_LOOP(i, pc.n)
-    {
-        float x = src[i];
-        float d;
-        switch (pc.act)
-        {
-        case ACT_SIGMOID:    d = x * (1.0 - x); break;
-        case ACT_RELU:       d = x > 0.0 ? 1.0 : 0.0; break;
-        case ACT_LEAKY_RELU: d = x > 0.0 ? 1.0 : 0.01; break;
-        case ACT_TANH:       d = 1.0 - x * x; break;
-        case ACT_SOFTSIGN:   { float s = 1.0 - abs(x); d = s * s; break; }
-        case ACT_GELU:
-        {
-            float t = safe_tanh(0.7978845608 * (x + 0.044715 * x * x * x));
-            d = 0.5 * (1.0 + t) + 0.5 * x * (1.0 - t * t) * 0.7978845608 * (1.0 + 3.0 * 0.044715 * x * x);
-            break;
-        }
-        default:             d = 1.0; break;
-        }
-        dl_dz[i] *= d;
-    }
+        dl_dz[i] *= derivative(src[i], pc.act);
 }

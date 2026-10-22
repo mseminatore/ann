@@ -1,0 +1,59 @@
+#version 450
+#include "common.glsl"
+// col2im: dx[b][c][ih][iw] = sum of the column gradients that read it, from
+// dcols [batch*OH*OW x C*K*K]. A gather, one invocation per input, so no atomics.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufDcols { float dcols[]; };
+layout(std430, binding = 1) writeonly buffer BufDx { float dx[]; };
+
+layout(push_constant) uniform Params { WindowDims d; } pc;
+
+void main()
+{
+    WindowDims d = pc.d;
+    uint kk = d.K * d.K, ckk = d.C * kk;
+    GRID_LOOP(idx, d.batch * d.C * d.H * d.W)
+    {
+        uint iw = idx % d.W, t = idx / d.W;
+        uint ih = t % d.H;
+        t /= d.H;
+        uint c = t % d.C, b = t / d.C;
+
+        float s = 0.0;
+        for (uint i = 0; i < d.K; i++)
+        {
+            int ty = int(ih + d.P) - int(i);
+            if (ty < 0)
+                continue;
+            uint oh = uint(ty);
+            if (d.S > 1)
+            {
+                if (oh % d.S != 0)
+                    continue;
+                oh /= d.S;
+            }
+            if (oh >= d.OH)
+                continue;
+            for (uint j = 0; j < d.K; j++)
+            {
+                int tx = int(iw + d.P) - int(j);
+                if (tx < 0)
+                    continue;
+                uint ow = uint(tx);
+                if (d.S > 1)
+                {
+                    if (ow % d.S != 0)
+                        continue;
+                    ow /= d.S;
+                }
+                if (ow >= d.OW)
+                    continue;
+                uint row = (b * d.OH + oh) * d.OW + ow;
+                s += dcols[row * ckk + c * kk + i * d.K + j];
+            }
+        }
+        dx[idx] = s;
+    }
+}

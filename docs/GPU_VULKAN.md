@@ -2,13 +2,15 @@
 
 The Vulkan backend runs GPU **inference and training** on any GPU with a Vulkan 1.1 driver
 (AMD, Intel and NVIDIA) on Windows and Linux, through the same `GpuBackend` vtable as the Metal
-and CUDA backends. It consists of:
+and CUDA backends. Like Metal, it runs every layer kind: dense, conv, max pool, upsample, flatten
+and reshape. It consists of:
 
 - `tensor_vulkan.c`: device setup, buffers, command recording, and the inference and training
   paths
 - `shaders/vk/*.comp`: GLSL compute shaders (GEMM, bias + activation, softmax, activation
   derivatives, output delta and loss, bias gradients, gradient clipping, the five optimizers,
-  L1/L2 regularization, dropout), with shared code in `shaders/vk/common.glsl`
+  L1/L2 regularization, dropout; im2col, conv output and gradient rows, col2im, max pooling,
+  upsampling, split-K partial sums), with shared code in `shaders/vk/common.glsl`
 - `cmake/embed_spirv.cmake`: embeds the compiled SPIR-V in a generated `shaders_vk_spv.h`
 - `CMakeLists.txt` option `-DUSE_VULKAN=1`
 
@@ -34,7 +36,7 @@ also runs on machines without Vulkan: `ann_gpu_init()` returns 0 and everything 
 
 ## What runs on the GPU
 
-The same as the CUDA backend (see [GPU_CUDA.md](GPU_CUDA.md#what-runs-on-the-gpu)):
+The same as the Metal backend:
 
 - **Inference:** `ann_predict()` and `ann_predict_batch()` once the network is uploaded with
   `ann_gpu_upload_network()`. Large batches are evaluated in pieces of up to 256 MB of
@@ -46,12 +48,12 @@ The same as the CUDA backend (see [GPU_CUDA.md](GPU_CUDA.md#what-runs-on-the-gpu
   random sequence as CPU training, and copied to the GPU each batch.
 - **Online training** (`ann_train_begin()` / `ann_train_step()` / `ann_train_end()`) runs on the
   CPU and re-uploads the weights at `ann_train_end()`.
-- **Dense networks only.** Uploading a network with conv, pooling, upsample, flatten or reshape
-  layers returns `ERR_INVALID` and it stays on the CPU. Metal runs those layers; porting its
-  kernels to Vulkan is planned.
+- **Every layer kind.** Conv layers run as im2col + one GEMM for the whole batch; max pooling
+  records each window's argmax for the backward pass; upsampling is nearest-neighbour; flatten
+  and reshape are copies. Backward passes are gathers, so no kernel needs atomics.
 
 GPU and CPU training agree to float rounding (`tests/test_vulkan.c` compares them for every
-optimizer, loss and activation).
+optimizer, loss and activation, and for CNNs and conv autoencoders).
 
 ## Choosing the device and backend
 
@@ -71,11 +73,22 @@ optimizer, loss and activation).
   device-local memory is also host-visible and about as large as its VRAM (integrated GPUs, and
   discrete GPUs with resizable BAR), buffers are mapped and the host copies straight into them,
   as with Metal. Otherwise (discrete GPUs whose host-visible VRAM is a 256 MB window) copies go
-  through a host-visible staging buffer, as with CUDA. CTest runs `test_vulkan` both ways
-  (`test_vulkan_staging`, `test_vulkan_mapped`).
+  through a host-visible staging buffer, as with CUDA. A buffer that no longer fits in mapped
+  memory goes in plain device memory and uses the staging buffer, so the two can mix. CTest
+  runs `test_vulkan` both ways (`test_vulkan_staging`, `test_vulkan_mapped`).
 - **GEMM.** There is no vendor BLAS for Vulkan; `gemm.comp` is a tiled SGEMM (64x64 tiles, a 4x4
   block per invocation) with specialization constants for the three layouts training uses:
   `Y = X·Wᵀ`, `dW += dZᵀ·A` and `dX = dZ·W`. Matrices are row-major, as libann's tensors are.
+- **Conv backward.** A conv layer's weight gradient sums over every output position of the batch
+  (`batch·OH·OW` rows) into only `F x C·K·K` outputs, too few tiles to keep a GPU busy, so its
+  GEMM is split over K: about 128 workgroups each sum a slice into their own block, and
+  `sum_partials.comp` adds the blocks up. Bias gradients use one workgroup per column with a
+  shared-memory reduction. Without these, CNN training on the GPU was about 10x slower than on
+  the CPU. Metal's further fast paths (direct convolution for layers with few filters, kernels
+  fused into the backward pass) are not ported yet.
+- **Work buffers.** Each conv layer keeps its im2col columns, GEMM rows, column gradients and
+  partial sums, and each max pool layer its argmax, between a batch's forward and backward
+  passes. They grow to the largest batch seen and are freed with `ann_gpu_free_network()`.
 - **Commands.** Each operation (a training step, a forward pass, an upload or download) is
   recorded into one command buffer with a full memory barrier between dependent commands, then
   submitted and waited for. Descriptor sets come from pools reset before each command buffer;
@@ -96,10 +109,14 @@ ctest -R test_vulkan --output-on-failure      # test_vulkan, test_vulkan_staging
 
 `tests/test_vulkan.c` checks GPU inference and training against the CPU: odd matrix shapes that
 straddle the GEMM tiles, every optimizer, categorical and binary cross-entropy, MSE through
-softmax and linear outputs, L1/L2 with gradient clipping, and the shared consistency suite in
-`tests/gpu_consistency.h` (dropout, Adam state, GELU, early stopping, online training).
+softmax and linear outputs, L1/L2 with gradient clipping, CNNs (the CNN suite shared with
+`tests/test_metal.c`: strided and padded convs, overlapping pools, conv dropout, every
+activation, input noise, conv autoencoders, reshape and upsample, a batch evaluated in pieces),
+and the shared consistency suite in `tests/gpu_consistency.h` (dropout, Adam state, GELU, early
+stopping, online training).
 
 CI runs the Vulkan build and tests on Linux with **lavapipe**, Mesa's Vulkan implementation on
 the CPU, so the backend is checked on every push without a GPU.
 
-`examples/bench_gpu_training.c` compares CPU and GPU training throughput.
+`examples/bench_gpu_training.c` compares CPU and GPU training throughput for dense networks;
+`examples/fashion_cnn.c -g` trains a CNN on the GPU.

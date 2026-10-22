@@ -649,7 +649,7 @@ libann can run training and inference on the GPU. Three backends are supported:
 | NVIDIA CUDA | `-DUSE_CUDA=1` | Windows, Linux | NVIDIA GPU, CUDA Toolkit (`cudart`, `cublas`) |
 | Vulkan | `-DUSE_VULKAN=1` | Windows, Linux | Any Vulkan 1.1 GPU (AMD, Intel, NVIDIA); Vulkan SDK or `libvulkan-dev` + `glslc` to build |
 
-Metal runs every layer kind; CUDA and Vulkan run dense networks, and keep CNNs
+Metal and Vulkan run every layer kind; CUDA runs dense networks, and keeps CNNs
 on the CPU. A build may include several backends: `ann_gpu_init()` starts the
 first that works (Metal, then CUDA, then Vulkan), and the `ANN_GPU` environment
 variable (`metal`, `cuda`, `vulkan` or `none`) picks one. See

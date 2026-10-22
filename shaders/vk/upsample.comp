@@ -1,0 +1,45 @@
+#version 450
+#include "common.glsl"
+// Nearest-neighbour upsampling by K (the scale). Forward: each output copies
+// its input, so each input fills a K x K block. Backward: dx = sum of dz over
+// the input's block, in the CPU's order. Both are gathers (no atomics).
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufSrc { float src[]; };
+layout(std430, binding = 1) writeonly buffer BufDst { float dst[]; };
+
+layout(push_constant) uniform Params {
+    WindowDims d;
+    uint backward;
+} pc;
+
+void main()
+{
+    WindowDims d = pc.d;
+    if (pc.backward == 0)
+    {
+        GRID_LOOP(idx, d.batch * d.C * d.OH * d.OW)
+        {
+            uint ow = idx % d.OW, t = idx / d.OW;
+            uint oh = t % d.OH;
+            uint plane = t / d.OH;
+            dst[idx] = src[(plane * d.H + oh / d.K) * d.W + ow / d.K];
+        }
+    }
+    else
+    {
+        GRID_LOOP(idx, d.batch * d.C * d.H * d.W)
+        {
+            uint iw = idx % d.W, t = idx / d.W;
+            uint ih = t % d.H;
+            uint plane = t / d.H;
+            uint block = (plane * d.OH + ih * d.K) * d.OW + iw * d.K;
+            float s = 0.0;
+            for (uint i = 0; i < d.K; i++)
+                for (uint j = 0; j < d.K; j++)
+                    s += src[block + i * d.OW + j];
+            dst[idx] = s;
+        }
+    }
+}

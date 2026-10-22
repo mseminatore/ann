@@ -22,8 +22,9 @@
 /**********************************************************************************/
 
 //================================================================================================
-// Vulkan GPU backend: inference and training for dense networks on any Vulkan 1.1 GPU (AMD,
-// Intel, NVIDIA) on Windows and Linux. See docs/GPU_VULKAN.md.
+// Vulkan GPU backend: inference and training on any Vulkan 1.1 GPU (AMD, Intel, NVIDIA) on
+// Windows and Linux, for every layer kind (dense, conv, max pool, upsample, flatten, reshape).
+// See docs/GPU_VULKAN.md.
 //
 // - The Vulkan loader is opened at run time (vulkan-1.dll / libvulkan.so.1), so a build with
 //   USE_VULKAN runs on machines without a Vulkan driver; ann_gpu_init() then reports no GPU.
@@ -110,6 +111,8 @@ typedef enum {
     K_GEMM_NN, K_GEMM_NT, K_GEMM_TN,
     K_BIAS_ACT, K_SOFTMAX, K_ACT_DERIV, K_SOFTMAX_JACOBIAN, K_OUTPUT_DELTA_LOSS,
     K_BIAS_GRAD_SUM, K_GRAD_CLIP, K_OPTIMIZER, K_REGULARIZE, K_DROPOUT,
+    K_CONV_IM2COL, K_CONV_OUTPUT, K_CONV_GRAD_ROWS, K_CONV_COL2IM,
+    K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_SUM_PARTIALS,
     K_COUNT
 } Kernel;
 
@@ -132,6 +135,14 @@ static const struct {
     { SPV(optimizer), 0, 0 },
     { SPV(regularize), 0, 0 },
     { SPV(dropout), 0, 0 },
+    { SPV(conv_im2col), 0, 0 },
+    { SPV(conv_output), 0, 0 },
+    { SPV(conv_grad_rows), 0, 0 },
+    { SPV(conv_col2im), 0, 0 },
+    { SPV(maxpool_forward), 0, 0 },
+    { SPV(maxpool_backward), 0, 0 },
+    { SPV(upsample), 0, 0 },
+    { SPV(sum_partials), 0, 0 },
 };
 
 // Optimizer codes in shaders/vk/optimizer.comp
@@ -144,6 +155,20 @@ enum { VK_OPT_SGD, VK_OPT_MOMENTUM, VK_OPT_ADAGRAD, VK_OPT_RMSPROP, VK_OPT_ADAM 
 #define GEMM_TILE           64      // gemm.comp's output tile
 #define EVAL_BATCH_BYTES    ((size_t)256 << 20)
 #define EVAL_MAX_ROWS       (1 << 20)
+
+//-----------------------------------------------------------
+// Work buffers kept per layer between a batch's forward and backward passes (training and
+// inference never overlap, so they share them):
+//   SCRATCH_COLS  - conv im2col columns [batch*OH*OW x C*K*K]; max pool argmax [batch x nodes]
+//   SCRATCH_ROWS  - conv GEMM output rows, then dZ rows [batch*OH*OW x F]
+//   SCRATCH_DCOLS - conv column gradients [batch*OH*OW x C*K*K]
+//   SCRATCH_PARTIAL - conv weight gradient split-K partial sums [slices x F*C*K*K]
+//-----------------------------------------------------------
+enum { SCRATCH_COLS, SCRATCH_ROWS, SCRATCH_DCOLS, SCRATCH_PARTIAL, SCRATCH_SLOTS };
+
+// Split-K GEMMs aim for about this many workgroups, with at least SPLIT_MIN_DEPTH of K each
+#define SPLIT_GROUPS        128
+#define SPLIT_MIN_DEPTH     256
 
 //-----------------------------------------------------------
 // A tensor's GPU buffer (t->gpu_buf), or a backend work buffer
@@ -165,7 +190,7 @@ typedef struct {
     int device_index;
     char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
     VkPhysicalDeviceMemoryProperties mem;
-    uint32_t max_groups[2];     // maxComputeWorkGroupCount x, y
+    uint32_t max_groups[3];     // maxComputeWorkGroupCount x, y, z
     int map_device;             // device buffers are host-visible and mapped (no staging)
 
     VkDescriptorSetLayout set_layout;
@@ -186,6 +211,8 @@ typedef struct {
 
     VkBuf *inputs, *targets, *row_loss;     // training step work buffers
     VkBuf *infer[2];                        // inference ping-pong buffers
+    VkBuf **scratch;            // per-layer work buffers, scratch[layer * SCRATCH_SLOTS + slot]
+    int scratch_layers;         // layers scratch has room for
     int training_buffers_ready; // optimizer state was uploaded since upload_network()
     real loss_sum;              // losses of the steps since vk_train_finish()
 } VulkanContext;
@@ -374,6 +401,7 @@ static int pick_device(int *queue_family)
     vkGetPhysicalDeviceProperties(g_vk.physical, &props);
     g_vk.max_groups[0] = props.limits.maxComputeWorkGroupCount[0];
     g_vk.max_groups[1] = props.limits.maxComputeWorkGroupCount[1];
+    g_vk.max_groups[2] = props.limits.maxComputeWorkGroupCount[2];
     *queue_family = compute_queue_family(g_vk.physical);
     g_vk.device_index = best;
     memcpy(g_vk.device_name, props.deviceName, sizeof(g_vk.device_name));
@@ -554,12 +582,21 @@ static int vk_init(void)
 // Buffers
 //================================================================================================
 
-static int find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want)
+// The first memory type in type_bits with every flag in want and none in avoid, or -1
+static int find_memory_type_without(uint32_t type_bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid)
 {
     for (uint32_t t = 0; t < g_vk.mem.memoryTypeCount; t++)
-        if ((type_bits & (1u << t)) && (g_vk.mem.memoryTypes[t].propertyFlags & want) == want)
+    {
+        VkMemoryPropertyFlags flags = g_vk.mem.memoryTypes[t].propertyFlags;
+        if ((type_bits & (1u << t)) && (flags & want) == want && !(flags & avoid))
             return (int)t;
+    }
     return -1;
+}
+
+static int find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want)
+{
+    return find_memory_type_without(type_bits, want, 0);
 }
 
 static void buf_destroy(VkBuf *b)
@@ -593,27 +630,39 @@ static VkBuf *buf_create(size_t bytes, int host)
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(g_vk.device, b->buffer, &req);
     const VkMemoryPropertyFlags visible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    int type = -1;
+    const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    // Memory types to try in turn. Device buffers prefer mapped device memory when
+    // map_device is set; when that runs out (it may be a window smaller than the device's
+    // memory) a buffer goes in device memory the host cannot see, and its copies go through
+    // the staging buffer
+    int types[4], n_types = 0;
     if (host)
     {
-        type = find_memory_type(req.memoryTypeBits, visible | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
-        if (type < 0)
-            type = find_memory_type(req.memoryTypeBits, visible);
+        types[n_types++] = find_memory_type(req.memoryTypeBits, visible | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        types[n_types++] = find_memory_type(req.memoryTypeBits, visible);
     }
     else
     {
         if (g_vk.map_device)
-            type = find_memory_type(req.memoryTypeBits, visible | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (type < 0)
-            type = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (type < 0)
-            type = find_memory_type(req.memoryTypeBits, 0);
+            types[n_types++] = find_memory_type(req.memoryTypeBits, visible | local);
+        types[n_types++] = find_memory_type_without(req.memoryTypeBits, local, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+        types[n_types++] = find_memory_type(req.memoryTypeBits, local);
+        types[n_types++] = find_memory_type(req.memoryTypeBits, 0);
     }
 
     VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     ai.allocationSize = req.size;
-    ai.memoryTypeIndex = (uint32_t)type;
-    if (type < 0 || vkAllocateMemory(g_vk.device, &ai, NULL, &b->memory) != VK_SUCCESS)
+    int type = -1;
+    for (int i = 0; i < n_types && type < 0; i++)
+    {
+        if (types[i] < 0)
+            continue;
+        ai.memoryTypeIndex = (uint32_t)types[i];
+        if (vkAllocateMemory(g_vk.device, &ai, NULL, &b->memory) == VK_SUCCESS)
+            type = types[i];
+    }
+    if (type < 0)
     {
         fprintf(stderr, "[Vulkan] Failed to allocate %zu bytes of %s memory\n", bytes, host ? "staging" : "device");
         vkDestroyBuffer(g_vk.device, b->buffer, NULL);
@@ -798,6 +847,17 @@ static void cmd_zero(VkBuf *b)
     g_vk.barrier_pending = 1;
 }
 
+// Record a copy of src's first bytes to dst
+static void cmd_copy(VkBuf *src, VkBuf *dst, size_t bytes)
+{
+    if (bytes == 0)
+        return;
+    cmd_barrier();
+    VkBufferCopy region = { 0, 0, bytes };
+    vkCmdCopyBuffer(g_vk.cmd, src->buffer, dst->buffer, 1, &region);
+    g_vk.barrier_pending = 1;
+}
+
 // A descriptor set for one dispatch, from the pools reset by cmd_begin()
 static VkDescriptorSet alloc_set(void)
 {
@@ -839,13 +899,13 @@ static uint32_t groups_for(size_t n, uint32_t local)
 // Record a kernel: bufs bind to 0..n_bufs-1 (the rest repeat bufs[0]), params are its
 // push constants
 //-----------------------------------------------------------
-static void cmd_dispatch(Kernel k, VkBuf *const *bufs, int n_bufs, const void *params, uint32_t params_size,
-                         uint32_t groups_x, uint32_t groups_y)
+static void cmd_dispatch_3d(Kernel k, VkBuf *const *bufs, int n_bufs, const void *params, uint32_t params_size,
+                            uint32_t groups_x, uint32_t groups_y, uint32_t groups_z)
 {
     if (g_vk.record_failed)
         return;
     VkDescriptorSet set = alloc_set();
-    if (!set || groups_x > g_vk.max_groups[0] || groups_y > g_vk.max_groups[1])
+    if (!set || groups_x > g_vk.max_groups[0] || groups_y > g_vk.max_groups[1] || groups_z > g_vk.max_groups[2])
     {
         g_vk.record_failed = 1;
         return;
@@ -873,22 +933,73 @@ static void cmd_dispatch(Kernel k, VkBuf *const *bufs, int n_bufs, const void *p
     vkCmdBindPipeline(g_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk.pipelines[k]);
     vkCmdBindDescriptorSets(g_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk.pipe_layout, 0, 1, &set, 0, NULL);
     vkCmdPushConstants(g_vk.cmd, g_vk.pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, params_size, params);
-    vkCmdDispatch(g_vk.cmd, groups_x, groups_y, 1);
+    vkCmdDispatch(g_vk.cmd, groups_x, groups_y, groups_z);
     g_vk.barrier_pending = 1;
+}
+
+static void cmd_dispatch(Kernel k, VkBuf *const *bufs, int n_bufs, const void *params, uint32_t params_size,
+                         uint32_t groups_x, uint32_t groups_y)
+{
+    cmd_dispatch_3d(k, bufs, n_bufs, params, params_size, groups_x, groups_y, 1);
 }
 
 //================================================================================================
 // Kernels
 //================================================================================================
 
-// Row-major C[M x N] = alpha * op(A) * op(B) + beta * C (see gemm.comp)
+// Row-major C[M x N] = alpha * op(A) * op(B) + beta * C (see gemm.comp), with K split into
+// slices of k_slice, each written to its own [M x N] block of C, when slices > 1
+static void k_gemm_slices(int trans_a, int trans_b, uint32_t M, uint32_t N, uint32_t K,
+                          float alpha, VkBuf *A, VkBuf *B, float beta, VkBuf *C, uint32_t k_slice, uint32_t slices)
+{
+    struct { uint32_t M, N, K; float alpha, beta; uint32_t k_slice; } p = { M, N, K, alpha, beta, k_slice };
+    VkBuf *bufs[3] = { A, B, C };
+    Kernel k = trans_a ? K_GEMM_TN : (trans_b ? K_GEMM_NT : K_GEMM_NN);
+    // gemm.comp loops over row tiles beyond the device's workgroup limit
+    uint32_t row_tiles = (M + GEMM_TILE - 1) / GEMM_TILE;
+    if (row_tiles > g_vk.max_groups[1])
+        row_tiles = g_vk.max_groups[1];
+    cmd_dispatch_3d(k, bufs, 3, &p, sizeof(p), (N + GEMM_TILE - 1) / GEMM_TILE, row_tiles, slices);
+}
+
 static void k_gemm(int trans_a, int trans_b, uint32_t M, uint32_t N, uint32_t K,
                    float alpha, VkBuf *A, VkBuf *B, float beta, VkBuf *C)
 {
-    struct { uint32_t M, N, K; float alpha, beta; } p = { M, N, K, alpha, beta };
-    VkBuf *bufs[3] = { A, B, C };
-    Kernel k = trans_a ? K_GEMM_TN : (trans_b ? K_GEMM_NT : K_GEMM_NN);
-    cmd_dispatch(k, bufs, 3, &p, sizeof(p), (N + GEMM_TILE - 1) / GEMM_TILE, (M + GEMM_TILE - 1) / GEMM_TILE);
+    k_gemm_slices(trans_a, trans_b, M, N, K, alpha, A, B, beta, C, K, 1);
+}
+
+// Slices of K for a GEMM with few output tiles and a deep K (a conv weight gradient, which
+// sums over every output position of the batch), so it runs on about SPLIT_GROUPS
+// workgroups instead of a handful; 1 when it has tiles enough
+static uint32_t split_slices(uint32_t M, uint32_t N, uint32_t K)
+{
+    uint32_t tiles = ((M + GEMM_TILE - 1) / GEMM_TILE) * ((N + GEMM_TILE - 1) / GEMM_TILE);
+    uint32_t slices = tiles >= SPLIT_GROUPS ? 1 : SPLIT_GROUPS / tiles;
+    if (slices > K / SPLIT_MIN_DEPTH)
+        slices = K / SPLIT_MIN_DEPTH;
+    if (slices > g_vk.max_groups[2])
+        slices = g_vk.max_groups[2];
+    return slices < 1 ? 1 : slices;
+}
+
+// C[M x N] += op(A) * op(B), split over K (split_slices) through partial, which holds
+// slices * M * N floats
+static void k_gemm_accumulate(int trans_a, int trans_b, uint32_t M, uint32_t N, uint32_t K,
+                              VkBuf *A, VkBuf *B, VkBuf *C, VkBuf *partial)
+{
+    uint32_t slices = split_slices(M, N, K);
+    if (slices == 1)
+    {
+        k_gemm(trans_a, trans_b, M, N, K, 1.0f, A, B, 1.0f, C);
+        return;
+    }
+    uint32_t k_slice = (K + slices - 1) / slices;
+    slices = (K + k_slice - 1) / k_slice;
+    k_gemm_slices(trans_a, trans_b, M, N, K, 1.0f, A, B, 0.0f, partial, k_slice, slices);
+
+    struct { uint32_t n, slices; } p = { M * N, slices };
+    VkBuf *bufs[2] = { partial, C };
+    cmd_dispatch(K_SUM_PARTIALS, bufs, 2, &p, sizeof(p), groups_for((size_t)M * N, 256), 1);
 }
 
 // dl_dz *= the activation's derivative for a layer, reading A, or Z for GELU, as the CPU
@@ -914,29 +1025,256 @@ static void k_activation_derivative(PLayer l, int rows)
     cmd_dispatch(K_ACT_DERIV, bufs, 2, &p, sizeof(p), groups_for(count, 256), 1);
 }
 
+// Y = activate(Y + b), or activate(Y) when b is NULL, first saving the values before
+// activation in Z when Z is given; softmax passes through (k_softmax applies it)
+static void k_bias_act(VkBuf *Y, VkBuf *b, VkBuf *Z, size_t count, uint32_t cols, Activation_type act)
+{
+    struct { uint32_t n, cols, act, save_z, has_bias; } p = {
+        (uint32_t)count, cols, (uint32_t)act, Z != NULL, b != NULL
+    };
+    VkBuf *bufs[3] = { Y, b ? b : Y, Z ? Z : Y };
+    cmd_dispatch(K_BIAS_ACT, bufs, 3, &p, sizeof(p), groups_for(count, 256), 1);
+}
+
 //-----------------------------------------------------------
-// A dense layer's forward pass: Y = activate(X * W^T + b), saving the values before
-// activation in Z for GELU when Z is given, then dropout when mask is given
+// A conv, pool or upsample layer's geometry, laid out like WindowDims in
+// shaders/vk/common.glsl
 //-----------------------------------------------------------
-static void encode_dense_forward(PNetwork pnet, int layer, int rows, VkBuf *X, VkBuf *Y, VkBuf *Z, VkBuf *mask)
+typedef struct {
+    uint32_t C, H, W, F, OH, OW, K, S, P, batch;
+} WindowDims;
+
+static WindowDims window_dims(PNetwork pnet, int layer, int batch_size)
+{
+    PLayer l = &pnet->layers[layer];
+    int size = 0, stride = 1, padding = 0;
+    ann_get_layer_settings(pnet, layer, &size, &stride, &padding);
+
+    WindowDims d;
+    d.C = (uint32_t)l->in_shape.c; d.H = (uint32_t)l->in_shape.h; d.W = (uint32_t)l->in_shape.w;
+    d.F = (uint32_t)l->shape.c;    d.OH = (uint32_t)l->shape.h;   d.OW = (uint32_t)l->shape.w;
+    d.K = (uint32_t)size; d.S = (uint32_t)stride; d.P = (uint32_t)padding;
+    d.batch = (uint32_t)batch_size;
+    return d;
+}
+
+// The layer's work buffer for slot (see SCRATCH_COLS), allocated by ensure_layer_scratch()
+static VkBuf *scratch_of(int layer, int slot)
+{
+    return g_vk.scratch[layer * SCRATCH_SLOTS + slot];
+}
+
+// The layer's work buffer for slot, of at least bytes; call before cmd_begin()
+static VkBuf *layer_scratch(int layer, int slot, size_t bytes)
+{
+    if (layer >= g_vk.scratch_layers)
+    {
+        int layers = layer + 1;
+        VkBuf **grown = (VkBuf **)realloc(g_vk.scratch, (size_t)layers * SCRATCH_SLOTS * sizeof(*grown));
+        if (!grown)
+            return NULL;
+        memset(grown + (size_t)g_vk.scratch_layers * SCRATCH_SLOTS, 0,
+               (size_t)(layers - g_vk.scratch_layers) * SCRATCH_SLOTS * sizeof(*grown));
+        g_vk.scratch = grown;
+        g_vk.scratch_layers = layers;
+    }
+    return ensure_buf(&g_vk.scratch[layer * SCRATCH_SLOTS + slot], bytes);
+}
+
+static void free_scratch(void)
+{
+    for (int i = 0; i < g_vk.scratch_layers * SCRATCH_SLOTS; i++)
+        buf_destroy(g_vk.scratch[i]);
+    free(g_vk.scratch);
+    g_vk.scratch = NULL;
+    g_vk.scratch_layers = 0;
+}
+
+//-----------------------------------------------------------
+// Allocate the work buffers a batch of rows needs: conv columns and GEMM rows (and, for
+// training, column gradients, which layer 1 never needs), and max pool argmax
+//-----------------------------------------------------------
+static int ensure_layer_scratch(PNetwork pnet, int rows, int training)
+{
+    for (int layer = 1; layer < pnet->layer_count; layer++)
+    {
+        PLayer l = &pnet->layers[layer];
+        if (l->kind == LAYER_KIND_CONV2D)
+        {
+            WindowDims d = window_dims(pnet, layer, rows);
+            size_t out_rows = (size_t)rows * d.OH * d.OW, patch = (size_t)d.C * d.K * d.K;
+            if (!layer_scratch(layer, SCRATCH_COLS, out_rows * patch * sizeof(float)) ||
+                !layer_scratch(layer, SCRATCH_ROWS, out_rows * d.F * sizeof(float)) ||
+                (training && layer > 1 && !layer_scratch(layer, SCRATCH_DCOLS, out_rows * patch * sizeof(float))) ||
+                (training && !layer_scratch(layer, SCRATCH_PARTIAL, (size_t)split_slices(d.F, (uint32_t)patch,
+                                            (uint32_t)out_rows) * d.F * patch * sizeof(float))))
+                return 0;
+        }
+        else if (l->kind == LAYER_KIND_MAXPOOL2D)
+        {
+            if (!layer_scratch(layer, SCRATCH_COLS, (size_t)rows * l->node_count * sizeof(uint32_t)))
+                return 0;
+        }
+    }
+    return 1;
+}
+
+// GPU memory one sample needs in a forward pass: the ping-pong buffers, and conv columns
+// and GEMM rows, and max pool argmax
+static size_t forward_bytes_per_sample(const PNetwork pnet)
+{
+    size_t max_nodes = 0, floats = 0;
+    for (int layer = 0; layer < pnet->layer_count; layer++)
+    {
+        const Layer *l = &pnet->layers[layer];
+        if ((size_t)l->node_count > max_nodes)
+            max_nodes = (size_t)l->node_count;
+        if (l->kind == LAYER_KIND_CONV2D)
+            floats += (size_t)l->shape.h * l->shape.w * (l->params[0].value->cols + l->shape.c);
+        else if (l->kind == LAYER_KIND_MAXPOOL2D)
+            floats += (size_t)l->node_count;
+    }
+    return (floats + 2 * max_nodes) * sizeof(float);
+}
+
+//-----------------------------------------------------------
+// Conv2D forward for a batch, as on the CPU but with one GEMM for the whole batch:
+// rows [batch*OH*OW x F] = im2col(X) * W^T, then Y = activate(rows + b) rearranged to
+// [batch][F][OH*OW] (saving the values before activation in Z when given)
+//-----------------------------------------------------------
+static void encode_conv_forward(PNetwork pnet, int layer, int batch_size, VkBuf *X, VkBuf *Y, VkBuf *Z)
+{
+    PLayer l = &pnet->layers[layer];
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    uint32_t out_rows = (uint32_t)batch_size * d.OH * d.OW, patch = d.C * d.K * d.K;
+    VkBuf *cols = scratch_of(layer, SCRATCH_COLS), *rows = scratch_of(layer, SCRATCH_ROWS);
+
+    VkBuf *im2col_bufs[2] = { X, cols };
+    cmd_dispatch(K_CONV_IM2COL, im2col_bufs, 2, &d, sizeof(d),
+                 groups_for((size_t)batch_size * d.C * d.OH * d.OW, 256), 1);
+    k_gemm(0, 1, out_rows, d.F, patch, 1.0f, cols, (VkBuf *)l->params[0].value->gpu_buf, 0.0f, rows);
+
+    struct { WindowDims d; uint32_t act, save_z; } p = { d, (uint32_t)l->activation, Z != NULL };
+    VkBuf *out_bufs[4] = { rows, (VkBuf *)l->params[1].value->gpu_buf, Y, Z ? Z : Y };
+    cmd_dispatch(K_CONV_OUTPUT, out_bufs, 4, &p, sizeof(p), groups_for((size_t)l->node_count * batch_size, 256), 1);
+}
+
+//-----------------------------------------------------------
+// Conv2D backward for a batch: dZ_rows = dZ * f'(z) for the activation act
+// (ACTIVATION_NULL when dZ already has it), dW += dZ_rows^T * cols, db += column sums of
+// dZ_rows, and, when dX is given, dX = col2im(dZ_rows * W). cols is kept from the forward pass.
+//-----------------------------------------------------------
+static void encode_conv_backward(PNetwork pnet, int layer, int batch_size, VkBuf *dZ, VkBuf *dX, Activation_type act)
+{
+    PLayer l = &pnet->layers[layer];
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    uint32_t out_rows = (uint32_t)batch_size * d.OH * d.OW, patch = d.C * d.K * d.K;
+    VkBuf *W = (VkBuf *)l->params[0].value->gpu_buf;
+    VkBuf *cols = scratch_of(layer, SCRATCH_COLS), *dz_rows = scratch_of(layer, SCRATCH_ROWS);
+
+    // the derivative reads A, or Z for GELU (the only one the forward pass saves)
+    struct { WindowDims d; uint32_t act; } p = { d, (uint32_t)act };
+    VkBuf *row_bufs[3] = { dZ, dz_rows, (VkBuf *)(act == ACTIVATION_GELU ? l->t_batch_z : l->t_batch_values)->gpu_buf };
+    cmd_dispatch(K_CONV_GRAD_ROWS, row_bufs, 3, &p, sizeof(p), groups_for((size_t)l->node_count * batch_size, 256), 1);
+
+    // dW += dz_rows^T * cols  ([F x out_rows] * [out_rows x patch]): few outputs, each a sum
+    // over every output position of the batch, so split over them
+    k_gemm_accumulate(1, 0, d.F, patch, out_rows, dz_rows, cols, (VkBuf *)l->params[0].grad->gpu_buf,
+                      scratch_of(layer, SCRATCH_PARTIAL));
+
+    // db += column sums of dz_rows
+    {
+        struct { uint32_t rows, cols; } bp = { out_rows, d.F };
+        VkBuf *bufs[2] = { dz_rows, (VkBuf *)l->params[1].grad->gpu_buf };
+        cmd_dispatch(K_BIAS_GRAD_SUM, bufs, 2, &bp, sizeof(bp), groups_for(d.F, 1), 1);
+    }
+
+    if (!dX)
+        return;
+    // dcols = dz_rows * W  ([out_rows x F] * [F x patch]), then gathered back to the input
+    VkBuf *dcols = scratch_of(layer, SCRATCH_DCOLS);
+    k_gemm(0, 0, out_rows, patch, d.F, 1.0f, dz_rows, W, 0.0f, dcols);
+    VkBuf *col2im_bufs[2] = { dcols, dX };
+    cmd_dispatch(K_CONV_COL2IM, col2im_bufs, 2, &d, sizeof(d), groups_for((size_t)batch_size * d.C * d.H * d.W, 256), 1);
+}
+
+// MaxPool2D forward; each output's argmax goes to the layer's scratch
+static void encode_maxpool_forward(PNetwork pnet, int layer, int batch_size, VkBuf *X, VkBuf *Y)
+{
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    VkBuf *bufs[3] = { X, Y, scratch_of(layer, SCRATCH_COLS) };
+    cmd_dispatch(K_MAXPOOL_FORWARD, bufs, 3, &d, sizeof(d), groups_for((size_t)batch_size * d.C * d.OH * d.OW, 256), 1);
+}
+
+static void encode_maxpool_backward(PNetwork pnet, int layer, int batch_size, VkBuf *dZ, VkBuf *dX)
+{
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    VkBuf *bufs[3] = { dZ, dX, scratch_of(layer, SCRATCH_COLS) };
+    cmd_dispatch(K_MAXPOOL_BACKWARD, bufs, 3, &d, sizeof(d), groups_for((size_t)batch_size * d.C * d.H * d.W, 256), 1);
+}
+
+// Upsample2D forward (src = X, dst = Y) or backward (src = dZ, dst = dX)
+static void encode_upsample(PNetwork pnet, int layer, int batch_size, VkBuf *src, VkBuf *dst, int backward)
+{
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    struct { WindowDims d; uint32_t backward; } p = { d, (uint32_t)backward };
+    VkBuf *bufs[2] = { src, dst };
+    size_t count = (size_t)batch_size * d.C * (backward ? d.H * d.W : d.OH * d.OW);
+    cmd_dispatch(K_UPSAMPLE, bufs, 2, &p, sizeof(p), groups_for(count, 256), 1);
+}
+
+//-----------------------------------------------------------
+// Encode a layer's forward pass for a batch: the kind's linear part (dense:
+// Y = X * W^T + b), then (when Z is given) save the values before activation (GELU only
+// needs them), apply the activation, and apply dropout when a mask is given
+//-----------------------------------------------------------
+static void encode_layer_forward(PNetwork pnet, int layer, int rows, VkBuf *X, VkBuf *Y, VkBuf *Z, VkBuf *mask)
 {
     PLayer dst = &pnet->layers[layer];
     uint32_t out = (uint32_t)dst->node_count;
-    uint32_t in = (uint32_t)pnet->layers[layer - 1].node_count;
     size_t count = (size_t)rows * out;
 
-    k_gemm(0, 1, (uint32_t)rows, out, in, 1.0f, X, (VkBuf *)dst->t_weights->gpu_buf, 0.0f, Y);
+    // Only GELU's derivative needs the values before activation (ReLU's and
+    // leaky ReLU's read the sign from the output), so Z is saved only for it
+    if (dst->activation != ACTIVATION_GELU)
+        Z = NULL;
 
-    int save_z = Z && dst->activation == ACTIVATION_GELU;
-    struct { uint32_t n, cols, act, save_z; } p = { (uint32_t)count, out, (uint32_t)dst->activation, (uint32_t)save_z };
-    VkBuf *bufs[3] = { Y, (VkBuf *)dst->t_bias->gpu_buf, save_z ? Z : Y };
-    cmd_dispatch(K_BIAS_ACT, bufs, 3, &p, sizeof(p), groups_for(count, 256), 1);
+    // Dense and conv layers apply their activation (other than softmax) as they add the bias
+    int activated = 0;
+    switch (dst->kind)
+    {
+    case LAYER_KIND_DENSE:
+        k_gemm(0, 1, (uint32_t)rows, out, (uint32_t)pnet->layers[layer - 1].node_count, 1.0f, X,
+               (VkBuf *)dst->t_weights->gpu_buf, 0.0f, Y);
+        k_bias_act(Y, (VkBuf *)dst->t_bias->gpu_buf, Z, count, out, dst->activation);
+        activated = 1;
+        break;
+    case LAYER_KIND_CONV2D:
+        encode_conv_forward(pnet, layer, rows, X, Y, Z);
+        activated = 1;
+        break;
+    case LAYER_KIND_MAXPOOL2D:
+        encode_maxpool_forward(pnet, layer, rows, X, Y);
+        break;
+    case LAYER_KIND_UPSAMPLE2D:
+        encode_upsample(pnet, layer, rows, X, Y, 0);
+        break;
+    case LAYER_KIND_FLATTEN:
+    case LAYER_KIND_RESHAPE:
+        cmd_copy(X, Y, count * sizeof(float));
+        break;
+    default:
+        g_vk.record_failed = 1;
+        return;
+    }
 
     if (dst->activation == ACTIVATION_SOFTMAX)
     {
         struct { uint32_t rows, cols; } sp = { (uint32_t)rows, out };
         cmd_dispatch(K_SOFTMAX, &Y, 1, &sp, sizeof(sp), groups_for((size_t)rows, 64), 1);
     }
+    else if (!activated && dst->activation != ACTIVATION_NULL)
+        k_bias_act(Y, NULL, Z, count, out, dst->activation);
 
     if (mask)
     {
@@ -944,6 +1282,13 @@ static void encode_dense_forward(PNetwork pnet, int layer, int rows, VkBuf *X, V
         VkBuf *dbufs[3] = { Y, mask, Y };
         cmd_dispatch(K_DROPOUT, dbufs, 3, &dp, sizeof(dp), groups_for(count, 256), 1);
     }
+}
+
+// Conv2D layers apply their activation's derivative in encode_conv_backward (softmax
+// keeps its Jacobian kernel)
+static int conv_fuses_derivative(PLayer l)
+{
+    return l->kind == LAYER_KIND_CONV2D && l->activation != ACTIVATION_SOFTMAX;
 }
 
 //================================================================================================
@@ -977,6 +1322,7 @@ static void vk_free_network(PNetwork pnet)
         }
     }
     // the training buffers are released by tensor_free() when the network is freed
+    free_scratch();
     g_vk.training_buffers_ready = 0;
 }
 
@@ -985,10 +1331,14 @@ static int vk_upload_network(PNetwork pnet)
     if (!pnet || !g_vk.initialized)
         return ERR_NULL_PTR;
 
-    // Dense layers only so far; other networks stay on the CPU
+    // Every layer kind in ann.h is implemented; reject any added later
     for (int layer = 0; layer < pnet->layer_count; layer++)
-        if (pnet->layers[layer].kind != LAYER_KIND_DENSE)
+    {
+        Layer_kind kind = pnet->layers[layer].kind;
+        if (kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D && kind != LAYER_KIND_MAXPOOL2D &&
+            kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE)
             return ERR_INVALID;
+    }
 
     // Rebuild the optimizer state on the next batch, from the CPU's
     g_vk.training_buffers_ready = 0;
@@ -1093,7 +1443,8 @@ static int forward_infer(PNetwork pnet, const real *inputs, real *outputs, int r
             max_nodes = pnet->layers[i].node_count;
 
     size_t bytes = (size_t)rows * max_nodes * sizeof(float);
-    if (!ensure_buf(&g_vk.infer[0], bytes) || !ensure_buf(&g_vk.infer[1], bytes))
+    if (!ensure_buf(&g_vk.infer[0], bytes) || !ensure_buf(&g_vk.infer[1], bytes) ||
+        !ensure_layer_scratch(pnet, rows, 0))
         return 0;
     size_t in_bytes = (size_t)rows * in_nodes * sizeof(float);
     size_t out_bytes = (size_t)rows * out_nodes * sizeof(float);
@@ -1104,7 +1455,7 @@ static int forward_infer(PNetwork pnet, const real *inputs, real *outputs, int r
     int cur = 0;
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
-        encode_dense_forward(pnet, layer, rows, g_vk.infer[cur], g_vk.infer[1 - cur], NULL, NULL);
+        encode_layer_forward(pnet, layer, rows, g_vk.infer[cur], g_vk.infer[1 - cur], NULL, NULL);
         cur = 1 - cur;
     }
     const void *result = cmd_download(g_vk.infer[cur], out_bytes);
@@ -1131,13 +1482,9 @@ static int vk_eval_batch(const PNetwork pnet, const real *inputs, real *outputs,
 
     int in_nodes = pnet->layers[0].node_count;
     int out_nodes = pnet->layers[pnet->layer_count - 1].node_count;
-    int max_nodes = 0;
-    for (int i = 0; i < pnet->layer_count; i++)
-        if (pnet->layers[i].node_count > max_nodes)
-            max_nodes = pnet->layers[i].node_count;
 
     // a large batch is evaluated in pieces that fit the work buffers
-    size_t chunk_rows = EVAL_BATCH_BYTES / (2 * (size_t)max_nodes * sizeof(float));
+    size_t chunk_rows = EVAL_BATCH_BYTES / forward_bytes_per_sample(pnet);
     if (chunk_rows > EVAL_MAX_ROWS)
         chunk_rows = EVAL_MAX_ROWS;
     int chunk = chunk_rows < 1 ? 1 : (chunk_rows < (size_t)batch_size ? (int)chunk_rows : batch_size);
@@ -1219,11 +1566,14 @@ static PTensor dropout_mask(PNetwork pnet, int layer, int batch_size)
 }
 
 //-----------------------------------------------------------
-// Encode the backward pass. On entry the output layer's t_batch_dl_dz holds -dL/dz. For each
-// layer, from the output down to layer 1:
-//   1. hidden layers: undo dropout, then the activation derivative
-//   2. dW += dl_dz^T * A_prev, bias_grad += column sums of dl_dz, and dl_dz_prev = dl_dz * W
-//      (not for layer 1, whose input needs none)
+// Encode the backward pass. On entry the output layer's t_batch_dl_dz holds -dL/dz (-dL/da
+// for a Conv2D output, which applies its own derivative). For each layer, from the output
+// down to layer 1:
+//   1. hidden layers: undo dropout, then the activation derivative (Conv2D applies it in its
+//      backward pass)
+//   2. the kind's backward pass: accumulate parameter gradients (dense: dW += dl_dz^T * A_prev,
+//      bias_grad += column sums of dl_dz) and write dl_dz_prev (not for layer 1, whose input
+//      needs none)
 //-----------------------------------------------------------
 static void encode_backward(PNetwork pnet, int batch_size)
 {
@@ -1237,6 +1587,7 @@ static void encode_backward(PNetwork pnet, int batch_size)
 
         VkBuf *dl_dz = (VkBuf *)layer->t_batch_dl_dz->gpu_buf;
         VkBuf *A_prev = li == 1 ? g_vk.inputs : (VkBuf *)prev->t_batch_values->gpu_buf;
+        VkBuf *dX = li > 1 ? (VkBuf *)prev->t_batch_dl_dz->gpu_buf : NULL;
 
         if (li < pnet->layer_count - 1)
         {
@@ -1247,24 +1598,52 @@ static void encode_backward(PNetwork pnet, int batch_size)
                 VkBuf *bufs[3] = { (VkBuf *)layer->t_batch_values->gpu_buf, (VkBuf *)mask->gpu_buf, dl_dz };
                 cmd_dispatch(K_DROPOUT, bufs, 3, &p, sizeof(p), groups_for(count, 256), 1);
             }
-            k_activation_derivative(layer, batch_size);
+            if (!conv_fuses_derivative(layer))
+                k_activation_derivative(layer, batch_size);
         }
 
-        // dW += dl_dz^T * A_prev   ([nodes x batch] * [batch x prev_nodes])
-        k_gemm(1, 0, nodes, prev_nodes, (uint32_t)batch_size, 1.0f, dl_dz, A_prev, 1.0f,
-               (VkBuf *)layer->t_gradients->gpu_buf);
-
-        // bias_grad += column sums of dl_dz
+        switch (layer->kind)
         {
-            struct { uint32_t rows, cols; } p = { (uint32_t)batch_size, nodes };
-            VkBuf *bufs[2] = { dl_dz, (VkBuf *)layer->t_bias_grad->gpu_buf };
-            cmd_dispatch(K_BIAS_GRAD_SUM, bufs, 2, &p, sizeof(p), groups_for(nodes, 64), 1);
-        }
+        case LAYER_KIND_DENSE:
+            // dW += dl_dz^T * A_prev   ([nodes x batch] * [batch x prev_nodes])
+            k_gemm(1, 0, nodes, prev_nodes, (uint32_t)batch_size, 1.0f, dl_dz, A_prev, 1.0f,
+                   (VkBuf *)layer->t_gradients->gpu_buf);
 
-        // dl_dz_prev = dl_dz * W   ([batch x nodes] * [nodes x prev_nodes])
-        if (li > 1)
-            k_gemm(0, 0, (uint32_t)batch_size, prev_nodes, nodes, 1.0f, dl_dz,
-                   (VkBuf *)layer->t_weights->gpu_buf, 0.0f, (VkBuf *)prev->t_batch_dl_dz->gpu_buf);
+            // bias_grad += column sums of dl_dz
+            {
+                struct { uint32_t rows, cols; } p = { (uint32_t)batch_size, nodes };
+                VkBuf *bufs[2] = { dl_dz, (VkBuf *)layer->t_bias_grad->gpu_buf };
+                cmd_dispatch(K_BIAS_GRAD_SUM, bufs, 2, &p, sizeof(p), groups_for(nodes, 1), 1);
+            }
+
+            // dl_dz_prev = dl_dz * W   ([batch x nodes] * [nodes x prev_nodes])
+            if (dX)
+                k_gemm(0, 0, (uint32_t)batch_size, prev_nodes, nodes, 1.0f, dl_dz,
+                       (VkBuf *)layer->t_weights->gpu_buf, 0.0f, dX);
+            break;
+        case LAYER_KIND_CONV2D:
+            // the output layer's delta already has its derivative, unless the loss is MSE
+            encode_conv_backward(pnet, li, batch_size, dl_dz, dX,
+                                 li < pnet->layer_count - 1 || pnet->loss_type == LOSS_MSE ? layer->activation
+                                                                                            : ACTIVATION_NULL);
+            break;
+        case LAYER_KIND_MAXPOOL2D:
+            if (dX)
+                encode_maxpool_backward(pnet, li, batch_size, dl_dz, dX);
+            break;
+        case LAYER_KIND_UPSAMPLE2D:
+            if (dX)
+                encode_upsample(pnet, li, batch_size, dl_dz, dX, 1);
+            break;
+        case LAYER_KIND_FLATTEN:
+        case LAYER_KIND_RESHAPE:
+            if (dX)
+                cmd_copy(dl_dz, dX, count * sizeof(float));
+            break;
+        default:
+            g_vk.record_failed = 1;
+            return;
+        }
     }
 }
 
@@ -1356,7 +1735,7 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
     size_t target_bytes = (size_t)batch_size * output_nodes * sizeof(float);
     size_t loss_bytes = (size_t)batch_size * sizeof(float);
 
-    if (!ensure_training_buffers(pnet) ||
+    if (!ensure_training_buffers(pnet) || !ensure_layer_scratch(pnet, batch_size, 1) ||
         !ensure_buf(&g_vk.inputs, input_bytes) || !ensure_buf(&g_vk.targets, target_bytes) ||
         !ensure_buf(&g_vk.row_loss, loss_bytes))
         return 0;
@@ -1398,12 +1777,13 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
         PLayer dst = &pnet->layers[layer];
         PTensor mask = layer < out_idx ? dropout_mask(pnet, layer, batch_size) : NULL;
         VkBuf *X = layer == 1 ? g_vk.inputs : (VkBuf *)pnet->layers[layer - 1].t_batch_values->gpu_buf;
-        encode_dense_forward(pnet, layer, batch_size, X, (VkBuf *)dst->t_batch_values->gpu_buf,
+        encode_layer_forward(pnet, layer, batch_size, X, (VkBuf *)dst->t_batch_values->gpu_buf,
                              (VkBuf *)dst->t_batch_z->gpu_buf, mask ? (VkBuf *)mask->gpu_buf : NULL);
     }
 
     // Output delta = t - y and each row's loss; MSE then applies the output activation's
-    // derivative (cross-entropy with softmax or sigmoid needs none)
+    // derivative (cross-entropy with softmax or sigmoid needs none; a Conv2D output applies
+    // it in its backward pass)
     {
         struct { uint32_t rows, cols, mode; } p = {
             (uint32_t)batch_size, (uint32_t)output_nodes,
@@ -1412,7 +1792,7 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
         VkBuf *bufs[4] = { (VkBuf *)out->t_batch_values->gpu_buf, g_vk.targets,
                            (VkBuf *)out->t_batch_dl_dz->gpu_buf, g_vk.row_loss };
         cmd_dispatch(K_OUTPUT_DELTA_LOSS, bufs, 4, &p, sizeof(p), groups_for((size_t)batch_size, 64), 1);
-        if (pnet->loss_type == LOSS_MSE)
+        if (pnet->loss_type == LOSS_MSE && !conv_fuses_derivative(out))
             k_activation_derivative(out, batch_size);
     }
 

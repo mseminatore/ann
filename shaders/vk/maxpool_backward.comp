@@ -1,0 +1,38 @@
+#version 450
+#include "common.glsl"
+// MaxPool backward: dx = sum of dz over the outputs that took this input, a
+// gather over the windows covering it (one invocation per input, no atomics)
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufDz { float dz[]; };
+layout(std430, binding = 1) writeonly buffer BufDx { float dx[]; };
+layout(std430, binding = 2) readonly buffer BufArg { uint arg[]; };
+
+layout(push_constant) uniform Params { WindowDims d; } pc;
+
+void main()
+{
+    WindowDims d = pc.d;
+    GRID_LOOP(idx, d.batch * d.C * d.H * d.W)
+    {
+        uint iw = idx % d.W, t = idx / d.W;
+        uint ih = t % d.H;
+        uint plane = t / d.H;
+        uint me = ((plane % d.C) * d.H + ih) * d.W + iw;
+
+        // the outputs whose windows [o*S, o*S + K) contain ih and iw
+        uint oh0 = ih + 1 > d.K ? (ih + 1 - d.K + d.S - 1) / d.S : 0;
+        uint ow0 = iw + 1 > d.K ? (iw + 1 - d.K + d.S - 1) / d.S : 0;
+        uint oh1 = min(ih / d.S + 1, d.OH), ow1 = min(iw / d.S + 1, d.OW);
+        float s = 0.0;
+        for (uint oh = oh0; oh < oh1; oh++)
+            for (uint ow = ow0; ow < ow1; ow++)
+            {
+                uint out_i = (plane * d.OH + oh) * d.OW + ow;
+                if (arg[out_i] == me)
+                    s += dz[out_i];
+            }
+        dx[idx] = s;
+    }
+}

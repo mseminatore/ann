@@ -45,6 +45,18 @@ static int epoch_count = 5;
 static const char *model_file = NULL;
 
 //----------------------------------
+// an option's value: attached (-e2) or the next argument (-e 2)
+//----------------------------------
+static const char *option_value(int n, char *args[], int *i)
+{
+	if (args[*i][2])
+		return &args[*i][2];
+	if (*i + 1 < n)
+		return args[++*i];
+	return NULL;
+}
+
+//----------------------------------
 // get options from the command line
 //----------------------------------
 static int get_options(int n, char *args[])
@@ -52,12 +64,13 @@ static int get_options(int n, char *args[])
 	int i;
 	for (i = 1; (i < n) && (args[i][0] == '-'); i++)
 	{
+		const char *value;
 		if (args[i][1] == 'c')
 			use_cnn = 1;
-		else if (args[i][1] == 'e' && i + 1 < n)
-			epoch_count = atoi(args[++i]);
-		else if (args[i][1] == 'm' && i + 1 < n)
-			model_file = args[++i];
+		else if (args[i][1] == 'e' && (value = option_value(n, args, &i)))
+			epoch_count = atoi(value);
+		else if (args[i][1] == 'm' && (value = option_value(n, args, &i)))
+			model_file = value;
 	}
 	return i;
 }

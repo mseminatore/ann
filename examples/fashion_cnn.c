@@ -49,6 +49,18 @@ static int epoch_count = 3;
 static int use_gpu = 0;     // train on the GPU (-g, needs a USE_METAL build)
 
 //----------------------------------
+// an option's value: attached (-e2) or the next argument (-e 2)
+//----------------------------------
+static const char *option_value(int n, char *args[], int *i)
+{
+	if (args[*i][2])
+		return &args[*i][2];
+	if (*i + 1 < n)
+		return args[++*i];
+	return NULL;
+}
+
+//----------------------------------
 // get options from the command line
 //----------------------------------
 static int get_options(int n, char *args[])
@@ -56,10 +68,11 @@ static int get_options(int n, char *args[])
 	int i;
 	for (i = 1; (i < n) && (args[i][0] == '-'); i++)
 	{
-		if (args[i][1] == 'b' && i + 1 < n)
-			batch_size = atoi(args[++i]);
-		else if (args[i][1] == 'e' && i + 1 < n)
-			epoch_count = atoi(args[++i]);
+		const char *value;
+		if (args[i][1] == 'b' && (value = option_value(n, args, &i)))
+			batch_size = atoi(value);
+		else if (args[i][1] == 'e' && (value = option_value(n, args, &i)))
+			epoch_count = atoi(value);
 		else if (args[i][1] == 'g')
 			use_gpu = 1;
 	}

@@ -69,6 +69,7 @@ ANN_API int ann_gpu_init(void)
 }
 
 static void invoke_error_callback(int error_code, const char *function_name);
+static void apply_input_noise(const PNetwork pnet, real *values, int count);
 
 ANN_API int ann_gpu_upload_network(PNetwork pnet)
 {
@@ -2691,6 +2692,12 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->es_restore_best	= 0;
 	pnet->best_epoch		= 0;
 
+	// Input noise (disabled by default)
+	pnet->noise_type		= NOISE_NONE;
+	pnet->noise_amount		= (real)0.0;
+	pnet->noise_low			= (real)0.0;
+	pnet->noise_high		= (real)0.0;
+
 	switch(opt)
 	{
 	case OPT_MOMENTUM:
@@ -2812,17 +2819,10 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	if (!inputs || !outputs)
 		return 0.0;
 
-	if (rows <= 0)
-		return 0.0;
-
-	if (inputs->rows != rows)
-		return 0.0;
-
-	if (outputs->rows != rows)
-		return 0.0;
-
-	// the data's columns must match the input and output layers
-	if (pnet->layer_count < 2 || inputs->cols != pnet->layers[0].node_count ||
+	// rows must be the data's row count, and its columns must match the input
+	// and output layers
+	if (rows <= 0 || inputs->rows != rows || outputs->rows != rows ||
+		pnet->layer_count < 2 || inputs->cols != pnet->layers[0].node_count ||
 		outputs->cols != pnet->layers[pnet->layer_count - 1].node_count)
 	{
 		invoke_error_callback(ERR_INVALID, "ann_train_network");
@@ -2967,6 +2967,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 				       outputs->values + output_offset,
 				       output_node_count * sizeof(real));
 			}
+			apply_input_noise(pnet, batch_input->values, (int)actual_batch_size * input_node_count);
 
 		// Batched forward + backward + optimize (CPU or GPU path)
 #ifdef USE_GPU
@@ -3182,6 +3183,7 @@ real ann_train_step(PNetwork pnet, const real *inputs, const real *targets, int 
 	// Copy inputs into batch input tensor
 	PTensor batch_input = pnet->layers[0].t_batch_values;
 	memcpy(batch_input->values, inputs, actual_batch_size * input_node_count * sizeof(real));
+	apply_input_noise(pnet, batch_input->values, (int)actual_batch_size * input_node_count);
 
 	// Copy targets into batch target tensor
 	memcpy(batch_targets->values, targets, actual_batch_size * output_node_count * sizeof(real));
@@ -3618,6 +3620,114 @@ real ann_lr_scheduler_cosine(unsigned epoch, real base_lr, void *user_data)
 	
 	real cos_val = (real)cos(3.14159265358979323846 * (double)t / (double)params->T_max);
 	return params->min_lr + (base_lr - params->min_lr) * ((real)1.0 + cos_val) / (real)2.0;
+}
+
+//------------------------------
+// set the noise added to training inputs
+//------------------------------
+int ann_set_input_noise(PNetwork pnet, Noise_type type, real amount, real low, real high)
+{
+	if (!pnet)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_set_input_noise");
+		return ERR_NULL_PTR;
+	}
+
+	// written so that NaN fails every check
+	int ok = type >= NOISE_NONE && type <= NOISE_SALT_PEPPER && amount >= (real)0.0 &&
+	         amount <= (real)1e30 && low <= high && low >= (real)-1e30 && high <= (real)1e30;
+	if (ok && (type == NOISE_MASKING || type == NOISE_SALT_PEPPER))
+		ok = amount <= (real)1.0;
+	if (ok && type == NOISE_SALT_PEPPER)
+		ok = low < high;
+	if (!ok)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_set_input_noise");
+		return ERR_INVALID;
+	}
+
+	pnet->noise_type = type;
+	pnet->noise_amount = amount;
+	pnet->noise_low = low;
+	pnet->noise_high = high;
+	return ERR_OK;
+}
+
+//------------------------------
+// get the noise added to training inputs
+//------------------------------
+int ann_get_input_noise(const PNetwork pnet, Noise_type *type, real *amount, real *low, real *high)
+{
+	if (!pnet)
+		return ERR_NULL_PTR;
+	if (type) *type = pnet->noise_type;
+	if (amount) *amount = pnet->noise_amount;
+	if (low) *low = pnet->noise_low;
+	if (high) *high = pnet->noise_high;
+	return ERR_OK;
+}
+
+//------------------------------
+// a uniform random number in (0, 1]
+//------------------------------
+static double uniform_open(void)
+{
+	return ((double)rand() + 1.0) / ((double)RAND_MAX + 1.0);
+}
+
+//------------------------------
+// corrupt count values with the network's input noise (serially, with rand(),
+// so the draws don't depend on the thread count)
+//------------------------------
+static void apply_input_noise(const PNetwork pnet, real *values, int count)
+{
+	real amount = pnet->noise_amount, low = pnet->noise_low, high = pnet->noise_high;
+
+	switch (pnet->noise_type)
+	{
+	case NOISE_GAUSSIAN:
+		// Box-Muller: two normal values from two uniform ones
+		for (int i = 0; i < count; i += 2)
+		{
+			double r = sqrt(-2.0 * log(uniform_open())), theta = 6.283185307179586 * uniform_open();
+			values[i] += (real)(amount * r * cos(theta));
+			if (i + 1 < count)
+				values[i + 1] += (real)(amount * r * sin(theta));
+		}
+		break;
+	case NOISE_MASKING:
+		for (int i = 0; i < count; i++)
+			if (uniform_open() <= amount)
+				values[i] = (real)0.0;
+		break;
+	case NOISE_SALT_PEPPER:
+		for (int i = 0; i < count; i++)
+			if (uniform_open() <= amount)
+				values[i] = rand() % 2 ? high : low;
+		break;
+	default:
+		return;
+	}
+
+	if (low < high)
+		for (int i = 0; i < count; i++)
+			values[i] = values[i] < low ? low : (values[i] > high ? high : values[i]);
+}
+
+int ann_apply_input_noise(const PNetwork pnet, real *values, int count)
+{
+	if (!pnet || (!values && count > 0))
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_apply_input_noise");
+		return ERR_NULL_PTR;
+	}
+	if (count < 0)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_apply_input_noise");
+		return ERR_INVALID;
+	}
+	apply_input_noise(pnet, values, count);
+	return ERR_OK;
 }
 
 //------------------------------

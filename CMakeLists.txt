@@ -34,6 +34,7 @@ add_test(NAME test_comprehensive_callbacks COMMAND test_comprehensive_callbacks)
 add_test(NAME test_training_options COMMAND test_training_options)
 add_test(NAME test_conv COMMAND test_conv)
 add_test(NAME test_threads COMMAND test_threads)
+add_test(NAME test_noise COMMAND test_noise)
 
 # add the includes
 include_directories(${PROJECT_SOURCE_DIR})
@@ -180,6 +181,9 @@ target_link_libraries(mnist libann ${BLAS_LIB} ${MATH_LIB})
 add_executable(fashion_cnn examples/fashion_cnn.c)
 target_link_libraries(fashion_cnn libann ${BLAS_LIB} ${MATH_LIB})
 
+add_executable(fashion_dae examples/fashion_dae.c)
+target_link_libraries(fashion_dae libann ${BLAS_LIB} ${MATH_LIB})
+
 add_executable(export_model examples/export_model.c)
 target_link_libraries(export_model libann ${BLAS_LIB} ${MATH_LIB})
 
@@ -250,6 +254,9 @@ add_test(NAME test_training_convergence COMMAND test_training_convergence)
 add_executable(test_online_training tests/test_online_training.c testy/test_main.c)
 target_link_libraries(test_online_training libann ${BLAS_LIB} ${MATH_LIB})
 add_test(NAME test_online_training COMMAND test_online_training)
+
+add_executable(test_noise tests/test_noise.c testy/test_main.c)
+target_link_libraries(test_noise libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_json tests/test_json.c testy/test_main.c)
 target_link_libraries(test_json libann ${BLAS_LIB} ${MATH_LIB})

@@ -151,6 +151,9 @@ ann_set_weight_decay | set L2 regularization (weight decay) coefficient
 ann_set_l1_regularization | set L1 regularization (LASSO) coefficient
 ann_set_dropout | set default dropout rate for hidden layers
 ann_set_layer_dropout | set dropout rate for a specific layer
+ann_set_input_noise | corrupt training inputs (Gaussian, masking or salt-and-pepper), e.g. for denoising autoencoders
+ann_get_input_noise | get the input noise settings
+ann_apply_input_noise | apply the input noise to your own data (e.g. noisy test inputs)
 ann_get_layer_count | get the number of layers in the network
 ann_get_layer_nodes | get the number of nodes in a layer
 ann_get_layer_activation | get the activation type of a layer
@@ -250,6 +253,36 @@ ann_set_training_mode(net, 0);  // Disable dropout (inference)
 - Dropout is **automatically enabled** during `ann_train_network()` and disabled when training completes
 - Recommended rates: 0.2-0.5 for hidden layers, lower for layers with fewer neurons
 - Use dropout with larger networks to prevent overfitting
+
+## Input Noise
+
+`ann_set_input_noise` corrupts the inputs of every training batch while the
+targets stay as given, which is how a **denoising autoencoder** learns to
+remove noise: train it with the clean images as targets.
+
+```c
+// Gaussian noise with standard deviation 0.3, clamped to the pixel range [0, 1]
+ann_set_input_noise(net, NOISE_GAUSSIAN, 0.3f, 0.0f, 1.0f);
+ann_train_network(net, x_train, x_train, x_train->rows);
+
+// noisy test inputs made the same way, to measure how well it denoises
+ann_apply_input_noise(net, noisy_test, rows * cols);
+```
+
+Type | amount | Effect
+---- | ------ | ------
+`NOISE_GAUSSIAN` | standard deviation | adds normal noise
+`NOISE_MASKING` | probability | sets inputs to 0
+`NOISE_SALT_PEPPER` | probability | sets inputs to `low` or `high`
+
+When `low < high`, noisy values are clamped to `[low, high]` (pass `0, 0` for
+no clamp). Noise is drawn fresh for every batch, on the CPU with `rand()`, so
+GPU training and any thread count give the same results; predictions and
+evaluation use the inputs as given. The setting is not saved with the model.
+The `fashion_dae` example trains a convolutional denoising autoencoder on
+Fashion-MNIST: 5 epochs (about 80 seconds on a 4-core Intel Mac CPU) raise the
+test images' PSNR from 12.8 dB with noise to 19.2 dB, and it writes the clean,
+noisy and denoised images as `fashion_dae.pgm` and `fashion_dae.png`.
 
 ## Confusion Matrix & MCC
 
@@ -894,6 +927,7 @@ with the library and its usage. These are:
 * **save_test_binary** - demonstrates loading and testing a pre-trained binary model file
 * **mnist** - model for the MNIST datasets (digit or fashion)
 * **fashion_cnn** - convolutional network (conv, max pooling, flatten) for Fashion-MNIST
+* **fashion_dae** - convolutional denoising autoencoder (pooling, upsampling, input noise) for Fashion-MNIST; writes before/after images as PGM and PNG
 * **mnist_hypertune_tpe** - TPE hyperparameter search on Fashion-MNIST, including per-layer activations
 * **mnist_hypertune_random** - random search over the full search space on Fashion-MNIST
 * **mnist_hypertune_bayes** - Bayesian (Gaussian Process) optimization on Fashion-MNIST

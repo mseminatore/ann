@@ -105,6 +105,8 @@ typedef struct {
     id<MTLComputePipelineState> pso_conv_col2im;
     id<MTLComputePipelineState> pso_maxpool_forward;
     id<MTLComputePipelineState> pso_maxpool_backward;
+    id<MTLComputePipelineState> pso_upsample_forward;
+    id<MTLComputePipelineState> pso_upsample_backward;
     id<MTLComputePipelineState> pso_copy_buffer;
     id<MTLComputePipelineState> pso_transpose;
     // Transposed copies of GEMM right-hand operands, by source buffer (see
@@ -632,6 +634,25 @@ int tensor_metal_init(void)
         "        for (uint ow = ow0; ow < ow1; ow++) {\n"
         "            uint out = (gid.z * d.OH + oh) * d.OW + ow;\n"
         "            if (arg[out] == me) s += dz[out]; }\n"
+        "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
+        // Nearest-neighbour upsampling by K (the scale): each input fills a
+        // K x K block; grid (OW, OH, batch*C)
+        "kernel void upsample_forward(\n"
+        "    device const float *x [[buffer(0)]],\n"
+        "    device float *y [[buffer(1)]],\n"
+        "    constant WindowDims &d [[buffer(2)]],\n"
+        "    uint3 gid [[thread_position_in_grid]]) {\n"
+        "    y[(gid.z * d.OH + gid.y) * d.OW + gid.x] = x[(gid.z * d.H + gid.y / d.K) * d.W + gid.x / d.K]; }\n"
+        // dx = sum of dz over the input's block, in the CPU's order; grid (W, H, batch*C)
+        "kernel void upsample_backward(\n"
+        "    device const float *dz [[buffer(0)]],\n"
+        "    device float *dx [[buffer(1)]],\n"
+        "    constant WindowDims &d [[buffer(2)]],\n"
+        "    uint3 gid [[thread_position_in_grid]]) {\n"
+        "    device const float *block = dz + (gid.z * d.OH + gid.y * d.K) * d.OW + gid.x * d.K;\n"
+        "    float s = 0.0f;\n"
+        "    for (uint i = 0; i < d.K; i++)\n"
+        "        for (uint j = 0; j < d.K; j++) s += block[i * d.OW + j];\n"
         "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n";
 
     NSError *err = nil;
@@ -705,6 +726,8 @@ int tensor_metal_init(void)
     g_metal.pso_sum_partials     = make_pso(g_metal.library, "sum_partials");
     g_metal.pso_maxpool_forward  = make_pso(g_metal.library, "maxpool_forward");
     g_metal.pso_maxpool_backward = make_pso(g_metal.library, "maxpool_backward");
+    g_metal.pso_upsample_forward = make_pso(g_metal.library, "upsample_forward");
+    g_metal.pso_upsample_backward = make_pso(g_metal.library, "upsample_backward");
     g_metal.pso_copy_buffer      = make_pso(g_metal.library, "copy_buffer");
     g_metal.pso_transpose        = make_pso(g_metal.library, "transpose");
 
@@ -713,6 +736,7 @@ int tensor_metal_init(void)
         !g_metal.pso_conv_weight_grad_lanes || !g_metal.pso_conv_weight_grad_lanes_vec4 ||
         !g_metal.pso_sum_partials ||
         !g_metal.pso_maxpool_forward || !g_metal.pso_maxpool_backward || !g_metal.pso_copy_buffer ||
+        !g_metal.pso_upsample_forward || !g_metal.pso_upsample_backward ||
         !g_metal.pso_transpose)
         return 0;
 
@@ -1208,6 +1232,25 @@ static int encode_maxpool_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int 
 }
 
 //-----------------------------------------------------------
+// Upsample2D forward and backward: gathers, so no atomics or zeroing
+//-----------------------------------------------------------
+static void encode_upsample_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
+                                    id<MTLBuffer> X, id<MTLBuffer> Y)
+{
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    id<MTLBuffer> bufs[2] = { X, Y };
+    encode_grid(cmd, g_metal.pso_upsample_forward, bufs, 2, &d, sizeof(d), MTLSizeMake(d.OW, d.OH, (NSUInteger)batch_size * d.C));
+}
+
+static void encode_upsample_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
+                                     id<MTLBuffer> dZ, id<MTLBuffer> dX)
+{
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    id<MTLBuffer> bufs[2] = { dZ, dX };
+    encode_grid(cmd, g_metal.pso_upsample_backward, bufs, 2, &d, sizeof(d), MTLSizeMake(d.W, d.H, (NSUInteger)batch_size * d.C));
+}
+
+//-----------------------------------------------------------
 // 1 if every parameter of the layer is on the GPU
 //-----------------------------------------------------------
 static int layer_on_gpu(const Layer *l)
@@ -1271,7 +1314,11 @@ static int encode_layer_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
     case LAYER_KIND_MAXPOOL2D:
         if (!encode_maxpool_forward(cmd, pnet, layer, batch_size, X, Y)) return 0;
         break;
+    case LAYER_KIND_UPSAMPLE2D:
+        encode_upsample_forward(cmd, pnet, layer, batch_size, X, Y);
+        break;
     case LAYER_KIND_FLATTEN:
+    case LAYER_KIND_RESHAPE:
         encode_copy(cmd, X, Y, count);
         break;
     default:
@@ -1344,8 +1391,8 @@ static int metal_upload_network(PNetwork pnet)
     // Every layer kind in ann.h is implemented; reject any added later
     for (int layer = 0; layer < pnet->layer_count; layer++) {
         Layer_kind kind = pnet->layers[layer].kind;
-        if (kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D &&
-            kind != LAYER_KIND_MAXPOOL2D && kind != LAYER_KIND_FLATTEN)
+        if (kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D && kind != LAYER_KIND_MAXPOOL2D &&
+            kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE)
             return ERR_INVALID;
     }
 
@@ -1764,7 +1811,11 @@ static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_si
         case LAYER_KIND_MAXPOOL2D:
             if (dX && !encode_maxpool_backward(cmd, pnet, li, batch_size, dl_dz, dX)) return 0;
             break;
+        case LAYER_KIND_UPSAMPLE2D:
+            if (dX) encode_upsample_backward(cmd, pnet, li, batch_size, dl_dz, dX);
+            break;
         case LAYER_KIND_FLATTEN:
+        case LAYER_KIND_RESHAPE:
             if (dX) encode_copy(cmd, dl_dz, dX, count);
             break;
         default:

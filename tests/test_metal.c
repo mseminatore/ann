@@ -549,6 +549,53 @@ void test_main(int argc, char *argv[])
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 
+        // a conv autoencoder (pool 3, upsample 3) trained to reproduce its inputs
+        cpu_net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        gpu_net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        PNetwork ae[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(ae[i], 2, 9, 9);
+            ann_add_conv2d(ae[i], 4, 3, 1, 1, ACTIVATION_RELU);     // 4x9x9
+            ann_add_maxpool2d(ae[i], 3, 3);                         // 4x3x3
+            ann_add_upsample2d(ae[i], 3);                           // 4x9x9
+            ann_add_conv2d(ae[i], 2, 3, 1, 1, ACTIVATION_SIGMOID);  // 2x9x9
+            ann_set_learning_rate(ae[i], 0.01f);
+            ann_set_convergence(ae[i], 0.0f);
+            ann_set_epoch_limit(ae[i], 3);
+            ann_set_batch_size(ae[i], 8);
+        }
+        TESTEX("A network with upsampling uploads", ann_gpu_upload_network(gpu_net) == ERR_OK);
+        train_cnn(cpu_net, inputs, inputs);
+        train_cnn(gpu_net, inputs, inputs);
+        TESTEX("GPU autoencoder training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        TESTEX("GPU autoencoder inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
+        // a dense bottleneck reshaped to an image, upsampled and convolved
+        cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        gpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        PNetwork bottleneck[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(bottleneck[i], 2, 9, 9);
+            ann_add_layer(bottleneck[i], 8, LAYER_HIDDEN, ACTIVATION_TANH);
+            ann_add_reshape(bottleneck[i], 2, 2, 2);
+            ann_add_upsample2d(bottleneck[i], 2);                         // 2x4x4
+            ann_add_conv2d(bottleneck[i], 3, 3, 1, 1, ACTIVATION_RELU);   // 3x4x4
+            ann_add_layer(bottleneck[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(bottleneck[i], 0.01f);
+            ann_set_convergence(bottleneck[i], 0.0f);
+            ann_set_epoch_limit(bottleneck[i], 3);
+            ann_set_batch_size(bottleneck[i], 8);
+        }
+        TESTEX("A network with a reshape uploads", ann_gpu_upload_network(gpu_net) == ERR_OK);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU dense -> reshape -> upsample training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        TESTEX("and its inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
         // pooling straight off the input: the first layer has no parameters
         PNetwork pool_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
         ann_add_input(pool_net, 2, 9, 9);

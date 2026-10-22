@@ -605,7 +605,10 @@ the number of processors.
 
 Training prints what it runs on, e.g. `Backend: CPU, 8 threads, no BLAS`,
 `Backend: CPU, 8 threads, Accelerate BLAS` or `Backend: Metal GPU`, and
-`ann_get_backend_info()` reports the same for your own code:
+`ann_get_backend_info()` reports the same for your own code. A library built
+without optimization (e.g. a CMake `Debug` build, which a reused build
+directory can keep from an earlier configure) adds `unoptimized build` to the
+line, since it trains several times slower:
 
 ```c
 Backend_info info;

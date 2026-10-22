@@ -1398,6 +1398,8 @@ typedef struct {
 	int gpu_active;						// 1 once ann_gpu_init() has started the GPU backend
 	int threads;						// CPU threads for libann's own loops (ann_get_num_threads())
 	int real_bytes;						// sizeof(real): 4 (float) or 8 (double)
+	int optimized;						// 0 for an unoptimized (e.g. Debug, -O0) build of libann, which
+										// runs much slower
 } Backend_info;
 
 /**

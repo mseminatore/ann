@@ -157,6 +157,11 @@ void test_main(int argc, char *argv[])
         ann_set_num_threads(3);
         TESTEX("reports the thread count and number size", ann_get_backend_info(&info) == ERR_OK &&
                info.threads == 3 && info.real_bytes == (int)sizeof(real));
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+        TESTEX("and that the build is optimized", info.optimized == 1);
+#else
+        TESTEX("and that the build is unoptimized", info.optimized == 0);
+#endif
 #if defined(USE_BLAS)
         TESTEX("and a BLAS library", info.blas && strcmp(info.blas, "none") != 0);
 #else
@@ -177,6 +182,7 @@ void test_main(int argc, char *argv[])
         ann_print_props(net);
         TESTEX("ann_print_props prints the CPU backend with its threads",
                strstr(g_printed, "Backend:") && strstr(g_printed, "CPU, 3 threads, "));
+        TESTEX("and notes an unoptimized build", (strstr(g_printed, "unoptimized build") != NULL) == !info.optimized);
         ann_free_network(net);
         ann_set_num_threads(0);
     }

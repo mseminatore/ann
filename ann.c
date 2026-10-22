@@ -4516,6 +4516,13 @@ int ann_get_backend_info(Backend_info *info)
 	info->gpu_active = g_gpu_backend != NULL;
 	info->threads = ann_get_num_threads();
 	info->real_bytes = (int)sizeof(real);
+	// gcc and clang define __OPTIMIZE__ at -O1 and above; MSVC defines no
+	// macro for /O1 or /O2, only _DEBUG for debug builds
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+	info->optimized = 1;
+#else
+	info->optimized = 0;
+#endif
 	return ERR_OK;
 }
 
@@ -4547,13 +4554,15 @@ void ann_print_props(const PNetwork pnet)
 #ifdef USE_GPU
 	if (gpu_uploaded(pnet))
 	{
-		ann_printf(pnet, "%s        Backend:%s %s%s GPU%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_GREEN), info.gpu, RESET());
+		ann_printf(pnet, "%s        Backend:%s %s%s GPU%s%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_GREEN), info.gpu,
+		           info.optimized ? "" : ", unoptimized build", RESET());
 		return;
 	}
 #endif
-	ann_printf(pnet, "%s        Backend:%s %sCPU, %d thread%s, %s%s%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_GREEN),
+	ann_printf(pnet, "%s        Backend:%s %sCPU, %d thread%s, %s%s%s%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_GREEN),
 	           info.threads, info.threads == 1 ? "" : "s",
-	           strcmp(info.blas, "none") == 0 ? "no BLAS" : info.blas, strcmp(info.blas, "none") == 0 ? "" : " BLAS", RESET());
+	           strcmp(info.blas, "none") == 0 ? "no BLAS" : info.blas, strcmp(info.blas, "none") == 0 ? "" : " BLAS",
+	           info.optimized ? "" : ", unoptimized build", RESET());
 }
 
 //-----------------------------------------------

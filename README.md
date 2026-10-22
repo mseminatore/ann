@@ -641,12 +641,19 @@ matrix multiplies over the cores.
 
 # GPU training and inference
 
-libann can run training and inference on the GPU. Two backends are supported:
+libann can run training and inference on the GPU. Three backends are supported:
 
 | Backend | CMake Flag | Platforms | Requirements |
 |---------|------------|-----------|--------------|
 | Apple Metal | `-DUSE_METAL=1` | macOS | Metal-capable GPU, Xcode Command Line Tools |
 | NVIDIA CUDA | `-DUSE_CUDA=1` | Windows, Linux | NVIDIA GPU, CUDA Toolkit (`cudart`, `cublas`) |
+| Vulkan | `-DUSE_VULKAN=1` | Windows, Linux | Any Vulkan 1.1 GPU (AMD, Intel, NVIDIA); Vulkan SDK or `libvulkan-dev` + `glslc` to build |
+
+Metal runs every layer kind; CUDA and Vulkan run dense networks, and keep CNNs
+on the CPU. A build may include several backends: `ann_gpu_init()` starts the
+first that works (Metal, then CUDA, then Vulkan), and the `ANN_GPU` environment
+variable (`metal`, `cuda`, `vulkan` or `none`) picks one. See
+[docs/GPU_VULKAN.md](docs/GPU_VULKAN.md) for the Vulkan backend.
 
 When a GPU backend is active, `ann_train_network()` runs each mini-batch
 entirely on the GPU — forward pass, backpropagation, and the optimizer update
@@ -662,6 +669,10 @@ cmake --build . --config Release
 
 # NVIDIA CUDA
 cmake -DUSE_CUDA=1 ..
+cmake --build . --config Release
+
+# Vulkan (AMD, Intel or NVIDIA)
+cmake -DUSE_VULKAN=1 ..
 cmake --build . --config Release
 ```
 
@@ -701,7 +712,7 @@ trained weights back to the CPU before saving:
     ann_free_network(pnet);
 ```
 
-`USE_GPU` is defined automatically when either backend is enabled. If the
+`USE_GPU` is defined automatically when any backend is enabled. If the
 network was never uploaded, every call falls back to the CPU path.
 
 Once uploaded, `ann_predict()` and `ann_predict_batch()` also run on the GPU.

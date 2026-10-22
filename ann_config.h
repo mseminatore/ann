@@ -34,9 +34,13 @@
 // define to compile in CUDA GPU support (requires NVIDIA GPU + CUDA Toolkit)
 //#define USE_CUDA
 
+// define to compile in Vulkan GPU support (AMD, Intel and NVIDIA GPUs; needs the Vulkan headers
+// to build and a Vulkan driver to run)
+//#define USE_VULKAN
+
 // USE_GPU is set automatically when any GPU backend is active.
 // Use #ifdef USE_GPU in portable code instead of testing each backend.
-#if defined(USE_METAL) || defined(USE_CUDA)
+#if defined(USE_METAL) || defined(USE_CUDA) || defined(USE_VULKAN)
 #  define USE_GPU
 #endif
 

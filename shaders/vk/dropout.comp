@@ -1,0 +1,32 @@
+#version 450
+#include "common.glsl"
+// Dropout with a mask of 0 or 1/(1-rate) drawn on the host.
+// Forward: a *= mask. Backward: mask the gradient and restore the kept
+// activations to their values before dropout, for the activation derivative.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer BufA { float a[]; };
+layout(std430, binding = 1) readonly buffer BufMask { float mask[]; };
+layout(std430, binding = 2) buffer BufDelta { float dl_dz[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint backward;
+} pc;
+
+void main()
+{
+    GRID_LOOP(i, pc.n)
+    {
+        float m = mask[i];
+        if (pc.backward == 0)
+            a[i] *= m;
+        else
+        {
+            dl_dz[i] *= m;
+            if (m != 0.0)
+                a[i] /= m;
+        }
+    }
+}

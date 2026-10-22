@@ -32,15 +32,16 @@
 // This header defines the GpuBackend vtable used by ann.c to dispatch GPU operations.
 // It is an internal interface — not part of the public libann API.
 //
-// Each backend (Metal, CUDA, ...) implements all slots and registers a static GpuBackend instance.
-// ann_gpu_init() selects the appropriate backend at startup and sets g_gpu_backend.
+// Each backend (Metal, CUDA, Vulkan) implements all slots and registers a GpuBackend instance.
+// ann_gpu_init() tries the compiled-in backends in order (Metal, CUDA, Vulkan), or only the
+// one the ANN_GPU environment variable names, and sets g_gpu_backend to the first that starts.
 //
 // Adding a new backend requires only:
 //   1. A new implementation file (e.g., tensor_cuda.cu) that fills in all vtable slots
-//   2. A new #ifdef block in ann_gpu_init() (in ann.c)
-//   3. A tensor_gpu_release_buffer() implementation (called from tensor_free())
+//   2. An entry in the backend list in ann_gpu_init() (in ann.c)
+//   3. Its USE_xxx define in the USE_GPU condition in ann_config.h
 //
-// ann.c never contains backend-specific code beyond the #ifdef in ann_gpu_init().
+// ann.c never contains backend-specific code beyond that list.
 //================================================================================================
 
 #include "ann.h"
@@ -52,6 +53,12 @@
  * If a backend does not support an operation it should return 0/ERR_FAIL gracefully.
  */
 typedef struct {
+    /**
+     * Backend name ("Metal", "CUDA", "Vulkan"), reported by ann_get_backend_info()
+     * and matched (ignoring case) against the ANN_GPU environment variable.
+     */
+    const char *name;
+
     /**
      * Initialize the GPU device and compile/load kernels.
      * @return 1 on success, 0 on failure.

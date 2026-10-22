@@ -812,14 +812,16 @@ ANN_API void ann_train_end(PNetwork pnet);
 ANN_API int ann_predict(const PNetwork pnet, const real *inputs, real *outputs);
 
 // ============================================================================
-// GPU ACCELERATION (requires USE_METAL or USE_CUDA; see ann_config.h)
+// GPU ACCELERATION (requires USE_METAL, USE_CUDA or USE_VULKAN; see ann_config.h)
 // ============================================================================
 
 /**
  * Initialize the GPU compute context.
  *
- * Selects the best available GPU backend (Metal on macOS, CUDA on NVIDIA),
- * creates the device, command queue, and compiles/loads kernels.
+ * Starts the first compiled-in GPU backend that initializes, trying Metal
+ * (macOS), CUDA (NVIDIA) and Vulkan (AMD, Intel, NVIDIA) in that order; the
+ * ANN_GPU environment variable ("metal", "cuda", "vulkan" or "none") limits
+ * it to one backend. Creates the device, command queue, and compiles/loads kernels.
  * Must be called before any other ann_gpu_* function.
  *
  * @return 1 on success, 0 if no GPU backend is available or initialization fails
@@ -1394,7 +1396,8 @@ ANN_API int ann_get_num_threads(void);
 typedef struct {
 	const char *blas;					// BLAS library: "none" (libann's own loops), "Accelerate",
 										// "OpenBLAS", "MKL", "CBLAS" or "BLAS" (another one)
-	const char *gpu;					// GPU backend compiled in: "Metal", "CUDA" or "none"
+	const char *gpu;					// GPU backend: the running one once ann_gpu_init() starts it, else
+										// the first compiled in ("Metal", "CUDA", "Vulkan"), or "none"
 	int gpu_active;						// 1 once ann_gpu_init() has started the GPU backend
 	int threads;						// CPU threads for libann's own loops (ann_get_num_threads())
 	int real_bytes;						// sizeof(real): 4 (float) or 8 (double)

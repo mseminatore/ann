@@ -150,18 +150,64 @@ if ( USE_CUDA )
     set(CUDA_LIBS CUDA::cudart CUDA::cublas)
 endif()
 
+# build with or without Vulkan GPU support (AMD, Intel and NVIDIA GPUs). Needs the Vulkan
+# headers and glslc (Vulkan SDK, or libvulkan-dev + glslc on Linux) to build. The loader is
+# opened at run time, so the result also runs, on the CPU, where Vulkan is not installed.
+set(VULKAN_SRC "")
+set(VULKAN_LIBS "")
+if ( USE_VULKAN )
+    find_package(Vulkan REQUIRED)
+    if (NOT Vulkan_GLSLC_EXECUTABLE)
+        message(FATAL_ERROR "USE_VULKAN needs glslc (install the Vulkan SDK, or the glslc package)")
+    endif()
+    message("Vulkan GPU build requested...")
+    add_compile_options(-DUSE_VULKAN)
+    # compile each shader to SPIR-V, then embed them all in shaders_vk_spv.h
+    set(VULKAN_SHADERS gemm bias_act softmax act_deriv softmax_jacobian output_delta_loss
+                       bias_grad_sum grad_clip optimizer regularize dropout)
+    set(VULKAN_SPV_DIR ${CMAKE_CURRENT_BINARY_DIR}/vk_spv)
+    file(MAKE_DIRECTORY ${VULKAN_SPV_DIR})
+    set(VULKAN_SPV_FILES "")
+    foreach(shader ${VULKAN_SHADERS})
+        add_custom_command(
+            OUTPUT ${VULKAN_SPV_DIR}/${shader}.spv
+            COMMAND ${Vulkan_GLSLC_EXECUTABLE} --target-env=vulkan1.1 -O
+                    -I ${CMAKE_SOURCE_DIR}/shaders/vk
+                    -o ${VULKAN_SPV_DIR}/${shader}.spv ${CMAKE_SOURCE_DIR}/shaders/vk/${shader}.comp
+            DEPENDS shaders/vk/${shader}.comp shaders/vk/common.glsl
+            COMMENT "Compiling Vulkan shader ${shader}.comp"
+            VERBATIM)
+        list(APPEND VULKAN_SPV_FILES ${VULKAN_SPV_DIR}/${shader}.spv)
+    endforeach()
+    # the names go comma-separated: a ';' list would end the command in a Unix shell
+    string(REPLACE ";" "," VULKAN_SHADER_NAMES "${VULKAN_SHADERS}")
+    add_custom_command(
+        OUTPUT ${VULKAN_SPV_DIR}/shaders_vk_spv.h
+        COMMAND ${CMAKE_COMMAND} -DSPV_DIR=${VULKAN_SPV_DIR} -DNAMES=${VULKAN_SHADER_NAMES}
+                -DOUT=${VULKAN_SPV_DIR}/shaders_vk_spv.h -P ${CMAKE_SOURCE_DIR}/cmake/embed_spirv.cmake
+        DEPENDS ${VULKAN_SPV_FILES} cmake/embed_spirv.cmake
+        COMMENT "Embedding Vulkan shaders"
+        VERBATIM)
+    set(VULKAN_SRC tensor_vulkan.c ${VULKAN_SPV_DIR}/shaders_vk_spv.h)
+    # dlopen() on Linux/macOS
+    set(VULKAN_LIBS ${CMAKE_DL_LIBS})
+endif()
+
 # add the core library (includes hypertuning)
 if (BUILD_SHARED)
-    add_library(libann SHARED ann.c tensor.c ann_hypertune.c json.c ann_quantize.c ${METAL_SRC} ${CUDA_SRC})
+    add_library(libann SHARED ann.c tensor.c ann_hypertune.c json.c ann_quantize.c ${METAL_SRC} ${CUDA_SRC} ${VULKAN_SRC})
     target_compile_definitions(libann PRIVATE ANN_BUILDING_DLL)
     # export only ANN_API-marked functions (matches Windows dllexport behavior)
     set_target_properties(libann PROPERTIES C_VISIBILITY_PRESET hidden CUDA_VISIBILITY_PRESET hidden)
 else()
-    add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c ann_quantize.c ${METAL_SRC} ${CUDA_SRC})
+    add_library(libann STATIC ann.c tensor.c ann_hypertune.c json.c ann_quantize.c ${METAL_SRC} ${CUDA_SRC} ${VULKAN_SRC})
+endif()
+if ( USE_VULKAN )
+    target_include_directories(libann PRIVATE ${Vulkan_INCLUDE_DIRS} ${VULKAN_SPV_DIR})
 endif()
 # ann_parallel_for's worker threads (pthreads; nothing extra on Windows)
 find_package(Threads REQUIRED)
-target_link_libraries(libann ${METAL_LIB} ${CUDA_LIBS} Threads::Threads)
+target_link_libraries(libann ${METAL_LIB} ${CUDA_LIBS} ${VULKAN_LIBS} Threads::Threads)
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
 # install rules
@@ -274,7 +320,20 @@ if ( USE_CUDA )
     add_test(NAME test_cuda COMMAND test_cuda)
 endif()
 
-if ( USE_METAL OR USE_CUDA )
+if ( USE_VULKAN )
+    add_executable(test_vulkan tests/test_vulkan.c testy/test_main.c)
+    target_link_libraries(test_vulkan libann ${BLAS_LIB} ${MATH_LIB})
+    add_test(NAME test_vulkan COMMAND test_vulkan)
+    # again with each of the two ways data reaches the GPU, whichever one this machine's
+    # GPU takes by default: copies through a staging buffer (discrete GPUs without resizable
+    # BAR) and mapped device memory (integrated GPUs, resizable BAR)
+    add_test(NAME test_vulkan_staging COMMAND test_vulkan)
+    set_tests_properties(test_vulkan_staging PROPERTIES ENVIRONMENT "ANN_VK_STAGING=1")
+    add_test(NAME test_vulkan_mapped COMMAND test_vulkan)
+    set_tests_properties(test_vulkan_mapped PROPERTIES ENVIRONMENT "ANN_VK_STAGING=0")
+endif()
+
+if ( USE_METAL OR USE_CUDA OR USE_VULKAN )
     add_executable(bench_gpu_training examples/bench_gpu_training.c)
     target_link_libraries(bench_gpu_training libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB} ${CUDA_LIBS})
 endif()

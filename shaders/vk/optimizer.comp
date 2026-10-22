@@ -1,0 +1,71 @@
+#version 450
+#include "common.glsl"
+// One optimizer update of a parameter w from its gradient g (which holds
+// -dL/dw, so every update adds), with its optimizer state m and v. The host
+// binds w in place of state an optimizer does not use.
+
+layout(local_size_x = 256) in;
+
+#define OPT_SGD      0
+#define OPT_MOMENTUM 1
+#define OPT_ADAGRAD  2
+#define OPT_RMSPROP  3
+#define OPT_ADAM     4
+
+layout(std430, binding = 0) buffer BufW { float w[]; };
+layout(std430, binding = 1) readonly buffer BufG { float g[]; };
+layout(std430, binding = 2) buffer BufM { float m[]; };
+layout(std430, binding = 3) buffer BufV { float v[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint opt;
+    float lr;
+    float beta;     // Momentum and RMSProp
+    float beta1, beta2, eps;
+    float bc1, bc2; // Adam bias corrections 1 / (1 - beta^t)
+} pc;
+
+void main()
+{
+    GRID_LOOP(i, pc.n)
+    {
+        float gi = g[i];
+        switch (pc.opt)
+        {
+        case OPT_SGD:
+            w[i] += pc.lr * gi;
+            break;
+        case OPT_MOMENTUM:
+        {
+            float mi = pc.beta * m[i] + (1.0 - pc.beta) * gi;
+            m[i] = mi;
+            w[i] += pc.lr * mi;
+            break;
+        }
+        case OPT_ADAGRAD:
+        {
+            float vi = v[i] + gi * gi;
+            v[i] = vi;
+            w[i] += pc.lr * gi / (sqrt(vi) + pc.eps);
+            break;
+        }
+        case OPT_RMSPROP:
+        {
+            float vi = pc.beta * v[i] + (1.0 - pc.beta) * gi * gi;
+            v[i] = vi;
+            w[i] += pc.lr * gi / (sqrt(vi) + pc.eps);
+            break;
+        }
+        case OPT_ADAM:
+        {
+            float mi = pc.beta1 * m[i] + (1.0 - pc.beta1) * gi;
+            float vi = pc.beta2 * v[i] + (1.0 - pc.beta2) * gi * gi;
+            m[i] = mi;
+            v[i] = vi;
+            w[i] += pc.lr * (mi * pc.bc1) / (sqrt(vi * pc.bc2) + pc.eps);
+            break;
+        }
+        }
+    }
+}

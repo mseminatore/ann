@@ -15,6 +15,11 @@ ann_export_onnx(pnet, "model.onnx.json");
 - Convolutional networks export `Conv` (weights `[F, C, k, k]`, `kernel_shape`,
   `strides`, `pads`), `MaxPool` and `Flatten` nodes with a `[batch, C, H, W]`
   input; a `Flatten` is inserted before a dense layer that receives an image
+- Upsampling layers export `Resize` (`mode = nearest`, `asymmetric`
+  coordinates, `floor` rounding, as PyTorch writes `nn.Upsample`) with a
+  `scales` initializer `[1, 1, s, s]`; reshape layers export `Reshape` with a
+  shape initializer `[-1, C, H, W]`. A model that starts with dense layers
+  keeps a `[batch, n]` input.
 - `weight_N` has dims `[in_nodes, out_nodes]`, the layout ONNX `MatMul` expects
   (libann stores weights as `[out, in]` internally and transposes them on export)
 - Input shape: `[batch, input_size]` with dynamic batch dimension
@@ -51,6 +56,8 @@ ONNX node | libann layer
 `Conv` | conv layer (square kernel, equal strides and pads, no dilation or groups; bias optional)
 `MaxPool` | max pooling layer (square window, equal strides, no padding, `ceil_mode = 0`)
 `Flatten` (axis 1) | flatten layer (libann's own `flatten_input_N` nodes are skipped)
+`Resize`, `Upsample` | upsampling layer (`nearest` mode, one integer scale on H and W from `scales` or output `sizes`; `asymmetric` coordinates with `floor` rounding, or `half_pixel` with rounding)
+`Reshape` | reshape layer to a constant `[batch, C, H, W]` shape (`0` copies a dimension, one `-1` is inferred); a `[batch, n]` shape is a flatten
 `Relu`, `LeakyRelu` (alpha 0.01), `Sigmoid`, `Tanh`, `Softsign`, `Softmax`, `Gelu` (`approximate="tanh"`) | the activation of the layer before it
 
 - Reads libann's JSON and the JSON written by protobuf's printer
@@ -76,9 +83,12 @@ ann_export_onnx(net, "model.onnx.json");                // 1.1 file
 
 - Reads JSON, not binary `.onnx` files: convert with `json_format.MessageToJson(onnx.load("model.onnx"))`
 - Anything libann can't reproduce exactly is rejected with `NULL` and an error
-  callback message: branching graphs, other ops (e.g. `AveragePool`, `Reshape`,
-  `BatchNormalization`), dilated or grouped convolutions, padded or `ceil_mode`
-  pooling, the exact (erf) `Gelu`, or an activation after a pool/flatten layer
+  callback message: branching graphs, other ops (e.g. `AveragePool`,
+  `ConvTranspose`, `BatchNormalization`), dilated or grouped convolutions,
+  padded or `ceil_mode` pooling, linear or fractional `Resize`, a `Reshape`
+  whose shape is computed in the graph (`Shape` → `Gather` → `Concat`), the
+  exact (erf) `Gelu`, or an activation after a pool/flatten/upsample/reshape
+  layer
 - Does not restore: optimizer state, learning rate, dropout rates, training history
 - Imported networks default to `OPT_ADAM` and `LOSS_MSE`
 

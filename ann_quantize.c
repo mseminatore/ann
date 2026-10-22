@@ -176,7 +176,9 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 		case LAYER_KIND_DENSE:		l->kind = ANN_RT_DENSE; break;
 		case LAYER_KIND_CONV2D:		l->kind = ANN_RT_CONV2D; break;
 		case LAYER_KIND_MAXPOOL2D:	l->kind = ANN_RT_MAXPOOL2D; break;
-		case LAYER_KIND_FLATTEN:	l->kind = ANN_RT_FLATTEN; break;
+		case LAYER_KIND_FLATTEN:
+		case LAYER_KIND_RESHAPE:	l->kind = ANN_RT_FLATTEN; break;
+		case LAYER_KIND_UPSAMPLE2D:	l->kind = ANN_RT_UPSAMPLE2D; break;
 		default:
 			free_float_layers(layers, count);
 			return ERR_INVALID;
@@ -343,6 +345,8 @@ static int calibrate(const ann_rt_model *model, const PTensor inputs, Range *in_
 				continue;
 			if (l->kind == ANN_RT_MAXPOOL2D)
 				ann_rt_maxpool_f(l, src, dst);
+			else if (l->kind == ANN_RT_UPSAMPLE2D)
+				ann_rt_upsample_f(l, src, dst);
 			else
 			{
 				ann_rt_linear_f(l, src, dst);
@@ -539,7 +543,7 @@ PQuantizedNetwork ann_quantize(const PNetwork pnet, const PTensor calibration_in
 				goto done;
 		}
 		else
-			l->in_zp = l->zp = zp;		// pooling and flatten keep the input's quantization
+			l->in_zp = l->zp = zp;		// pooling, upsampling and flatten keep the input's quantization
 	}
 	q->model.out_scale = scale;
 	q->model.out_zp = zp;
@@ -683,7 +687,8 @@ static void write_float_array(FILE *f, const char *prefix, const char *name, int
 
 static const char *kind_name(int32_t kind)
 {
-	static const char *names[] = { "ANN_RT_DENSE", "ANN_RT_CONV2D", "ANN_RT_MAXPOOL2D", "ANN_RT_FLATTEN" };
+	static const char *names[] = { "ANN_RT_DENSE", "ANN_RT_CONV2D", "ANN_RT_MAXPOOL2D", "ANN_RT_FLATTEN",
+		"ANN_RT_UPSAMPLE2D" };
 	return names[kind];
 }
 
@@ -738,8 +743,13 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 	fprintf(f, " *   class = %s_argmax(output);\n */\n\n", prefix);
 
 	fprintf(f, "#ifndef %s_H\n#define %s_H\n\n#include \"ann_rt.h\"\n\n", upper, upper);
-	fprintf(f, "#if ANN_RT_VERSION != %d\n#error \"%s.h needs ann_rt.h version %d\"\n#endif\n\n",
-	        ANN_RT_VERSION, prefix, ANN_RT_VERSION);
+	// the oldest runtime that has every layer kind the model uses
+	int rt_version = 1;
+	for (int n = 0; n < m->layer_count; n++)
+		if (m->layers[n].kind == ANN_RT_UPSAMPLE2D)
+			rt_version = 2;
+	fprintf(f, "#if !defined(ANN_RT_VERSION) || ANN_RT_VERSION < %d\n#error \"%s.h needs ann_rt.h version %d or later\"\n#endif\n\n",
+	        rt_version, prefix, rt_version);
 	fprintf(f, "#define %s_INPUT_SIZE %d\n", upper, (int)m->input_size);
 	fprintf(f, "#define %s_OUTPUT_SIZE %d\n", upper, (int)m->output_size);
 	fprintf(f, "#define %s_WORKSPACE_SIZE %d\n", upper, ws);

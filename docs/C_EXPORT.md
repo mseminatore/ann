@@ -6,8 +6,13 @@ runtime. The int8 path is integer-only, so it runs on cores without an FPU. It n
 beyond `<stddef.h>` and `<stdint.h>`, never calls `malloc`, and never recurses. A float32 export
 is also available for targets with an FPU.
 
-Supported layers: dense, conv2d (any kernel, stride, padding), maxpool2d and flatten, with every
-activation (softmax only on the output layer).
+Supported layers: dense, conv2d (any kernel, stride, padding), maxpool2d, flatten, upsample2d
+and reshape, with every activation (softmax only on the output layer).
+
+A generated header checks for the `ann_rt.h` version it needs: 1 for most models, 2 for models
+with upsampling layers. Copy `ann_rt.h` from the libann that exported the model. Headers
+exported by libann 0.7 (pyann 0.7.0) require exactly version 1; re-export them to use the
+newer runtime.
 
 ## Quick start
 
@@ -134,7 +139,8 @@ TFLite-style post-training quantization:
 - **Activations**: ReLU and no activation are applied as part of the clamp. Leaky ReLU, sigmoid,
   tanh, softsign and GELU rescale to an int8 pre-activation, then use a 256-entry lookup table
   built at quantization time.
-- **Max pooling and flatten** work on the int8 values directly.
+- **Max pooling, upsampling, flatten and reshape** work on the int8 values directly, keeping
+  their input's scale and zero point.
 - **Softmax** outputs stay as int8 logits, and `argmax` of the logits is the predicted class.
   The float helpers apply softmax after dequantizing.
 

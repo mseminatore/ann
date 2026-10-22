@@ -23,7 +23,7 @@
 #define GC_REL   2e-2f   // relative tolerance
 #define GC_BATCH 2
 #define MAX_IN   72
-#define MAX_OUT  4
+#define MAX_OUT  8
 
 static void quiet(const char *s) { (void)s; }
 
@@ -216,6 +216,87 @@ static PNetwork make_bar_net(void)
     ann_set_convergence(net, 0.0f);
     ann_set_batch_size(net, 8);
     return net;
+}
+
+// 1x3x3 -> conv(2, k2, tanh) -> upsample 2 -> conv(1, k3, linear): 1x2x2, MSE
+static PNetwork net_upsample(void)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_input(net, 1, 3, 3);
+    ann_add_conv2d(net, 2, 2, 1, 0, ACTIVATION_TANH);
+    ann_add_upsample2d(net, 2);
+    ann_add_conv2d(net, 1, 3, 1, 0, ACTIVATION_NULL);
+    return net;
+}
+
+// non-square, scale 3: 1x2x3 -> conv(2, k1, sigmoid) -> upsample 3 (2x6x9) -> conv(1, k3, stride 3): 1x2x3
+static PNetwork net_upsample3(void)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_input(net, 1, 2, 3);
+    ann_add_conv2d(net, 2, 1, 1, 0, ACTIVATION_SIGMOID);
+    ann_add_upsample2d(net, 3);
+    ann_add_conv2d(net, 1, 3, 3, 0, ACTIVATION_NULL);
+    return net;
+}
+
+// a dense bottleneck back to an image: 6 -> dense(8, tanh) -> reshape 2x2x2 ->
+// upsample 2 -> conv(1, k3, linear): 1x2x2, MSE
+static PNetwork net_reshape(void)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(net, 6, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(net, 8, LAYER_HIDDEN, ACTIVATION_TANH);
+    ann_add_reshape(net, 2, 2, 2);
+    ann_add_upsample2d(net, 2);
+    ann_add_conv2d(net, 1, 3, 1, 0, ACTIVATION_NULL);
+    return net;
+}
+
+// a conv autoencoder for the 1x6x6 bars: conv -> pool -> upsample -> conv
+static PNetwork make_bar_autoencoder(void)
+{
+    PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+    net->print_func = quiet;
+    ann_add_input(net, 1, 6, 6);
+    ann_add_conv2d(net, 4, 3, 1, 1, ACTIVATION_RELU);    // 4x6x6
+    ann_add_maxpool2d(net, 2, 2);                        // 4x3x3
+    ann_add_upsample2d(net, 2);                          // 4x6x6
+    ann_add_conv2d(net, 1, 3, 1, 1, ACTIVATION_SIGMOID); // 1x6x6
+    ann_set_learning_rate(net, 0.01f);
+    ann_set_convergence(net, 0.0f);
+    ann_set_batch_size(net, 8);
+    return net;
+}
+
+// Largest difference between two networks' outputs for count inputs of in values
+static real max_output_diff(PNetwork a, PNetwork b, const real *x, int count)
+{
+    int in = a->layers[0].node_count, out = a->layers[a->layer_count - 1].node_count;
+    real worst = 0.0f, ya[64], yb[64];
+    if (out > 64 || b->layers[b->layer_count - 1].node_count != out)
+        return 1e9f;
+    for (int n = 0; n < count; n++) {
+        ann_predict(a, &x[n * in], ya);
+        ann_predict(b, &x[n * in], yb);
+        for (int k = 0; k < out; k++)
+            if (fabs(ya[k] - yb[k]) > worst) worst = (real)fabs(ya[k] - yb[k]);
+    }
+    return worst;
+}
+
+// Whether two networks have the same layer kinds, activations, shapes and settings
+static int same_structure(PNetwork a, PNetwork b)
+{
+    if (!a || !b || a->layer_count != b->layer_count)
+        return 0;
+    for (int l = 0; l < a->layer_count; l++)
+        if (a->layers[l].kind != b->layers[l].kind || a->layers[l].activation != b->layers[l].activation ||
+            a->layers[l].shape.c != b->layers[l].shape.c || a->layers[l].shape.h != b->layers[l].shape.h ||
+            a->layers[l].shape.w != b->layers[l].shape.w ||
+            memcmp(a->layers[l].config, b->layers[l].config, sizeof(a->layers[l].config)) != 0)
+            return 0;
+    return 1;
 }
 
 static int file_version(const char *path, int binary)
@@ -573,5 +654,179 @@ void test_main(int argc, char *argv[])
         TESTEX("Conv after a dense layer is not exportable", ann_export_onnx(net, onnx) == ERR_INVALID);
         remove(onnx);
         ann_free_network(net);
+    }
+
+    SUITE("Upsampling and Reshape");
+    {
+        PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 2, 2, 3);
+        TESTEX("Upsample x2: 2x4x6", ann_add_upsample2d(net, 2) == ERR_OK && net->layers[1].shape.c == 2 &&
+               net->layers[1].shape.h == 4 && net->layers[1].shape.w == 6 &&
+               ann_get_layer_kind(net, 1) == LAYER_KIND_UPSAMPLE2D && net->layers[1].param_count == 0);
+        int k, st, p;
+        TESTEX("ann_get_layer_settings reports the scale as size and stride",
+               ann_get_layer_settings(net, 1, &k, &st, &p) == ERR_OK && k == 2 && st == 2 && p == 0);
+        TESTEX("Reshape 48 values to 3x4x4", ann_add_reshape(net, 3, 4, 4) == ERR_OK &&
+               ann_get_layer_kind(net, 2) == LAYER_KIND_RESHAPE && net->layers[2].shape.c == 3 &&
+               net->layers[2].node_count == 48);
+        TESTEX("Upsample x1 keeps the shape", ann_add_upsample2d(net, 1) == ERR_OK && net->layers[3].shape.h == 4);
+        TESTEX("Scale 0 is rejected", ann_add_upsample2d(net, 0) == ERR_INVALID);
+        TESTEX("A scale that overflows the size is rejected", ann_add_upsample2d(net, 1 << 20) == ERR_INVALID);
+        TESTEX("A reshape to a different size is rejected", ann_add_reshape(net, 3, 4, 5) == ERR_INVALID);
+        TESTEX("A zero-size reshape is rejected", ann_add_reshape(net, 0, 4, 4) == ERR_INVALID);
+        TESTEX("Rejected layers are not counted", net->layer_count == 4);
+        ann_free_network(net);
+
+        net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        TESTEX("Upsample as the first layer is rejected", ann_add_upsample2d(net, 2) == ERR_INVALID);
+        TESTEX("Reshape as the first layer is rejected", ann_add_reshape(net, 1, 2, 2) == ERR_INVALID);
+        ann_free_network(net);
+
+        // each value fills a scale x scale block; batch and single predictions agree
+        net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 2, 2, 3);
+        ann_add_upsample2d(net, 3);
+        ann_train_begin(net);
+        ann_train_end(net);
+        real x[2 * 12], y[2 * 108], y1[108];
+        for (int i = 0; i < 24; i++) x[i] = (real)i - 5.5f;
+        ann_predict(net, x, y1);
+        int exact = 1;
+        for (int c = 0; c < 2; c++)
+            for (int oh = 0; oh < 6; oh++)
+                for (int ow = 0; ow < 9; ow++)
+                    exact &= y1[(c * 6 + oh) * 9 + ow] == x[(c * 2 + oh / 3) * 3 + ow / 3];
+        TESTEX("Upsample output repeats each value in a 3x3 block", exact);
+        TESTEX("ann_predict_batch matches ann_predict", ann_predict_batch(net, x, y, 2) == ERR_OK &&
+               memcmp(y, y1, sizeof(y1)) == 0 && y[108] == x[12] && y[215] == x[23]);
+        ann_free_network(net);
+    }
+    TESTEX("Gradients: conv -> upsample 2 -> conv", grad_check(net_upsample(), 0) <= 1.0f);
+    TESTEX("Gradients: non-square, upsample 3 -> strided conv", grad_check(net_upsample3(), 0) <= 1.0f);
+    TESTEX("Gradients: dense -> reshape -> upsample -> conv", grad_check(net_reshape(), 0) <= 1.0f);
+    {
+        // a small conv autoencoder learns to reconstruct the bars
+        enum { N = 24 };
+        real x[N * 36], labels[N * 2];
+        make_bars(x, labels, N);
+        PTensor tx = tensor_create_from_array(N, 36, x);
+        PNetwork net = make_bar_autoencoder();
+        ann_train_begin(net);
+        ann_train_end(net);
+        real before = ann_evaluate_loss(net, tx, tx);
+        ann_set_epoch_limit(net, 300);
+        ann_train_network(net, tx, tx, N);
+        real after = ann_evaluate_loss(net, tx, tx);
+        TESTEX("A conv autoencoder (pool, upsample) learns to reconstruct its input", after < 0.2f * before);
+
+        TESTEX("Text and binary saves succeed", ann_save_network(net, "test_upsample.nna") == ERR_OK &&
+               ann_save_network_binary(net, "test_upsample.nnb") == ERR_OK);
+        PNetwork text = ann_load_network("test_upsample.nna");
+        PNetwork bin = ann_load_network_binary("test_upsample.nnb");
+        TESTEX("Loaded networks keep the layer kinds and settings", same_structure(net, text) && same_structure(net, bin));
+        TESTEX("Binary load predicts identically", bin && max_output_diff(net, bin, x, N) == 0.0f);
+        TESTEX("Text load predicts the same (6 decimals)", text && max_output_diff(net, text, x, N) < 1e-4f);
+        ann_free_network(text);
+        ann_free_network(bin);
+        remove("test_upsample.nna");
+        remove("test_upsample.nnb");
+
+        const char *onnx = "test_upsample.onnx.json";
+        TESTEX("Autoencoder exports to ONNX", ann_export_onnx(net, onnx) == ERR_OK);
+        TESTEX("with a nearest Resize node and its scales", file_contains(onnx, "\"op_type\": \"Resize\"") &&
+               file_contains(onnx, "\"float_data\": [1, 1, 2, 2]"));
+        TESTEX("and an image output [batch, 1, 6, 6]", file_contains(onnx,
+               "\"name\": \"layer_3_out\",\n        \"type\": {\n          \"tensor_type\": {\n            \"elem_type\": 1,\n"
+               "            \"shape\": {\"dim\": [{\"dim_param\": \"batch\"}, {\"dim_value\": 1}, {\"dim_value\": 6}, {\"dim_value\": 6}]}"));
+        PNetwork back = ann_import_onnx(onnx);
+        TESTEX("Autoencoder imports from ONNX with the same structure", same_structure(net, back));
+        TESTEX("and predicts identically", back && max_output_diff(net, back, x, N) == 0.0f);
+        ann_free_network(back);
+        remove(onnx);
+        tensor_free(tx);
+        ann_free_network(net);
+
+        // a dense bottleneck reshaped to an image keeps a flat ONNX input
+        net = net_reshape();
+        net->print_func = quiet;
+        ann_train_begin(net);
+        ann_train_end(net);
+        TESTEX("Dense -> reshape model exports to ONNX", ann_export_onnx(net, onnx) == ERR_OK);
+        TESTEX("with a Reshape node to [-1, 2, 2, 2] and a flat input",
+               file_contains(onnx, "\"op_type\": \"Reshape\"") && file_contains(onnx, "\"int64_data\": [-1, 2, 2, 2]") &&
+               file_contains(onnx, "\"input\": [\n      {\n        \"name\": \"input\",\n        \"type\": {\n          \"tensor_type\": {\n            \"elem_type\": 1,\n            \"shape\": {\"dim\": [{\"dim_param\": \"batch\"}, {\"dim_value\": 6}]}"));
+        back = ann_import_onnx(onnx);
+        real xs[2 * 6];
+        for (int i = 0; i < 12; i++) xs[i] = (real)sin(0.9 * i);
+        TESTEX("and imports with the same structure and predictions", same_structure(net, back) &&
+               max_output_diff(net, back, xs, 2) == 0.0f);
+        ann_free_network(back);
+        remove(onnx);
+        ann_free_network(net);
+
+        // PyTorch-style models (as protobuf's JSON printer writes them):
+        // Gemm, Relu, Reshape [-1, 2, 2, 2] with int64 raw_data, Resize x2,
+        // Conv, Sigmoid; the reference outputs come from onnxruntime. The
+        // second gives Resize output sizes and its default half_pixel mode.
+        static const char *models[2] = {
+            "{\"irVersion\":\"8\",\"producerName\":\"pytorch\",\"graph\":{\"node\":[{\"input\":[\"x\",\"fc.w\",\"fc.b\"],\"output\":[\"g\"],\"opType\":\"Gemm\",\"attribute\":[{\"name\":\"transB\",\"i\":\"1\",\"type\":\"INT\"}]},{\"input\":[\"g\"],\"output\":[\"r\"],\"opType\":\"Relu\"},{\"input\":[\"r\",\"shape\"],\"output\":[\"h\"],\"opType\":\"Reshape\"},{\"input\":[\"h\",\"\",\"scales\"],\"output\":[\"u\"],\"opType\":\"Resize\",\"attribute\":[{\"name\":\"coordinate_transformation_mode\",\"s\":\"YXN5bW1ldHJpYw==\",\"type\":\"STRING\"},{\"name\":\"mode\",\"s\":\"bmVhcmVzdA==\",\"type\":\"STRING\"},{\"name\":\"nearest_mode\",\"s\":\"Zmxvb3I=\",\"type\":\"STRING\"}]},{\"input\":[\"u\",\"c.w\",\"c.b\"],\"output\":[\"c\"],\"opType\":\"Conv\",\"attribute\":[{\"name\":\"kernel_shape\",\"ints\":[\"3\",\"3\"],\"type\":\"INTS\"}]},{\"input\":[\"c\"],\"output\":[\"y\"],\"opType\":\"Sigmoid\"}],\"name\":\"g\",\"initializer\":[{\"dims\":[\"8\",\"6\"],\"dataType\":1,\"name\":\"fc.w\",\"rawData\":\"cBFQPbQkVT4SHVa+QGYxPFgwyT7u5so+SLO/vkPklb4XpuW+YHFyvRG08L6ozzC9OLkYPjrUYr4sfDQ+SBa6Paa4874AEXE9hoZ2vmzfrb2aq12+9MVFPtDmc70Ir6++4OE2PWqFjz6kSEa+iluOvlRv5b2ubd8+rLXzPliFMD5GQM4+QgaxPkTe+b3vyNC+wBcdPnDqbD34wQ2+qMWMvnxyv70Acf68gk1svkY0Vb4IUS295pe4PmClsD1ctV2+\"},{\"dims\":[\"8\"],\"dataType\":1,\"name\":\"fc.b\",\"rawData\":\"f+G1vMCxlLvtU/G8baH0vM31tzojEim9zSXXun3PYbw=\"},{\"dims\":[\"1\",\"2\",\"3\",\"3\"],\"dataType\":1,\"name\":\"c.w\",\"rawData\":\"zKtUPgyrfD7crUM+hLhBPvhuAb6IKyw+tv4jvvAUlT2cXzK+mK9gvUh/4L4MwIO+5nXxPt7wib6wEkQ+nBYaPkxQZT4AE8y8\"},{\"dims\":[\"1\"],\"dataType\":1,\"name\":\"c.b\",\"rawData\":\"zcxMPQ==\"},{\"dims\":[\"4\"],\"dataType\":7,\"name\":\"shape\",\"rawData\":\"//////////8CAAAAAAAAAAIAAAAAAAAAAgAAAAAAAAA=\"},{\"dims\":[\"4\"],\"dataType\":1,\"name\":\"scales\",\"rawData\":\"AACAPwAAgD8AAABAAAAAQA==\"}],\"input\":[{\"name\":\"x\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"6\"}]}}}}],\"output\":[{\"name\":\"y\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"1\"},{\"dimValue\":\"2\"},{\"dimValue\":\"2\"}]}}}}]},\"opsetImport\":[{\"domain\":\"\",\"version\":\"17\"}]}",
+            "{\"irVersion\":\"8\",\"producerName\":\"pytorch\",\"graph\":{\"node\":[{\"input\":[\"x\",\"fc.w\",\"fc.b\"],\"output\":[\"g\"],\"opType\":\"Gemm\",\"attribute\":[{\"name\":\"transB\",\"i\":\"1\",\"type\":\"INT\"}]},{\"input\":[\"g\"],\"output\":[\"r\"],\"opType\":\"Relu\"},{\"input\":[\"r\",\"shape\"],\"output\":[\"h\"],\"opType\":\"Reshape\"},{\"input\":[\"h\",\"\",\"\",\"sizes\"],\"output\":[\"u\"],\"opType\":\"Resize\",\"attribute\":[{\"name\":\"mode\",\"s\":\"bmVhcmVzdA==\",\"type\":\"STRING\"}]},{\"input\":[\"u\",\"c.w\",\"c.b\"],\"output\":[\"c\"],\"opType\":\"Conv\",\"attribute\":[{\"name\":\"kernel_shape\",\"ints\":[\"3\",\"3\"],\"type\":\"INTS\"}]},{\"input\":[\"c\"],\"output\":[\"y\"],\"opType\":\"Sigmoid\"}],\"name\":\"g\",\"initializer\":[{\"dims\":[\"8\",\"6\"],\"dataType\":1,\"name\":\"fc.w\",\"rawData\":\"cBFQPbQkVT4SHVa+QGYxPFgwyT7u5so+SLO/vkPklb4XpuW+YHFyvRG08L6ozzC9OLkYPjrUYr4sfDQ+SBa6Paa4874AEXE9hoZ2vmzfrb2aq12+9MVFPtDmc70Ir6++4OE2PWqFjz6kSEa+iluOvlRv5b2ubd8+rLXzPliFMD5GQM4+QgaxPkTe+b3vyNC+wBcdPnDqbD34wQ2+qMWMvnxyv70Acf68gk1svkY0Vb4IUS295pe4PmClsD1ctV2+\"},{\"dims\":[\"8\"],\"dataType\":1,\"name\":\"fc.b\",\"rawData\":\"f+G1vMCxlLvtU/G8baH0vM31tzojEim9zSXXun3PYbw=\"},{\"dims\":[\"1\",\"2\",\"3\",\"3\"],\"dataType\":1,\"name\":\"c.w\",\"rawData\":\"zKtUPgyrfD7crUM+hLhBPvhuAb6IKyw+tv4jvvAUlT2cXzK+mK9gvUh/4L4MwIO+5nXxPt7wib6wEkQ+nBYaPkxQZT4AE8y8\"},{\"dims\":[\"1\"],\"dataType\":1,\"name\":\"c.b\",\"rawData\":\"zcxMPQ==\"},{\"dims\":[\"4\"],\"dataType\":7,\"name\":\"shape\",\"rawData\":\"//////////8CAAAAAAAAAAIAAAAAAAAAAgAAAAAAAAA=\"},{\"dims\":[\"4\"],\"dataType\":7,\"name\":\"sizes\",\"rawData\":\"AQAAAAAAAAACAAAAAAAAAAQAAAAAAAAABAAAAAAAAAA=\"}],\"input\":[{\"name\":\"x\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"6\"}]}}}}],\"output\":[{\"name\":\"y\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"1\"},{\"dimValue\":\"2\"},{\"dimValue\":\"2\"}]}}}}]},\"opsetImport\":[{\"domain\":\"\",\"version\":\"17\"}]}"
+        };
+        const real expected[4] = { 0.552481651f, 0.575736582f, 0.543193161f, 0.557303488f };
+        for (int m = 0; m < 2; m++) {
+            FILE *f = fopen(onnx, "w");
+            if (f) {
+                fputs(models[m], f);
+                fclose(f);
+            }
+            back = ann_import_onnx(onnx);
+            real in[6], out[4];
+            for (int i = 0; i < 6; i++) in[i] = (real)(i / 5.0 - 0.6);
+            int close = back != NULL;
+            if (back) {
+                ann_predict(back, in, out);
+                for (int k = 0; k < 4; k++)
+                    close &= fabs(out[k] - expected[k]) < 1e-5;
+            }
+            if (m == 0) {
+                TESTEX("External model with Reshape and Resize scales imports and matches onnxruntime",
+                       close && back->layer_count == 5 && ann_get_layer_kind(back, 2) == LAYER_KIND_RESHAPE &&
+                       ann_get_layer_kind(back, 3) == LAYER_KIND_UPSAMPLE2D);
+            } else {
+                TESTEX("and with Resize output sizes and half_pixel coordinates", close);
+            }
+            ann_free_network(back);
+        }
+
+        // resizes libann can't reproduce exactly are rejected
+        static const char *head = "{\"graph\":{\"node\":[{\"input\":[\"x\",\"\",\"s\"],\"output\":[\"y\"],\"op_type\":\"Resize\"";
+        static const char *tail = "],\"initializer\":[{\"name\":\"s\",\"dims\":[4],\"data_type\":1,\"float_data\":[%s]}],"
+                                  "\"input\":[{\"name\":\"x\",\"type\":{\"tensor_type\":{\"shape\":{\"dim\":[{\"dim_param\":\"N\"},"
+                                  "{\"dim_value\":1},{\"dim_value\":3},{\"dim_value\":3}]}}}}]}}";
+        static const char *cases[4][2] = {
+            { "}", "1, 1, 2, 2" },
+            { ",\"attribute\":[{\"name\":\"mode\",\"s\":\"linear\"}]}", "1, 1, 2, 2" },
+            { "}", "1, 1, 1.5, 1.5" },
+            { ",\"attribute\":[{\"name\":\"coordinate_transformation_mode\",\"s\":\"asymmetric\"}]}", "1, 1, 3, 3" },
+        };
+        int imported[4];
+        for (int c = 0; c < 4; c++) {
+            FILE *f = fopen(onnx, "w");
+            if (f) {
+                fputs(head, f);
+                fputs(cases[c][0], f);
+                fprintf(f, tail, cases[c][1]);
+                fclose(f);
+            }
+            back = ann_import_onnx(onnx);
+            imported[c] = back != NULL && ann_get_layer_kind(back, 1) == LAYER_KIND_UPSAMPLE2D;
+            ann_free_network(back);
+        }
+        TESTEX("A plain nearest Resize imports", imported[0]);
+        TESTEX("Linear, fractional and asymmetric-rounding resizes are rejected",
+               !imported[1] && !imported[2] && !imported[3]);
+        remove(onnx);
     }
 }

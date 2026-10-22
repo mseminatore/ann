@@ -112,7 +112,9 @@ typedef enum {
 	LAYER_KIND_DENSE,					// fully connected: y = act(W x + b)
 	LAYER_KIND_CONV2D,					// 2-D convolution over a (C, H, W) input
 	LAYER_KIND_MAXPOOL2D,				// 2-D max pooling, per channel
-	LAYER_KIND_FLATTEN					// reshape (C, H, W) to (C*H*W, 1, 1)
+	LAYER_KIND_FLATTEN,					// reshape (C, H, W) to (C*H*W, 1, 1)
+	LAYER_KIND_UPSAMPLE2D,				// nearest-neighbour upsampling by an integer scale, per channel
+	LAYER_KIND_RESHAPE					// give the same values a new (C, H, W) shape
 } Layer_kind;
 
 //------------------------------
@@ -417,6 +419,35 @@ ANN_API int ann_add_maxpool2d(PNetwork pnet, int pool_size, int stride);
  * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (first layer) or ERR_ALLOC
  */
 ANN_API int ann_add_flatten(PNetwork pnet);
+
+/**
+ * Add a 2-D nearest-neighbour upsampling layer, applied to each channel.
+ * 
+ * Output shape is (C, H*scale, W*scale): each input value is repeated in a
+ * scale x scale block. The decoder's counterpart to max pooling, e.g. in
+ * autoencoders. No parameters; maps to an ONNX Resize node.
+ * 
+ * @param pnet Network to add the layer to
+ * @param scale Size factor for height and width (> 0)
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad scale or first layer) or ERR_ALLOC
+ */
+ANN_API int ann_add_upsample2d(PNetwork pnet, int scale);
+
+/**
+ * Add a reshape layer: give the previous layer's values the shape (C, H, W).
+ * 
+ * Values are stored flat, so nothing moves; this turns, for example, a dense
+ * layer of C*H*W nodes into an image that convolution, pooling and
+ * upsampling layers can use. No parameters; maps to an ONNX Reshape node.
+ * 
+ * @param pnet Network to add the layer to
+ * @param channels Number of channels
+ * @param height Height
+ * @param width Width
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (first layer, or C*H*W differs from
+ *         the previous layer's size) or ERR_ALLOC
+ */
+ANN_API int ann_add_reshape(PNetwork pnet, int channels, int height, int width);
 
 /**
  * Free all memory associated with a network.
@@ -1255,10 +1286,10 @@ ANN_API Layer_kind ann_get_layer_kind(const PNetwork pnet, int layer);
 ANN_API int ann_get_layer_shape(const PNetwork pnet, int layer, int *channels, int *height, int *width);
 
 /**
- * Get a convolution or pooling layer's window settings.
+ * Get a convolution, pooling or upsampling layer's window settings.
  * 
  * Conv2D: kernel size, stride and padding. MaxPool2D: pool size, stride and 0.
- * Other layers report 0 for all three.
+ * Upsample2D: the scale, the scale and 0. Other layers report 0 for all three.
  * 
  * @param pnet Network to query (must not be NULL)
  * @param layer Layer index (0 = input layer)

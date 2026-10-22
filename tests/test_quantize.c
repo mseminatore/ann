@@ -243,6 +243,28 @@ void test_main(int argc, char *argv[])
         ann_free_quantized(q2);
         ann_free_quantized(q);
         ann_free_network(net);
+
+        // a decoder: reshape a dense layer to an image, upsample, convolve
+        net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 1, 6, 6);
+        ann_add_layer(net, 8, LAYER_HIDDEN, ACTIVATION_TANH);
+        ann_add_reshape(net, 2, 2, 2);
+        ann_add_upsample2d(net, 3);
+        ann_add_conv2d(net, 2, 3, 3, 0, ACTIVATION_SIGMOID);
+        set_params(net);
+        q = ann_quantize(net, x);
+        err = q ? max_error(net, q, x, 0) : 1e9;
+        printf("\t  reshape/upsample: %.2f steps\n", err);
+        TESTEX("Reshape, upsample and conv within 3 steps", err <= 3.0);
+        TESTEX("Its header needs ann_rt.h version 2",
+               ann_export_c_header(NULL, q, "test_quantize_up.h", "up_q") == ERR_OK &&
+               file_contains("test_quantize_up.h", "ANN_RT_VERSION < 2") &&
+               file_contains("test_quantize_up.h", "ANN_RT_UPSAMPLE2D"));
+        remove("test_quantize_up.h");
+        ann_free_quantized(q);
+        ann_free_network(net);
+
         tensor_free(x);
     }
 
@@ -302,7 +324,8 @@ void test_main(int argc, char *argv[])
                file_contains("test_quantize_q.h", "#define BARS_Q_OUTPUT_SIZE 2") &&
                file_contains("test_quantize_q.h", "#define BARS_Q_INPUT_ZERO_POINT") &&
                file_contains("test_quantize_q.h", "static const int8_t bars_q_w0[36]") &&
-               file_contains("test_quantize_q.h", "ANN_RT_FUNC int bars_q_predict(const int8_t *input"));
+               file_contains("test_quantize_q.h", "ANN_RT_FUNC int bars_q_predict(const int8_t *input") &&
+               file_contains("test_quantize_q.h", "ANN_RT_VERSION < 1"));
         TESTEX("float header exports", ann_export_c_header(net, NULL, "test_quantize_f.h", "bars_f") == ERR_OK);
         TESTEX("with float arrays",
                file_contains("test_quantize_f.h", "static const float bars_f_w0[36]") &&

@@ -4,7 +4,7 @@ libann supports GPU-accelerated inference on macOS using [Apple Metal](https://d
 
 > **Note**: Metal GPU support includes both **inference and training**. Forward pass, backward pass, and optimizer updates all run on the GPU when weights are uploaded.
 >
-> All layer kinds run on the GPU: dense, Conv2D, MaxPool2D and Flatten. A convolution is an im2col step plus one MPS GEMM for the whole batch; max pooling records each window's argmax for the backward pass. GPU results match the CPU within float precision. Conv networks gain the most with wider layers (32+ filters); for very small CNNs the CPU is about as fast.
+> Dense, Conv2D, MaxPool2D and Flatten layers run on the GPU. Networks with Upsample2D or Reshape layers stay on the CPU for now (`ann_gpu_upload_network()` returns `ERR_INVALID`). A convolution is an im2col step plus one MPS GEMM for the whole batch; max pooling records each window's argmax for the backward pass. GPU results match the CPU within float precision. Conv networks gain the most with wider layers (32+ filters); for very small CNNs the CPU is about as fast.
 
 ## Requirements
 

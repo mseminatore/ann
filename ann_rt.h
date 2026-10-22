@@ -51,7 +51,8 @@
 #	include <math.h>
 #endif
 
-#define ANN_RT_VERSION 1
+// 2 added ANN_RT_UPSAMPLE2D; generated headers check for the version they need
+#define ANN_RT_VERSION 2
 
 #if defined(_MSC_VER) && !defined(__cplusplus)
 #	define ANN_RT_FUNC static __inline
@@ -66,7 +67,8 @@ enum {
 	ANN_RT_DENSE,			// y = act(W x + b)
 	ANN_RT_CONV2D,			// 2-D convolution, (C, H, W) layout
 	ANN_RT_MAXPOOL2D,		// 2-D max pooling, per channel
-	ANN_RT_FLATTEN			// no-op: values are already stored flat
+	ANN_RT_FLATTEN,			// no-op: values are already stored flat (also used for reshapes)
+	ANN_RT_UPSAMPLE2D		// nearest-neighbour upsampling by size, per channel
 };
 
 enum {
@@ -89,7 +91,7 @@ typedef struct {
 	int32_t act;				// ANN_RT_ACT_NONE, ...
 	int32_t in_c, in_h, in_w;	// input shape
 	int32_t out_c, out_h, out_w;// output shape
-	int32_t size, stride, pad;	// conv kernel or pool window, stride, zero padding
+	int32_t size, stride, pad;	// conv kernel or pool window (upsampling scale), stride, zero padding
 
 	// int8 model (NULL in a float model)
 	const int8_t *w_q;			// weights
@@ -223,6 +225,20 @@ ANN_RT_FUNC void ann_rt_maxpool_q(const ann_rt_layer *l, const int8_t *x, int8_t
 }
 
 //------------------------------
+// nearest-neighbour upsampling: each value fills a size x size block (int8
+// values keep their quantization)
+//------------------------------
+ANN_RT_FUNC void ann_rt_upsample_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
+{
+	int32_t c, oh, ow;
+
+	for (c = 0; c < l->out_c; c++)
+		for (oh = 0; oh < l->out_h; oh++)
+			for (ow = 0; ow < l->out_w; ow++)
+				y[(c * l->out_h + oh) * l->out_w + ow] = x[(c * l->in_h + oh / l->size) * l->in_w + ow / l->size];
+}
+
+//------------------------------
 // int8 inference: input_size int8 values in, output_size int8 values out.
 // workspace holds 2 * max_size int8 values. Returns 0, or -1 for a bad layer.
 //------------------------------
@@ -241,6 +257,7 @@ ANN_RT_FUNC int ann_rt_predict_q(const ann_rt_model *m, const int8_t *input, int
 		case ANN_RT_DENSE:		ann_rt_dense_q(l, src, dst); break;
 		case ANN_RT_CONV2D:		ann_rt_conv_q(l, src, dst); break;
 		case ANN_RT_MAXPOOL2D:	ann_rt_maxpool_q(l, src, dst); break;
+		case ANN_RT_UPSAMPLE2D:	ann_rt_upsample_q(l, src, dst); break;
 		case ANN_RT_FLATTEN:	continue;
 		default:				return -1;
 		}
@@ -411,6 +428,16 @@ ANN_RT_FUNC void ann_rt_maxpool_f(const ann_rt_layer *l, const float *x, float *
 			}
 }
 
+ANN_RT_FUNC void ann_rt_upsample_f(const ann_rt_layer *l, const float *x, float *y)
+{
+	int32_t c, oh, ow;
+
+	for (c = 0; c < l->out_c; c++)
+		for (oh = 0; oh < l->out_h; oh++)
+			for (ow = 0; ow < l->out_w; ow++)
+				y[(c * l->out_h + oh) * l->out_w + ow] = x[(c * l->in_h + oh / l->size) * l->in_w + ow / l->size];
+}
+
 //------------------------------
 // float inference: workspace holds 2 * max_size floats. Returns 0, or -1 for a bad layer.
 //------------------------------
@@ -435,6 +462,7 @@ ANN_RT_FUNC int ann_rt_predict_f(const ann_rt_model *m, const float *input, floa
 					dst[i] = ann_rt_activate_f(l->act, dst[i]);
 			break;
 		case ANN_RT_MAXPOOL2D:	ann_rt_maxpool_f(l, src, dst); break;
+		case ANN_RT_UPSAMPLE2D:	ann_rt_upsample_f(l, src, dst); break;
 		case ANN_RT_FLATTEN:	continue;
 		default:				return -1;
 		}

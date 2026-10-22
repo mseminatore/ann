@@ -34,9 +34,12 @@
 // thread instead when the range is small (count < 2 * grain), the thread count is 1, it is
 // called from inside another parallel loop, or another thread is using the pool.
 //
-// Rule: range functions must never call BLAS. BLAS libraries run their own threads, so BLAS
-// calls stay on the calling thread and libann's workers only run libann's own loops; the two
-// never compete for the cores.
+// Rule: range functions must not call BLAS unless ann_parallel_blas_ok() says they may. BLAS
+// libraries run their own threads, so BLAS calls normally stay on the calling thread and libann's
+// workers only run libann's own loops; the two never compete for the cores. Where BLAS threading
+// can be set per thread (Accelerate on macOS 15+), range functions run with single-threaded
+// BLAS, on the workers and on the calling thread alike, and may call it: many small GEMMs then
+// run side by side instead of one at a time, each too small for BLAS's own threads.
 //
 // Build with ANN_NO_THREADS to compile the pool out; every loop then runs serially.
 //================================================================================================
@@ -44,6 +47,9 @@
 typedef void (*ann_range_func)(void *ctx, int begin, int end);
 
 void ann_parallel_for(int count, int grain, ann_range_func fn, void *ctx);
+
+// 1 if range functions may call BLAS (no BLAS, or it runs single-threaded inside them)
+int  ann_parallel_blas_ok(void);
 
 // Thread count used by ann_parallel_for (see ann_set_num_threads in ann.h)
 void ann_parallel_set_threads(int threads);

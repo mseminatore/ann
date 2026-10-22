@@ -61,7 +61,7 @@ optimizer, loss and activation, and for CNNs and conv autoencoders).
 |----------------------|--------|
 | `ANN_GPU=vulkan` | Use only the Vulkan backend, in a build that also has CUDA. `ANN_GPU=none` keeps everything on the CPU. |
 | `ANN_VK_DEVICE=<n>` | Use the n-th Vulkan device. By default, a discrete GPU is preferred over an integrated one, and either over a CPU implementation such as lavapipe. `vulkaninfo --summary` lists the devices in order. |
-| `ANN_VK_DEBUG=1` | Enable the Khronos validation layer (installed with the Vulkan SDK) and print its warnings and errors. |
+| `ANN_VK_DEBUG=1` | Enable the Khronos validation layer (installed with the Vulkan SDK), with synchronization validation, and print its warnings and errors. Much slower; for debugging. |
 | `ANN_VK_STAGING=1` / `0` | Force copies through staging memory (`1`), or mapped device memory (`0`); see below. For testing. |
 
 `ann_gpu_init()` prints the device it chose and how data reaches it, e.g.
@@ -90,13 +90,19 @@ optimizer, loss and activation, and for CNNs and conv autoencoders).
   partial sums, and each max pool layer its argmax, between a batch's forward and backward
   passes. They grow to the largest batch seen and are freed with `ann_gpu_free_network()`.
 - **Commands.** Each operation (a training step, a forward pass, an upload or download) is
-  recorded into one command buffer with a full memory barrier between dependent commands, then
-  submitted and waited for. Descriptor sets come from pools reset before each command buffer;
-  push descriptors would be simpler, but not every driver has them. Kernels loop over their
-  items, so the workgroup count stays within `maxComputeWorkGroupCount`.
-- **Synchronous steps.** Unlike Metal, which keeps two training steps in flight, each step
-  finishes before `train_batch` returns, so small batches pay the submit-and-wait latency
-  (about 1 ms per step on older GPUs). Larger batches amortize it.
+  recorded into one command buffer with a full memory barrier between dependent commands.
+  Descriptor sets come from pools reset before each command buffer; push descriptors would be
+  simpler, but not every driver has them. Kernels loop over their items, so the workgroup count
+  stays within `maxComputeWorkGroupCount`.
+- **Pipelined training.** As with Metal, up to `TRAIN_SLOTS` (2) training steps are in flight:
+  `train_batch` records a step and submits it without waiting, so the CPU assembles the next
+  batch while the GPU runs this one, and `train_finish` collects the losses. Each slot has its
+  own command buffer, fence, descriptor pools, staging buffer, and copies of what the CPU
+  writes for a step (inputs, targets, dropout masks) and reads back (per-row losses). Weights,
+  gradients, activations and layer work buffers are shared; steps run in submission order, each
+  command buffer starting with a barrier on the work before it. Anything that reads or replaces
+  that shared state (inference, weight sync, upload, free, a buffer that has to grow) first waits
+  for the steps in flight.
 - **float only**, like the other GPU backends; a `double` build does not compile with
   `USE_VULKAN`.
 

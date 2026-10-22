@@ -36,7 +36,9 @@
 //   are mapped and the host copies in and out directly, as with Metal's shared buffers,
 //   otherwise copies go through a host-visible staging buffer, as with CUDA.
 // - Each operation (a training step, a forward pass, an upload) is recorded into one command
-//   buffer, submitted, and waited for. Dispatches are separated by full memory barriers.
+//   buffer, in one of TRAIN_SLOTS slots. Training steps are submitted without waiting, so the
+//   next batch is assembled while the GPU runs this one; other operations wait for the steps
+//   in flight, then for themselves. Dispatches are separated by full memory barriers.
 // - Descriptor sets come from pools reset before each command buffer (push descriptors are
 //   not available on every driver).
 //================================================================================================
@@ -180,6 +182,36 @@ typedef struct {
     void *map;                  // host address when the host copies in and out directly
 } VkBuf;
 
+// Training steps that can be in flight at once (see vk_train_batch)
+#define TRAIN_SLOTS 2
+
+//-----------------------------------------------------------
+// A slot: a command buffer with what one operation needs of its own. vk_train_batch() submits a
+// step without waiting, so the CPU assembles the next batch while the GPU runs this one; each
+// slot keeps its own copies of what the CPU writes for a step (inputs, targets, dropout masks,
+// through its staging buffer) and reads back (per-row losses). Weights, gradients, activations
+// and layer work buffers are shared: steps run in submission order, each command buffer
+// starting with a barrier on the work before it.
+//-----------------------------------------------------------
+typedef struct {
+    VkCommandBuffer cmd;
+    VkFence fence;
+    int pending;                // submitted and not yet waited for
+    VkDescriptorPool pools[VK_MAX_POOLS];
+    int pool_count, pool_cur;   // pools created, and the one sets come from now
+    VkBuf *staging;             // host-visible; uploads and downloads pass through it
+    VkDeviceSize staging_used;
+
+    // A training step's own buffers and results
+    VkBuf *inputs, *targets, *row_loss;
+    VkBuf **masks;              // dropout masks by layer
+    int mask_layers;            // layers masks has room for
+    const float *loss_src;      // the step's per-row losses, readable once it completes; NULL
+                                // when the slot's operation is not a training step
+    int batch_size;
+    int divisor;                // batch loss = sum of row losses / divisor
+} VkSlot;
+
 typedef struct {
     int initialized;
     int init_failed;
@@ -196,25 +228,20 @@ typedef struct {
     VkDescriptorSetLayout set_layout;
     VkPipelineLayout pipe_layout;
     VkPipeline pipelines[K_COUNT];
-    VkDescriptorPool pools[VK_MAX_POOLS];
-    int pool_count, pool_cur;   // pools created, and the one sets come from now
 
-    // The command buffer being recorded; see cmd_begin()
     VkCommandPool cmd_pool;
-    VkCommandBuffer cmd;
-    VkFence fence;
+    VkSlot slots[TRAIN_SLOTS];
+    int next_slot;              // the slot the next operation uses (the older pending one)
+    VkSlot *rec;                // the slot being recorded; see cmd_begin()
     int record_failed;          // a command could not be recorded; the submit fails
     int barrier_pending;        // a command since the last barrier wrote memory
 
-    VkBuf *staging;             // host-visible; uploads and downloads pass through it
-    VkDeviceSize staging_used;
-
-    VkBuf *inputs, *targets, *row_loss;     // training step work buffers
-    VkBuf *infer[2];                        // inference ping-pong buffers
+    VkBuf *infer[2];            // inference ping-pong buffers
     VkBuf **scratch;            // per-layer work buffers, scratch[layer * SCRATCH_SLOTS + slot]
     int scratch_layers;         // layers scratch has room for
     int training_buffers_ready; // optimizer state was uploaded since upload_network()
-    real loss_sum;              // losses of the steps since vk_train_finish()
+    real loss_sum;              // losses of the steps finished since vk_train_finish()
+    int train_failed;           // a step since vk_train_finish() did not complete
 } VulkanContext;
 
 static VulkanContext g_vk = {0};
@@ -271,7 +298,13 @@ static int create_instance(void)
     ci.pApplicationInfo = &app;
 
     const char *layer = "VK_LAYER_KHRONOS_validation";
-    const char *ext = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    const char *exts[2] = { VK_EXT_DEBUG_UTILS_EXTENSION_NAME, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME };
+    // with the layer, also check synchronization: barriers between dispatches and between
+    // the training steps in flight
+    VkValidationFeatureEnableEXT sync = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
+    VkValidationFeaturesEXT features = { VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT };
+    features.enabledValidationFeatureCount = 1;
+    features.pEnabledValidationFeatures = &sync;
     int debug = 0;
     const char *env = getenv("ANN_VK_DEBUG");
     if (env && *env && strcmp(env, "0") != 0)
@@ -286,10 +319,11 @@ static int create_instance(void)
         free(props);
         if (debug)
         {
+            ci.pNext = &features;
             ci.enabledLayerCount = 1;
             ci.ppEnabledLayerNames = &layer;
-            ci.enabledExtensionCount = 1;
-            ci.ppEnabledExtensionNames = &ext;
+            ci.enabledExtensionCount = 2;
+            ci.ppEnabledExtensionNames = exts;
         }
         else
             fprintf(stderr, "[Vulkan] ANN_VK_DEBUG: validation layer not installed\n");
@@ -470,15 +504,20 @@ static int create_device(int queue_family)
     if (vkCreateCommandPool(g_vk.device, &pi, NULL, &g_vk.cmd_pool) != VK_SUCCESS)
         return 0;
 
-    VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    ai.commandPool = g_vk.cmd_pool;
-    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ai.commandBufferCount = 1;
-    if (vkAllocateCommandBuffers(g_vk.device, &ai, &g_vk.cmd) != VK_SUCCESS)
-        return 0;
+    for (int s = 0; s < TRAIN_SLOTS; s++)
+    {
+        VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        ai.commandPool = g_vk.cmd_pool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(g_vk.device, &ai, &g_vk.slots[s].cmd) != VK_SUCCESS)
+            return 0;
 
-    VkFenceCreateInfo fi = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    return vkCreateFence(g_vk.device, &fi, NULL, &g_vk.fence) == VK_SUCCESS;
+        VkFenceCreateInfo fi = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        if (vkCreateFence(g_vk.device, &fi, NULL, &g_vk.slots[s].fence) != VK_SUCCESS)
+            return 0;
+    }
+    return 1;
 }
 
 // Every kernel shares one layout: VK_MAX_BINDINGS storage buffers and VK_PUSH_BYTES of push constants
@@ -683,12 +722,62 @@ static VkBuf *buf_create(size_t bytes, int host)
     return b;
 }
 
+//-----------------------------------------------------------
+// Wait for a slot's operation; a training step then adds its batch loss (averaged as on the
+// CPU) to g_vk.loss_sum, or flags its failure. Returns 0 if the operation failed.
+//-----------------------------------------------------------
+static int finish_slot(int s)
+{
+    VkSlot *slot = &g_vk.slots[s];
+    if (!slot->pending)
+        return 1;
+    VkResult res = vkWaitForFences(g_vk.device, 1, &slot->fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(g_vk.device, 1, &slot->fence);
+    slot->pending = 0;
+    if (res != VK_SUCCESS)
+    {
+        fprintf(stderr, "[Vulkan] GPU work failed (%d)\n", (int)res);
+        if (slot->loss_src)
+            g_vk.train_failed = 1;
+        slot->loss_src = NULL;
+        return 0;
+    }
+    if (slot->loss_src)
+    {
+        real total = 0.0f;
+        for (int b = 0; b < slot->batch_size; b++)
+            total += slot->loss_src[b];
+        g_vk.loss_sum += total / (real)slot->divisor;
+        slot->loss_src = NULL;
+    }
+    return 1;
+}
+
+//-----------------------------------------------------------
+// Wait for every training step in flight, oldest first. Anything that reads or replaces GPU
+// state the steps use (weights, optimizer state, shared work buffers) calls this first.
+//-----------------------------------------------------------
+static void finish_all_slots(void)
+{
+    for (int i = 0; i < TRAIN_SLOTS; i++)
+        finish_slot((g_vk.next_slot + i) % TRAIN_SLOTS);
+}
+
+// Free a buffer, after the steps in flight, which may use it, complete
+static void buf_release(VkBuf *b)
+{
+    if (!b)
+        return;
+    finish_all_slots();
+    buf_destroy(b);
+}
+
 // A work buffer of at least bytes, reallocated when too small
 static VkBuf *ensure_buf(VkBuf **b, size_t bytes)
 {
     if (*b && (*b)->size >= bytes)
         return *b;
-    buf_destroy(*b);
+    buf_release(*b);
     *b = buf_create(bytes, 0);
     return *b;
 }
@@ -715,17 +804,19 @@ static VkBuf *tensor_buf(PTensor t)
 
 static void vk_release_buffer(void *gpu_buf)
 {
-    buf_destroy((VkBuf *)gpu_buf);
+    buf_release((VkBuf *)gpu_buf);
 }
 
-// Room for bytes of uploads and downloads in the next command buffer; call before cmd_begin()
-static int staging_reserve(size_t bytes)
+// Room for bytes of uploads and downloads in slot s's next command buffer; call before
+// cmd_begin(s), with the slot finished
+static int staging_reserve(int s, size_t bytes)
 {
-    if (g_vk.staging && g_vk.staging->size >= bytes)
+    VkSlot *slot = &g_vk.slots[s];
+    if (slot->staging && slot->staging->size >= bytes)
         return 1;
-    buf_destroy(g_vk.staging);
-    g_vk.staging = buf_create(bytes < ((size_t)1 << 20) ? ((size_t)1 << 20) : bytes, 1);
-    return g_vk.staging != NULL;
+    buf_destroy(slot->staging);
+    slot->staging = buf_create(bytes < ((size_t)1 << 20) ? ((size_t)1 << 20) : bytes, 1);
+    return slot->staging != NULL;
 }
 
 // Staging bytes per copy, rounded up for the offset alignment staging_take() keeps
@@ -738,19 +829,25 @@ static size_t staged(size_t bytes)
 // Command recording
 //================================================================================================
 
-// Start recording an operation; it runs when cmd_submit_wait() is called
-static int cmd_begin(void)
+// Start recording an operation into slot s, which must be finished (finish_slot); it runs
+// when cmd_submit() or cmd_submit_wait() is called
+static int cmd_begin(int s)
 {
-    for (int i = 0; i < g_vk.pool_count; i++)
-        vkResetDescriptorPool(g_vk.device, g_vk.pools[i], 0);
-    g_vk.pool_cur = 0;
-    g_vk.staging_used = 0;
+    VkSlot *slot = &g_vk.slots[s];
+    for (int i = 0; i < slot->pool_count; i++)
+        vkResetDescriptorPool(g_vk.device, slot->pools[i], 0);
+    slot->pool_cur = 0;
+    slot->staging_used = 0;
+    slot->loss_src = NULL;
+    g_vk.rec = slot;
     g_vk.record_failed = 0;
-    g_vk.barrier_pending = 0;
+    // the first command waits for the operations submitted before this one (submission
+    // order is part of a barrier's scope), which share weights and work buffers with it
+    g_vk.barrier_pending = 1;
 
     VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    return vkBeginCommandBuffer(g_vk.cmd, &bi) == VK_SUCCESS;
+    return vkBeginCommandBuffer(slot->cmd, &bi) == VK_SUCCESS;
 }
 
 // Make earlier commands' writes visible to the next command
@@ -763,48 +860,69 @@ static void cmd_barrier(void)
     mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
                        VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
     VkPipelineStageFlags stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
-    vkCmdPipelineBarrier(g_vk.cmd, stages, stages, 0, 1, &mb, 0, NULL, 0, NULL);
+    vkCmdPipelineBarrier(g_vk.rec->cmd, stages, stages, 0, 1, &mb, 0, NULL, 0, NULL);
     g_vk.barrier_pending = 0;
+}
+
+// Submit the recorded operation without waiting; 1 if it was submitted
+static int cmd_submit(void)
+{
+    VkSlot *slot = g_vk.rec;
+    g_vk.rec = NULL;
+
+    // results the host reads (downloads, mapped buffers) must be visible to it
+    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(slot->cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    if (vkEndCommandBuffer(slot->cmd) != VK_SUCCESS || g_vk.record_failed)
+        return 0;
+
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &slot->cmd;
+    VkResult res = vkQueueSubmit(g_vk.queue, 1, &si, slot->fence);
+    if (res != VK_SUCCESS)
+    {
+        fprintf(stderr, "[Vulkan] Submit failed (%d)\n", (int)res);
+        return 0;
+    }
+    slot->pending = 1;
+    return 1;
 }
 
 // Submit the recorded operation and wait for it; 1 if it completed
 static int cmd_submit_wait(void)
 {
-    // results the host reads (downloads, mapped buffers) must be visible to it
-    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(g_vk.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    if (vkEndCommandBuffer(g_vk.cmd) != VK_SUCCESS || g_vk.record_failed)
-        return 0;
-
-    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &g_vk.cmd;
-    VkResult res = vkQueueSubmit(g_vk.queue, 1, &si, g_vk.fence);
-    if (res == VK_SUCCESS)
-        res = vkWaitForFences(g_vk.device, 1, &g_vk.fence, VK_TRUE, UINT64_MAX);
-    vkResetFences(g_vk.device, 1, &g_vk.fence);
-    if (res != VK_SUCCESS)
-        fprintf(stderr, "[Vulkan] Submit failed (%d)\n", (int)res);
-    return res == VK_SUCCESS;
+    int s = (int)(g_vk.rec - g_vk.slots);
+    return cmd_submit() && finish_slot(s);
 }
 
-// Take bytes of the staging buffer for this command buffer; returns the offset
+// The slot an operation other than a training step uses, once the steps in flight complete:
+// it reads or replaces state they use
+static int sync_slot(void)
+{
+    finish_all_slots();
+    return g_vk.next_slot;
+}
+
+// Take bytes of the recording slot's staging buffer; returns the offset
 static VkDeviceSize staging_take(size_t bytes)
 {
-    VkDeviceSize off = g_vk.staging_used;
-    if (!g_vk.staging || off + bytes > g_vk.staging->size)
+    VkSlot *slot = g_vk.rec;
+    VkDeviceSize off = slot->staging_used;
+    if (!slot->staging || off + bytes > slot->staging->size)
     {
         g_vk.record_failed = 1;
         return 0;
     }
-    g_vk.staging_used += staged(bytes);
+    slot->staging_used += staged(bytes);
     return off;
 }
 
-// Record a copy of host memory into dst (or copy it now when dst is mapped)
+// Record a copy of host memory into dst (or copy it now when dst is mapped, so dst must not
+// be in use by a step in flight)
 static void cmd_upload(VkBuf *dst, const void *src, size_t bytes)
 {
     if (bytes == 0)
@@ -817,15 +935,15 @@ static void cmd_upload(VkBuf *dst, const void *src, size_t bytes)
     VkDeviceSize off = staging_take(bytes);
     if (g_vk.record_failed)
         return;
-    memcpy((char *)g_vk.staging->map + off, src, bytes);
+    memcpy((char *)g_vk.rec->staging->map + off, src, bytes);
     cmd_barrier();
     VkBufferCopy region = { off, 0, bytes };
-    vkCmdCopyBuffer(g_vk.cmd, g_vk.staging->buffer, dst->buffer, 1, &region);
+    vkCmdCopyBuffer(g_vk.rec->cmd, g_vk.rec->staging->buffer, dst->buffer, 1, &region);
     g_vk.barrier_pending = 1;
 }
 
-// Record a copy of src's first bytes to where the host reads them once cmd_submit_wait()
-// returns; returns that address
+// Record a copy of src's first bytes to where the host reads them once the operation
+// completes; returns that address
 static const void *cmd_download(VkBuf *src, size_t bytes)
 {
     if (src->map)
@@ -835,15 +953,15 @@ static const void *cmd_download(VkBuf *src, size_t bytes)
         return NULL;
     cmd_barrier();
     VkBufferCopy region = { 0, off, bytes };
-    vkCmdCopyBuffer(g_vk.cmd, src->buffer, g_vk.staging->buffer, 1, &region);
+    vkCmdCopyBuffer(g_vk.rec->cmd, src->buffer, g_vk.rec->staging->buffer, 1, &region);
     g_vk.barrier_pending = 1;
-    return (const char *)g_vk.staging->map + off;
+    return (const char *)g_vk.rec->staging->map + off;
 }
 
 static void cmd_zero(VkBuf *b)
 {
     cmd_barrier();
-    vkCmdFillBuffer(g_vk.cmd, b->buffer, 0, VK_WHOLE_SIZE, 0);
+    vkCmdFillBuffer(g_vk.rec->cmd, b->buffer, 0, VK_WHOLE_SIZE, 0);
     g_vk.barrier_pending = 1;
 }
 
@@ -854,34 +972,35 @@ static void cmd_copy(VkBuf *src, VkBuf *dst, size_t bytes)
         return;
     cmd_barrier();
     VkBufferCopy region = { 0, 0, bytes };
-    vkCmdCopyBuffer(g_vk.cmd, src->buffer, dst->buffer, 1, &region);
+    vkCmdCopyBuffer(g_vk.rec->cmd, src->buffer, dst->buffer, 1, &region);
     g_vk.barrier_pending = 1;
 }
 
-// A descriptor set for one dispatch, from the pools reset by cmd_begin()
+// A descriptor set for one dispatch, from the recording slot's pools (reset by cmd_begin())
 static VkDescriptorSet alloc_set(void)
 {
-    while (g_vk.pool_cur < VK_MAX_POOLS)
+    VkSlot *slot = g_vk.rec;
+    while (slot->pool_cur < VK_MAX_POOLS)
     {
-        if (g_vk.pool_cur == g_vk.pool_count)
+        if (slot->pool_cur == slot->pool_count)
         {
             VkDescriptorPoolSize size = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_POOL_SETS * VK_MAX_BINDINGS };
             VkDescriptorPoolCreateInfo pi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
             pi.maxSets = VK_POOL_SETS;
             pi.poolSizeCount = 1;
             pi.pPoolSizes = &size;
-            if (vkCreateDescriptorPool(g_vk.device, &pi, NULL, &g_vk.pools[g_vk.pool_count]) != VK_SUCCESS)
+            if (vkCreateDescriptorPool(g_vk.device, &pi, NULL, &slot->pools[slot->pool_count]) != VK_SUCCESS)
                 return VK_NULL_HANDLE;
-            g_vk.pool_count++;
+            slot->pool_count++;
         }
         VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-        ai.descriptorPool = g_vk.pools[g_vk.pool_cur];
+        ai.descriptorPool = slot->pools[slot->pool_cur];
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &g_vk.set_layout;
         VkDescriptorSet set;
         if (vkAllocateDescriptorSets(g_vk.device, &ai, &set) == VK_SUCCESS)
             return set;
-        g_vk.pool_cur++;
+        slot->pool_cur++;
     }
     return VK_NULL_HANDLE;
 }
@@ -930,10 +1049,10 @@ static void cmd_dispatch_3d(Kernel k, VkBuf *const *bufs, int n_bufs, const void
     vkUpdateDescriptorSets(g_vk.device, VK_MAX_BINDINGS, writes, 0, NULL);
 
     cmd_barrier();
-    vkCmdBindPipeline(g_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk.pipelines[k]);
-    vkCmdBindDescriptorSets(g_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk.pipe_layout, 0, 1, &set, 0, NULL);
-    vkCmdPushConstants(g_vk.cmd, g_vk.pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, params_size, params);
-    vkCmdDispatch(g_vk.cmd, groups_x, groups_y, groups_z);
+    vkCmdBindPipeline(g_vk.rec->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk.pipelines[k]);
+    vkCmdBindDescriptorSets(g_vk.rec->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk.pipe_layout, 0, 1, &set, 0, NULL);
+    vkCmdPushConstants(g_vk.rec->cmd, g_vk.pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, params_size, params);
+    vkCmdDispatch(g_vk.rec->cmd, groups_x, groups_y, groups_z);
     g_vk.barrier_pending = 1;
 }
 
@@ -1308,6 +1427,7 @@ static void vk_free_network(PNetwork pnet)
 {
     if (!pnet)
         return;
+    finish_all_slots();
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
@@ -1323,6 +1443,19 @@ static void vk_free_network(PNetwork pnet)
     }
     // the training buffers are released by tensor_free() when the network is freed
     free_scratch();
+    for (int s = 0; s < TRAIN_SLOTS; s++)
+    {
+        VkSlot *slot = &g_vk.slots[s];
+        buf_destroy(slot->inputs);
+        buf_destroy(slot->targets);
+        buf_destroy(slot->row_loss);
+        slot->inputs = slot->targets = slot->row_loss = NULL;
+        for (int i = 0; i < slot->mask_layers; i++)
+            buf_destroy(slot->masks[i]);
+        free(slot->masks);
+        slot->masks = NULL;
+        slot->mask_layers = 0;
+    }
     g_vk.training_buffers_ready = 0;
 }
 
@@ -1358,7 +1491,8 @@ static int vk_upload_network(PNetwork pnet)
         }
     }
 
-    int ok = staging_reserve(total) && cmd_begin();
+    int s = sync_slot();
+    int ok = staging_reserve(s, total) && cmd_begin(s);
     if (ok)
     {
         for (int layer = 1; layer < pnet->layer_count; layer++)
@@ -1388,7 +1522,8 @@ static int download_tensors(PTensor *list, int n)
     for (int i = 0; i < n; i++)
         total += staged(tensor_bytes(list[i]));
     const void **src = (const void **)calloc((size_t)(n ? n : 1), sizeof(*src));
-    int ok = src && staging_reserve(total) && cmd_begin();
+    int s = sync_slot();
+    int ok = src && staging_reserve(s, total) && cmd_begin(s);
     if (ok)
     {
         for (int i = 0; i < n; i++)
@@ -1442,13 +1577,15 @@ static int forward_infer(PNetwork pnet, const real *inputs, real *outputs, int r
         if (pnet->layers[i].node_count > max_nodes)
             max_nodes = pnet->layers[i].node_count;
 
+    // inference shares the layers' work buffers with training
+    int s = sync_slot();
     size_t bytes = (size_t)rows * max_nodes * sizeof(float);
     if (!ensure_buf(&g_vk.infer[0], bytes) || !ensure_buf(&g_vk.infer[1], bytes) ||
         !ensure_layer_scratch(pnet, rows, 0))
         return 0;
     size_t in_bytes = (size_t)rows * in_nodes * sizeof(float);
     size_t out_bytes = (size_t)rows * out_nodes * sizeof(float);
-    if (!staging_reserve(staged(in_bytes) + staged(out_bytes)) || !cmd_begin())
+    if (!staging_reserve(s, staged(in_bytes) + staged(out_bytes)) || !cmd_begin(s))
         return 0;
 
     cmd_upload(g_vk.infer[0], inputs, in_bytes);
@@ -1535,7 +1672,8 @@ static int ensure_training_buffers(PNetwork pnet)
     if (g_vk.training_buffers_ready)
         return 1;
 
-    if (!staging_reserve(state_bytes) || !cmd_begin())
+    int s = sync_slot();
+    if (!staging_reserve(s, state_bytes) || !cmd_begin(s))
         return 0;
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
@@ -1552,6 +1690,21 @@ static int ensure_training_buffers(PNetwork pnet)
         return 0;
     g_vk.training_buffers_ready = 1;
     return 1;
+}
+
+// The slot's GPU buffer for a layer's dropout mask, of at least bytes; call before cmd_begin()
+static VkBuf *slot_mask(VkSlot *slot, int layer, size_t bytes)
+{
+    if (layer >= slot->mask_layers)
+    {
+        VkBuf **grown = (VkBuf **)realloc(slot->masks, (size_t)(layer + 1) * sizeof(*grown));
+        if (!grown)
+            return NULL;
+        memset(grown + slot->mask_layers, 0, (size_t)(layer + 1 - slot->mask_layers) * sizeof(*grown));
+        slot->masks = grown;
+        slot->mask_layers = layer + 1;
+    }
+    return ensure_buf(&slot->masks[layer], bytes);
 }
 
 // The batch's dropout mask for a hidden layer, which ann.c drew on the host, or NULL when
@@ -1575,7 +1728,7 @@ static PTensor dropout_mask(PNetwork pnet, int layer, int batch_size)
 //      bias_grad += column sums of dl_dz) and write dl_dz_prev (not for layer 1, whose input
 //      needs none)
 //-----------------------------------------------------------
-static void encode_backward(PNetwork pnet, int batch_size)
+static void encode_backward(PNetwork pnet, int batch_size, VkSlot *slot)
 {
     for (int li = pnet->layer_count - 1; li >= 1; li--)
     {
@@ -1586,16 +1739,15 @@ static void encode_backward(PNetwork pnet, int batch_size)
         size_t count = (size_t)batch_size * nodes;
 
         VkBuf *dl_dz = (VkBuf *)layer->t_batch_dl_dz->gpu_buf;
-        VkBuf *A_prev = li == 1 ? g_vk.inputs : (VkBuf *)prev->t_batch_values->gpu_buf;
+        VkBuf *A_prev = li == 1 ? slot->inputs : (VkBuf *)prev->t_batch_values->gpu_buf;
         VkBuf *dX = li > 1 ? (VkBuf *)prev->t_batch_dl_dz->gpu_buf : NULL;
 
         if (li < pnet->layer_count - 1)
         {
-            PTensor mask = dropout_mask(pnet, li, batch_size);
-            if (mask)
+            if (dropout_mask(pnet, li, batch_size))
             {
                 struct { uint32_t n, backward; } p = { (uint32_t)count, 1 };
-                VkBuf *bufs[3] = { (VkBuf *)layer->t_batch_values->gpu_buf, (VkBuf *)mask->gpu_buf, dl_dz };
+                VkBuf *bufs[3] = { (VkBuf *)layer->t_batch_values->gpu_buf, slot->masks[li], dl_dz };
                 cmd_dispatch(K_DROPOUT, bufs, 3, &p, sizeof(p), groups_for(count, 256), 1);
             }
             if (!conv_fuses_derivative(layer))
@@ -1719,12 +1871,21 @@ static void encode_optimizer(PNetwork pnet)
 
 //-----------------------------------------------------------
 // One mini-batch: forward pass, backward pass and optimizer update. The batch inputs are in
-// layers[0].t_batch_values and the dropout masks are drawn. Returns 1 when the GPU ran the
-// step, 0 to fall back to the CPU.
+// layers[0].t_batch_values and the dropout masks are drawn. Copies them into a free slot,
+// records the step and submits it without waiting: the CPU assembles the next batch while
+// the GPU runs this one, and vk_train_finish() collects the losses. Returns 1 when the GPU
+// took the batch, 0 to fall back to the CPU.
 //-----------------------------------------------------------
 static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
 {
     if (!pnet || !g_vk.initialized || !network_on_gpu(pnet) || !pnet->layers[0].t_batch_values)
+        return 0;
+
+    // The slot's previous step must be done before its buffers are reused
+    int s = g_vk.next_slot;
+    VkSlot *slot = &g_vk.slots[s];
+    finish_slot(s);
+    if (g_vk.train_failed)
         return 0;
 
     int out_idx = pnet->layer_count - 1;
@@ -1735,9 +1896,10 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
     size_t target_bytes = (size_t)batch_size * output_nodes * sizeof(float);
     size_t loss_bytes = (size_t)batch_size * sizeof(float);
 
+    // Buffers that grow (the first batch, or a larger one) wait for the steps in flight
     if (!ensure_training_buffers(pnet) || !ensure_layer_scratch(pnet, batch_size, 1) ||
-        !ensure_buf(&g_vk.inputs, input_bytes) || !ensure_buf(&g_vk.targets, target_bytes) ||
-        !ensure_buf(&g_vk.row_loss, loss_bytes))
+        !ensure_buf(&slot->inputs, input_bytes) || !ensure_buf(&slot->targets, target_bytes) ||
+        !ensure_buf(&slot->row_loss, loss_bytes))
         return 0;
 
     size_t stage_bytes = staged(input_bytes) + staged(target_bytes) + staged(loss_bytes);
@@ -1746,21 +1908,22 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
         PTensor mask = dropout_mask(pnet, layer, batch_size);
         if (mask)
         {
-            if (!tensor_buf(mask))
+            if (!slot_mask(slot, layer, tensor_bytes(mask)))
                 return 0;
             stage_bytes += staged(tensor_bytes(mask));
         }
     }
-    if (!staging_reserve(stage_bytes) || !cmd_begin())
+    if (!staging_reserve(s, stage_bytes) || !cmd_begin(s))
         return 0;
 
-    cmd_upload(g_vk.inputs, pnet->layers[0].t_batch_values->values, input_bytes);
-    cmd_upload(g_vk.targets, batch_targets->values, target_bytes);
+    // This step's inputs, targets and dropout masks, in the slot's buffers
+    cmd_upload(slot->inputs, pnet->layers[0].t_batch_values->values, input_bytes);
+    cmd_upload(slot->targets, batch_targets->values, target_bytes);
     for (int layer = 1; layer < out_idx; layer++)
     {
         PTensor mask = dropout_mask(pnet, layer, batch_size);
         if (mask)
-            cmd_upload((VkBuf *)mask->gpu_buf, mask->values, tensor_bytes(mask));
+            cmd_upload(slot->masks[layer], mask->values, tensor_bytes(mask));
     }
 
     // Zero the gradients
@@ -1775,10 +1938,10 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer dst = &pnet->layers[layer];
-        PTensor mask = layer < out_idx ? dropout_mask(pnet, layer, batch_size) : NULL;
-        VkBuf *X = layer == 1 ? g_vk.inputs : (VkBuf *)pnet->layers[layer - 1].t_batch_values->gpu_buf;
+        int masked = layer < out_idx && dropout_mask(pnet, layer, batch_size);
+        VkBuf *X = layer == 1 ? slot->inputs : (VkBuf *)pnet->layers[layer - 1].t_batch_values->gpu_buf;
         encode_layer_forward(pnet, layer, batch_size, X, (VkBuf *)dst->t_batch_values->gpu_buf,
-                             (VkBuf *)dst->t_batch_z->gpu_buf, mask ? (VkBuf *)mask->gpu_buf : NULL);
+                             (VkBuf *)dst->t_batch_z->gpu_buf, masked ? slot->masks[layer] : NULL);
     }
 
     // Output delta = t - y and each row's loss; MSE then applies the output activation's
@@ -1789,41 +1952,46 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
             (uint32_t)batch_size, (uint32_t)output_nodes,
             pnet->loss_type == LOSS_MSE ? 0u : (out->activation == ACTIVATION_SIGMOID ? 2u : 1u)
         };
-        VkBuf *bufs[4] = { (VkBuf *)out->t_batch_values->gpu_buf, g_vk.targets,
-                           (VkBuf *)out->t_batch_dl_dz->gpu_buf, g_vk.row_loss };
+        VkBuf *bufs[4] = { (VkBuf *)out->t_batch_values->gpu_buf, slot->targets,
+                           (VkBuf *)out->t_batch_dl_dz->gpu_buf, slot->row_loss };
         cmd_dispatch(K_OUTPUT_DELTA_LOSS, bufs, 4, &p, sizeof(p), groups_for((size_t)batch_size, 64), 1);
         if (pnet->loss_type == LOSS_MSE && !conv_fuses_derivative(out))
             k_activation_derivative(out, batch_size);
     }
 
-    encode_backward(pnet, batch_size);
+    encode_backward(pnet, batch_size, slot);
 
     // Adam's bias correction counts this batch
     pnet->train_iteration++;
     encode_optimizer(pnet);
 
-    const float *row_loss = (const float *)cmd_download(g_vk.row_loss, loss_bytes);
-    if (!cmd_submit_wait())
+    const float *row_loss = (const float *)cmd_download(slot->row_loss, loss_bytes);
+    if (!cmd_submit())
     {
         pnet->train_iteration--;
         return 0;
     }
-
-    real total = 0.0f;
-    for (int b = 0; b < batch_size; b++)
-        total += row_loss[b];
-    g_vk.loss_sum += total / (real)(pnet->loss_type == LOSS_MSE ? batch_size * output_nodes : batch_size);
+    slot->loss_src = row_loss;
+    slot->batch_size = batch_size;
+    slot->divisor = pnet->loss_type == LOSS_MSE ? batch_size * output_nodes : batch_size;
+    g_vk.next_slot = (s + 1) % TRAIN_SLOTS;
     return 1;
 }
 
-// Every step already completed in vk_train_batch(); report their losses
+//-----------------------------------------------------------
+// Wait for the steps vk_train_batch() submitted; *loss_sum gets the sum of their batch
+// losses. Returns 0 if any failed.
+//-----------------------------------------------------------
 static int vk_train_finish(PNetwork pnet, real *loss_sum)
 {
     (void)pnet;
+    finish_all_slots();
     if (loss_sum)
         *loss_sum = g_vk.loss_sum;
+    int ok = !g_vk.train_failed;
     g_vk.loss_sum = 0.0f;
-    return 1;
+    g_vk.train_failed = 0;
+    return ok;
 }
 
 GpuBackend vulkan_backend = {

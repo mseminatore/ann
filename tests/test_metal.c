@@ -480,6 +480,63 @@ void test_main(int argc, char *argv[])
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 
+        // split-sum weight gradients with wide patches: 20 filters over 32*3*3
+        // patches (patches split across threadgroups, a part block of filters)
+        // and 6 filters, not a multiple of 4, over 20*3*3
+        cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        gpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        PNetwork split[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(split[i], 2, 9, 9);
+            ann_add_conv2d(split[i], 32, 3, 1, 1, ACTIVATION_RELU);  // 32x9x9
+            ann_add_conv2d(split[i], 20, 3, 1, 1, ACTIVATION_RELU);  // 20x9x9, 20*32*3*3 weights
+            ann_add_conv2d(split[i], 6, 3, 2, 0, ACTIVATION_RELU);   // 6x4x4, 6*20*3*3 weights
+            ann_add_layer(split[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(split[i], 0.001f);
+            ann_set_convergence(split[i], 0.0f);
+            ann_set_epoch_limit(split[i], 3);
+            ann_set_batch_size(split[i], 8);
+        }
+        ann_gpu_upload_network(gpu_net);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU split-sum conv training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
+        // each activation, applied as conv and dense layers add their bias
+        // (GELU also saves the values before activation for its derivative)
+        const Activation_type acts[] = { ACTIVATION_GELU, ACTIVATION_LEAKY_RELU, ACTIVATION_SOFTSIGN,
+                                         ACTIVATION_TANH, ACTIVATION_SIGMOID };
+        const char *act_names[] = { "GELU", "leaky ReLU", "softsign", "tanh", "sigmoid" };
+        int acts_match = 1;
+        for (int a = 0; a < 5; a++) {
+            cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+            gpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+            PNetwork act_nets[2] = { cpu_net, gpu_net };
+            for (int i = 0; i < 2; i++) {
+                ann_add_input(act_nets[i], 2, 9, 9);
+                ann_add_conv2d(act_nets[i], 4, 3, 2, 1, acts[a]);   // 4x5x5
+                ann_add_flatten(act_nets[i]);
+                ann_add_layer(act_nets[i], 6, LAYER_HIDDEN, acts[a]);
+                ann_add_layer(act_nets[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+                ann_set_learning_rate(act_nets[i], 0.01f);
+                ann_set_convergence(act_nets[i], 0.0f);
+                ann_set_epoch_limit(act_nets[i], 3);
+                ann_set_batch_size(act_nets[i], 8);
+            }
+            ann_gpu_upload_network(gpu_net);
+            train_cnn(cpu_net, inputs, targets);
+            train_cnn(gpu_net, inputs, targets);
+            if (!cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1)) {
+                printf("\t(%s training differs)\n", act_names[a]);
+                acts_match = 0;
+            }
+            ann_free_network(cpu_net);
+            ann_free_network(gpu_net);
+        }
+        TESTEX("GPU conv and dense training matches the CPU's with each activation", acts_match);
+
         // pooling straight off the input: the first layer has no parameters
         PNetwork pool_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
         ann_add_input(pool_net, 2, 9, 9);

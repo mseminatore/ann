@@ -301,7 +301,8 @@ add_executable(gen_c_export tests/gen_c_export.c)
 target_link_libraries(gen_c_export libann ${BLAS_LIB} ${MATH_LIB})
 set(C_EXPORT_DIR ${CMAKE_CURRENT_BINARY_DIR}/c_export)
 set(C_EXPORT_FILES ${C_EXPORT_DIR}/ann_rt.h ${C_EXPORT_DIR}/expected.h
-    ${C_EXPORT_DIR}/dense_q.h ${C_EXPORT_DIR}/dense_f.h ${C_EXPORT_DIR}/cnn_q.h ${C_EXPORT_DIR}/cnn_f.h)
+    ${C_EXPORT_DIR}/dense_q.h ${C_EXPORT_DIR}/dense_f.h ${C_EXPORT_DIR}/cnn_q.h ${C_EXPORT_DIR}/cnn_f.h
+    ${C_EXPORT_DIR}/ae_q.h ${C_EXPORT_DIR}/ae_f.h)
 add_custom_command(OUTPUT ${C_EXPORT_FILES}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${C_EXPORT_DIR}
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/ann_rt.h ${C_EXPORT_DIR}/ann_rt.h

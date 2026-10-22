@@ -154,7 +154,7 @@ ann_set_layer_dropout | set dropout rate for a specific layer
 ann_get_layer_count | get the number of layers in the network
 ann_get_layer_nodes | get the number of nodes in a layer
 ann_get_layer_activation | get the activation type of a layer
-ann_get_layer_kind | get what a layer computes (`LAYER_KIND_DENSE`, `_CONV2D`, `_MAXPOOL2D`, `_FLATTEN`)
+ann_get_layer_kind | get what a layer computes (`LAYER_KIND_DENSE`, `_CONV2D`, `_MAXPOOL2D`, `_FLATTEN`, `_UPSAMPLE2D`, `_RESHAPE`)
 ann_get_layer_shape | get a layer's output shape (channels, height, width)
 ann_get_layer_settings | get a conv/pool layer's kernel or pool size, stride and padding
 ann_set_num_threads | set how many CPU threads libann uses (0 = default)
@@ -317,15 +317,40 @@ ann_add_input | input layer with an image shape (channels, height, width)
 ann_add_conv2d | 2-D convolution with square kernels, stride and zero padding
 ann_add_maxpool2d | 2-D max pooling per channel
 ann_add_flatten | reshape an image to a vector (optional: dense layers flatten their input)
+ann_add_upsample2d | nearest-neighbour upsampling by an integer scale, per channel
+ann_add_reshape | give the previous layer's values a (channels, height, width) shape
 
-Output sizes are `(H + 2*padding - kernel) / stride + 1` for convolutions and
-`(H - pool) / stride + 1` for pooling. Settings that don't fit the input, or
-an activation other than none on pool/flatten layers, return `ERR_INVALID`.
+Output sizes are `(H + 2*padding - kernel) / stride + 1` for convolutions,
+`(H - pool) / stride + 1` for pooling and `H * scale` for upsampling. Settings
+that don't fit the input, a reshape to a different size, or an activation
+other than none on pool/flatten/upsample/reshape layers, return `ERR_INVALID`.
+
+Upsampling and reshape layers build decoders, e.g. a convolutional
+autoencoder trained to reproduce (or denoise) its input:
+
+```c
+PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+ann_add_input(net, 1, 28, 28);
+ann_add_conv2d(net, 16, 3, 1, 1, ACTIVATION_RELU);    // 16x28x28
+ann_add_maxpool2d(net, 2, 2);                         // 16x14x14
+ann_add_conv2d(net, 8, 3, 1, 1, ACTIVATION_RELU);     // 8x14x14
+ann_add_maxpool2d(net, 2, 2);                         // 8x7x7
+ann_add_upsample2d(net, 2);                           // 8x14x14
+ann_add_conv2d(net, 16, 3, 1, 1, ACTIVATION_RELU);    // 16x14x14
+ann_add_upsample2d(net, 2);                           // 16x28x28
+ann_add_conv2d(net, 1, 3, 1, 1, ACTIVATION_SIGMOID);  // 1x28x28
+ann_train_network(net, x_train, x_train, x_train->rows);  // targets are the inputs
+```
+
+A dense bottleneck turns back into an image with `ann_add_reshape`, e.g.
+`... -> ann_add_layer(net, 392, ...) -> ann_add_reshape(net, 8, 7, 7) -> ann_add_upsample2d(net, 2) -> ...`.
 
 Convolutional networks train and run on the GPU with the Metal backend (the
 CUDA backend returns `ERR_INVALID` from `ann_gpu_upload_network()` for them, so
-they stay on the CPU there), save in model format v2, and export to and import
-from ONNX as `Conv`, `MaxPool` and `Flatten` with a `[batch, C, H, W]` input.
+they stay on the CPU there; so do networks with upsample or reshape layers,
+on both backends, for now), save in model format v2, and export to and import
+from ONNX as `Conv`, `MaxPool`, `Flatten`, `Resize` (nearest) and `Reshape`
+with a `[batch, C, H, W]` input.
 The importer also reads simple CNNs and MLPs exported by other tools, such as
 PyTorch (see [ONNX Export & Import](docs/ONNX_EXPORT.md)). The `fashion_cnn`
 example trains a two-convolution network on Fashion-MNIST to about 90% test

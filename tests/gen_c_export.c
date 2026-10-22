@@ -3,8 +3,8 @@
 //
 // Trains a small dense network and a small CNN, quantizes them, and writes
 // into the output directory:
-//   dense_q.h, cnn_q.h   int8 headers (ann_export_c_header with the int8 model)
-//   dense_f.h, cnn_f.h   float32 headers (ann_export_c_header without it)
+//   dense_q.h, cnn_q.h, ae_q.h   int8 headers (ann_export_c_header with the int8 model)
+//   dense_f.h, cnn_f.h, ae_f.h   float32 headers (ann_export_c_header without it)
 //   expected.h           test inputs and libann's outputs for them:
 //                        ann_quantized_predict_int8, ann_quantized_predict and
 //                        ann_predict
@@ -185,6 +185,19 @@ int main(int argc, char *argv[])
 	ann_add_layer(cnn, 3, LAYER_OUTPUT, ACTIVATION_TANH);
 	err |= export_model(cnn, argv[1], "cnn", expected, 2);
 	ann_free_network(cnn);
+
+	// decoder: dense bottleneck, reshape, upsampling around a pool, strided tanh conv
+	PNetwork ae = ann_make_network(OPT_ADAM, LOSS_MSE);
+	ann_add_layer(ae, 12, LAYER_INPUT, ACTIVATION_NULL);
+	ann_add_layer(ae, 8, LAYER_HIDDEN, ACTIVATION_RELU);
+	ann_add_reshape(ae, 2, 2, 2);
+	ann_add_upsample2d(ae, 2);
+	ann_add_conv2d(ae, 3, 3, 1, 1, ACTIVATION_SIGMOID);
+	ann_add_maxpool2d(ae, 2, 2);
+	ann_add_upsample2d(ae, 2);
+	ann_add_conv2d(ae, 2, 3, 2, 1, ACTIVATION_TANH);
+	err |= export_model(ae, argv[1], "ae", expected, 3);
+	ann_free_network(ae);
 
 	if (fclose(expected) != 0 || err != ERR_OK)
 	{

@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 #include <math.h>
 #include <stdarg.h>
 #include <assert.h>
@@ -656,6 +657,7 @@ static Tensor tensor_view(real *values, int rows, int cols)
 //------------------------------
 enum { CONV_KERNEL, CONV_STRIDE, CONV_PADDING, CONV_CONFIG_COUNT };
 enum { POOL_SIZE, POOL_STRIDE, POOL_CONFIG_COUNT };
+enum { UPSAMPLE_SCALE, UPSAMPLE_CONFIG_COUNT };
 
 //------------------------------
 // output size of a window sliding over n inputs; 0 if it does not fit
@@ -1141,6 +1143,121 @@ static void flatten_backward(PLayer layer, const PTensor X, const PTensor dZ, PT
 }
 
 //------------------------------
+// Reshape: like Flatten, any shape of the same size (forward and backward
+// are Flatten's copies)
+//------------------------------
+static int reshape_setup(PNetwork pnet, int layer)
+{
+	PLayer cur = &pnet->layers[layer];
+
+	if (cur->activation != ACTIVATION_NULL ||
+		cur->node_count != cur->in_shape.c * cur->in_shape.h * cur->in_shape.w)
+		return ERR_INVALID;
+	return ERR_OK;
+}
+
+//------------------------------
+// Upsample2D: no parameters; nearest-neighbour, so each input value fills a
+// scale x scale block of the output
+//------------------------------
+static int upsample_setup(PNetwork pnet, int layer)
+{
+	PLayer cur = &pnet->layers[layer];
+	int scale = cur->config[UPSAMPLE_SCALE];
+
+	if (cur->activation != ACTIVATION_NULL || scale < 1 || cur->shape.c != cur->in_shape.c ||
+		cur->shape.h != cur->in_shape.h * scale || cur->shape.w != cur->in_shape.w * scale)
+		return ERR_INVALID;
+	return ERR_OK;
+}
+
+//------------------------------
+// Upsample2D forward, split across threads by sample: write the first row of
+// each block, then copy it to the block's other rows
+//------------------------------
+static void upsample_forward_samples(void *arg, int begin, int end)
+{
+	const pool_job *job = (const pool_job *)arg;
+	PLayer layer = job->layer;
+	Layer_shape in = layer->in_shape;
+	int scale = layer->config[UPSAMPLE_SCALE], ow_n = layer->shape.w;
+	int in_nodes = in.c * in.h * in.w;
+
+	for (int b = begin; b < end; b++)
+	{
+		const real *x = job->x + (size_t)b * in_nodes;
+		real *y = job->y + (size_t)b * layer->node_count;
+
+		for (int row = 0; row < in.c * in.h; row++)
+		{
+			const real *xr = x + row * in.w;
+			real *yr = y + (size_t)row * scale * ow_n;
+
+			for (int iw = 0; iw < in.w; iw++)
+				for (int j = 0; j < scale; j++)
+					yr[iw * scale + j] = xr[iw];
+			for (int i = 1; i < scale; i++)
+				memcpy(yr + i * ow_n, yr, ow_n * sizeof(real));
+		}
+	}
+}
+
+static void upsample_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	pool_job job;
+
+	job.layer = layer;
+	job.x = X->values;
+	job.y = Y->values;
+	ann_parallel_for(rows, 1, upsample_forward_samples, &job);
+}
+
+//------------------------------
+// Upsample2D backward: each input's gradient is the sum over its block
+//------------------------------
+static void upsample_backward_samples(void *arg, int begin, int end)
+{
+	const pool_job *job = (const pool_job *)arg;
+	PLayer layer = job->layer;
+	Layer_shape in = layer->in_shape;
+	int scale = layer->config[UPSAMPLE_SCALE], ow_n = layer->shape.w;
+	int in_nodes = in.c * in.h * in.w;
+
+	for (int b = begin; b < end; b++)
+	{
+		const real *dz = job->x + (size_t)b * layer->node_count;
+		real *dx = job->y + (size_t)b * in_nodes;
+
+		for (int row = 0; row < in.c * in.h; row++)
+		{
+			const real *dzr = dz + (size_t)row * scale * ow_n;
+
+			for (int iw = 0; iw < in.w; iw++)
+			{
+				real sum = (real)0.0;
+				for (int i = 0; i < scale; i++)
+					for (int j = 0; j < scale; j++)
+						sum += dzr[i * ow_n + iw * scale + j];
+				dx[row * in.w + iw] = sum;
+			}
+		}
+	}
+}
+
+static void upsample_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
+{
+	pool_job job;
+	(void)X;
+	if (!dX)
+		return;
+
+	job.layer = layer;
+	job.x = dZ->values;
+	job.y = dX->values;
+	ann_parallel_for(rows, 1, upsample_backward_samples, &job);
+}
+
+//------------------------------
 // Operations every layer kind provides
 //------------------------------
 typedef struct {
@@ -1178,6 +1295,12 @@ static void maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const
                                char *output, size_t output_size, int *first);
 static void flatten_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
                                char *output, size_t output_size, int *first);
+static void upsample_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
+static void upsample_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                                char *output, size_t output_size, int *first);
+static void reshape_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
+static void reshape_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                               char *output, size_t output_size, int *first);
 
 // indexed by Layer_kind
 static const Layer_ops g_layer_ops[] = {
@@ -1189,6 +1312,10 @@ static const Layer_ops g_layer_ops[] = {
 	  no_onnx_initializers, maxpool_onnx_nodes },
 	{ "Flatten", 0, flatten_setup, NULL, flatten_forward, NULL, flatten_backward,
 	  no_onnx_initializers, flatten_onnx_nodes },
+	{ "Upsample2D", UPSAMPLE_CONFIG_COUNT, upsample_setup, NULL, upsample_forward, NULL, upsample_backward,
+	  upsample_onnx_initializers, upsample_onnx_nodes },
+	{ "Reshape", 0, reshape_setup, NULL, flatten_forward, NULL, flatten_backward,
+	  reshape_onnx_initializers, reshape_onnx_nodes },
 };
 
 static const Layer_ops *layer_ops(const Layer *layer)
@@ -2440,6 +2567,50 @@ int ann_add_flatten(PNetwork pnet)
 }
 
 //------------------------------
+// add a 2-D nearest-neighbour upsampling layer
+//------------------------------
+int ann_add_upsample2d(PNetwork pnet, int scale)
+{
+	const Layer_shape *in = last_shape(pnet);
+	Layer_shape shape;
+	int config[UPSAMPLE_CONFIG_COUNT];
+
+	// a scale that would overflow the output size is as bad as one below 1
+	if (in && (scale < 1 || in->h > INT_MAX / scale || in->w > INT_MAX / scale ||
+		in->c > INT_MAX / (in->h * scale) / (in->w * scale)))
+	{
+		invoke_error_callback(ERR_INVALID, "ann_add_upsample2d");
+		return ERR_INVALID;
+	}
+
+	config[UPSAMPLE_SCALE] = scale;
+	shape.c = in ? in->c : 1;
+	shape.h = in ? in->h * scale : 1;
+	shape.w = in ? in->w * scale : 1;
+	return add_layer(pnet, LAYER_KIND_UPSAMPLE2D, shape, config, UPSAMPLE_CONFIG_COUNT, LAYER_HIDDEN, ACTIVATION_NULL);
+}
+
+//------------------------------
+// add a reshape layer
+//------------------------------
+int ann_add_reshape(PNetwork pnet, int channels, int height, int width)
+{
+	const Layer_shape *in = last_shape(pnet);
+	Layer_shape shape;
+
+	shape.c = channels;
+	shape.h = height;
+	shape.w = width;
+	if (in && (channels < 1 || height < 1 || width < 1 || channels > INT_MAX / height / width ||
+		channels * height * width != in->c * in->h * in->w))
+	{
+		invoke_error_callback(ERR_INVALID, "ann_add_reshape");
+		return ERR_INVALID;
+	}
+	return add_layer(pnet, LAYER_KIND_RESHAPE, shape, NULL, 0, LAYER_HIDDEN, ACTIVATION_NULL);
+}
+
+//------------------------------
 // add a new dense layer to the network
 //------------------------------
 int ann_add_layer(PNetwork pnet, int node_count, Layer_type layer_type, Activation_type activation_type)
@@ -3618,6 +3789,8 @@ int ann_get_layer_settings(const PNetwork pnet, int layer, int *size, int *strid
 		*size = cur->config[POOL_SIZE];
 		*stride = cur->config[POOL_STRIDE];
 	}
+	else if (cur->kind == LAYER_KIND_UPSAMPLE2D)
+		*size = *stride = cur->config[UPSAMPLE_SCALE];
 	return ERR_OK;
 }
 
@@ -4416,11 +4589,12 @@ static void write_onnx_shape(FILE *fptr, const Layer_shape *shape, int image)
 }
 
 //-----------------------------------------------
-// Helper: write one ONNX node with a single input and output; attributes is
-// the JSON for its attribute list, or NULL
+// Helper: write one ONNX node with input_count inputs (an empty name skips
+// an optional input) and one output; attributes is the JSON for its
+// attribute list, or NULL
 //-----------------------------------------------
-static void write_onnx_node(FILE *fptr, const char *op_type, const char *name, const char *input,
-                            const char *output, const char *attributes, int *first)
+static void write_onnx_node_inputs(FILE *fptr, const char *op_type, const char *name, const char *const *inputs,
+                                   int input_count, const char *output, const char *attributes, int *first)
 {
 	if (!*first) fprintf(fptr, ",\n");
 	*first = 0;
@@ -4428,10 +4602,38 @@ static void write_onnx_node(FILE *fptr, const char *op_type, const char *name, c
 	fprintf(fptr, "      {\n");
 	fprintf(fptr, "        \"op_type\": \"%s\",\n", op_type);
 	fprintf(fptr, "        \"name\": \"%s\",\n", name);
-	fprintf(fptr, "        \"input\": [\"%s\"],\n", input);
+	fprintf(fptr, "        \"input\": [");
+	for (int i = 0; i < input_count; i++)
+		fprintf(fptr, "%s\"%s\"", i ? ", " : "", inputs[i]);
+	fprintf(fptr, "],\n");
 	fprintf(fptr, "        \"output\": [\"%s\"]%s\n", output, attributes ? "," : "");
 	if (attributes)
 		fprintf(fptr, "        \"attribute\": %s\n", attributes);
+	fprintf(fptr, "      }");
+}
+
+static void write_onnx_node(FILE *fptr, const char *op_type, const char *name, const char *input,
+                            const char *output, const char *attributes, int *first)
+{
+	write_onnx_node_inputs(fptr, op_type, name, &input, 1, output, attributes, first);
+}
+
+//-----------------------------------------------
+// Helper: write a constant initializer of count values: FLOAT (data_type 1)
+// or INT64 (data_type 7)
+//-----------------------------------------------
+static void write_onnx_constant(FILE *fptr, const char *name, int data_type, const int *values, int count, int *first)
+{
+	if (!*first) fprintf(fptr, ",\n");
+	*first = 0;
+
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"%s\",\n", name);
+	fprintf(fptr, "        \"data_type\": %d,\n", data_type);
+	fprintf(fptr, "        \"dims\": [%d],\n", count);
+	fprintf(fptr, "        \"%s\": ", data_type == 1 ? "float_data" : "int64_data");
+	write_json_int_array(fptr, values, count);
+	fprintf(fptr, "\n");
 	fprintf(fptr, "      }");
 }
 
@@ -4543,6 +4745,88 @@ static void flatten_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const
 }
 
 //-----------------------------------------------
+// Upsample2D: Resize(input, no roi, scales [1, 1, s, s]) with nearest
+// neighbours, as PyTorch writes nn.Upsample. String attributes are protobuf
+// bytes, so the JSON holds base64: "nearest", "asymmetric", "floor".
+//-----------------------------------------------
+static void upsample_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first)
+{
+	int scale = pnet->layers[layer].config[UPSAMPLE_SCALE];
+	int scales[4];
+	char name[48];
+
+	scales[0] = scales[1] = 1;
+	scales[2] = scales[3] = scale;
+	snprintf(name, sizeof(name), "upsample_%d_scales", layer - 1);
+	write_onnx_constant(fptr, name, 1, scales, 4, first);
+}
+
+static void upsample_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                                char *output, size_t output_size, int *first)
+{
+	char name[32], scales[48];
+	const char *inputs[3];
+	(void)pnet;
+
+	snprintf(name, sizeof(name), "upsample_%d", layer - 1);
+	snprintf(scales, sizeof(scales), "upsample_%d_scales", layer - 1);
+	snprintf(output, output_size, "upsample_%d_out", layer - 1);
+	inputs[0] = input;
+	inputs[1] = "";
+	inputs[2] = scales;
+	write_onnx_node_inputs(fptr, "Resize", name, inputs, 3, output,
+	                       "[{\"name\": \"mode\", \"type\": 3, \"s\": \"bmVhcmVzdA==\"}, "
+	                       "{\"name\": \"coordinate_transformation_mode\", \"type\": 3, \"s\": \"YXN5bW1ldHJpYw==\"}, "
+	                       "{\"name\": \"nearest_mode\", \"type\": 3, \"s\": \"Zmxvb3I=\"}]", first);
+}
+
+//-----------------------------------------------
+// Reshape: Reshape(input, shape [-1, C, H, W])
+//-----------------------------------------------
+static void reshape_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first)
+{
+	const Layer_shape *shape = &pnet->layers[layer].shape;
+	int dims[4];
+	char name[48];
+
+	dims[0] = -1;
+	dims[1] = shape->c;
+	dims[2] = shape->h;
+	dims[3] = shape->w;
+	snprintf(name, sizeof(name), "reshape_%d_shape", layer - 1);
+	write_onnx_constant(fptr, name, 7, dims, 4, first);
+}
+
+static void reshape_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                               char *output, size_t output_size, int *first)
+{
+	char name[32], shape[48];
+	const char *inputs[2];
+	(void)pnet;
+
+	snprintf(name, sizeof(name), "reshape_%d", layer - 1);
+	snprintf(shape, sizeof(shape), "reshape_%d_shape", layer - 1);
+	snprintf(output, output_size, "reshape_%d_out", layer - 1);
+	inputs[0] = input;
+	inputs[1] = shape;
+	write_onnx_node_inputs(fptr, "Reshape", name, inputs, 2, output, NULL, first);
+}
+
+//-----------------------------------------------
+// Helpers: whether a kind's ONNX node needs an image ([batch, C, H, W])
+// input, and whether it produces one
+//-----------------------------------------------
+static int onnx_needs_image(Layer_kind kind)
+{
+	return kind == LAYER_KIND_CONV2D || kind == LAYER_KIND_MAXPOOL2D || kind == LAYER_KIND_UPSAMPLE2D;
+}
+
+static int onnx_makes_image(Layer_kind kind)
+{
+	return onnx_needs_image(kind) || kind == LAYER_KIND_RESHAPE;
+}
+
+//-----------------------------------------------
 int ann_export_onnx(const PNetwork pnet, const char *filename)
 {
 	if (!pnet || !filename)
@@ -4558,13 +4842,13 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	}
 
 	// The ONNX input is an image [batch, C, H, W] when the input layer has a
-	// 2-D shape or conv/pool layers follow; dense layers take [batch, n], so
-	// the tensor is flattened before them. Conv/pool need an image input.
+	// 2-D shape or conv/pool/upsample layers follow (before any Reshape, which
+	// makes its own image); dense layers take [batch, n], so the tensor is
+	// flattened before them. Conv/pool/upsample need an image input.
 	int image_input = !onnx_is_flat(&pnet->layers[0].shape);
-	for (int layer = 1; layer < pnet->layer_count; layer++)
+	for (int layer = 1; layer < pnet->layer_count && pnet->layers[layer].kind != LAYER_KIND_RESHAPE; layer++)
 	{
-		Layer_kind kind = pnet->layers[layer].kind;
-		if (kind == LAYER_KIND_CONV2D || kind == LAYER_KIND_MAXPOOL2D)
+		if (onnx_needs_image(pnet->layers[layer].kind))
 			image_input = 1;
 	}
 
@@ -4573,13 +4857,12 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	{
 		PLayer cur = &pnet->layers[layer];
 		const Layer_ops *ops = layer_ops(cur);
-		int needs_image = cur->kind == LAYER_KIND_CONV2D || cur->kind == LAYER_KIND_MAXPOOL2D;
-		if (!ops->onnx_initializers || !ops->onnx_nodes || (needs_image && !image))
+		if (!ops->onnx_initializers || !ops->onnx_nodes || (onnx_needs_image(cur->kind) && !image))
 		{
 			invoke_error_callback(ERR_INVALID, "ann_export_onnx");
 			return ERR_INVALID;
 		}
-		image = needs_image;
+		image = onnx_makes_image(cur->kind);
 	}
 
 	FILE *fptr = fopen(filename, "wt");
@@ -4637,7 +4920,7 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 			                "[{\"name\": \"axis\", \"type\": 2, \"i\": 1}]", &first_node);
 			snprintf(prev_output, sizeof(prev_output), "%s", flat_out);
 		}
-		image = kind == LAYER_KIND_CONV2D || kind == LAYER_KIND_MAXPOOL2D;
+		image = onnx_makes_image(kind);
 
 		// The layer's own nodes (e.g. MatMul + Add), then its activation
 		layer_ops(&pnet->layers[layer])->onnx_nodes(fptr, pnet, layer, prev_output,
@@ -4985,6 +5268,61 @@ static int onnx_load_values(const JsonValue *init, PTensor t, int transpose)
 }
 
 //------------------------------
+// a small constant initializer's values (FLOAT or INT64, from float_data,
+// int64_data or raw_data) as doubles; returns their count, or -1 when it is
+// missing, malformed or has more than max values
+//------------------------------
+static int onnx_constant_values(const JsonValue *init, double *out, int max)
+{
+	int data_type = 1, count = 0;
+	if (!init || (onnx_get(init, "data_type") && !onnx_int(onnx_get(init, "data_type"), &data_type)) ||
+		(data_type != 1 && data_type != 7))
+		return -1;
+
+	const char *raw = json_string(onnx_get(init, "raw_data"));
+	if (raw)
+	{
+		int size = data_type == 1 ? 4 : 8;
+		unsigned char bytes[8 * 16];
+		if (max > 16 || (count = onnx_base64_decode(raw, bytes, (int)sizeof(bytes))) < 0 ||
+			count % size != 0 || count / size > max)
+			return -1;
+		count /= size;
+		for (int i = 0; i < count; i++)
+		{
+			const unsigned char *b = bytes + size * i;
+			if (data_type == 1)
+			{
+				unsigned int u = b[0] | ((unsigned int)b[1] << 8) | ((unsigned int)b[2] << 16) | ((unsigned int)b[3] << 24);
+				float f;
+				memcpy(&f, &u, sizeof(f));
+				out[i] = f;
+			}
+			else
+			{
+				// little-endian two's complement; shapes and scales are small
+				unsigned long long u = 0;
+				for (int k = 7; k >= 0; k--)
+					u = (u << 8) | b[k];
+				out[i] = (u >> 63) ? -(double)(~u + 1) : (double)u;
+			}
+		}
+		return count;
+	}
+
+	JsonValue *data = onnx_get(init, data_type == 1 ? "float_data" : "int64_data");
+	count = data && data->type == JSON_ARRAY ? (int)json_array_length(data) : -1;
+	if (count < 0 || count > max)
+		return -1;
+	for (int i = 0; i < count; i++)
+	{
+		if (!onnx_number(json_at(data, i), &out[i]))
+			return -1;
+	}
+	return count;
+}
+
+//------------------------------
 // an initializer's dims; returns their count, or -1 when malformed
 //------------------------------
 static int onnx_dims(const JsonValue *init, int *dims, int max)
@@ -5147,6 +5485,7 @@ PNetwork ann_import_onnx(const char *filename)
 		PLayer prev = &pnet->layers[pnet->layer_count - 1];
 		Layer_kind kind;
 		int units = 0, kernel = 0, stride = 1, pad = 0;
+		int dims4[4] = {0, 0, 0, 0};	// Reshape's [batch, C, H, W]
 		int transpose = 0;	// dense weights stored [in, out] (MatMul layout)
 		JsonValue *weight = NULL, *bias = NULL;
 
@@ -5272,6 +5611,106 @@ PNetwork ann_import_onnx(const char *filename)
 				continue;
 			kind = LAYER_KIND_FLATTEN;
 		}
+		else if (strcmp(op, "Resize") == 0 || strcmp(op, "Upsample") == 0)
+		{
+			// nearest-neighbour by one integer scale on H and W (nn.Upsample).
+			// Scales are the last input but sizes for Resize-11+ (X, roi,
+			// scales, sizes); the output sizes [N, C, OH, OW] give them too.
+			int resize = op[0] == 'R', n_in = (int)json_array_length(onnx_get(node, "input"));
+			const char *scales = n_in == 2 || n_in == 3 ? onnx_io(node, "input", n_in - 1) : NULL;
+			const char *sizes = resize && n_in == 4 ? onnx_io(node, "input", 3) : NULL;
+			double v[4];
+			int nv = -1;
+			if (scales && *scales)
+				nv = onnx_constant_values(onnx_initializer(graph, scales), v, 4);
+			else if (sizes && *sizes && (nv = onnx_constant_values(onnx_initializer(graph, sizes), v, 4)) == 4)
+			{
+				v[0] = 1.0;
+				v[1] /= prev->shape.c;
+				v[2] /= prev->shape.h;
+				v[3] /= prev->shape.w;
+			}
+
+			// which input pixel an output pixel copies: x / scale, floored, or
+			// (x + 0.5) / scale - 0.5 rounded (never a tie for integer scales);
+			// Upsample has no modes and floors
+			int has_ctm = onnx_attribute(node, "coordinate_transformation_mode") != NULL;
+			int has_nearest_mode = onnx_attribute(node, "nearest_mode") != NULL;
+			int asymmetric = has_ctm && onnx_string_is(node, "coordinate_transformation_mode", "asymmetric", "YXN5bW1ldHJpYw==");
+			int half_pixel = !has_ctm ||
+				onnx_string_is(node, "coordinate_transformation_mode", "half_pixel", "aGFsZl9waXhlbA==") ||
+				onnx_string_is(node, "coordinate_transformation_mode", "pytorch_half_pixel", "cHl0b3JjaF9oYWxmX3BpeGVs");
+			int floors = has_nearest_mode && onnx_string_is(node, "nearest_mode", "floor", "Zmxvb3I=");
+			int rounds = !has_nearest_mode ||
+				onnx_string_is(node, "nearest_mode", "round_prefer_floor", "cm91bmRfcHJlZmVyX2Zsb29y") ||
+				onnx_string_is(node, "nearest_mode", "round_prefer_ceil", "cm91bmRfcHJlZmVyX2NlaWw=");
+			int matches = !resize || (asymmetric && floors) || (half_pixel && rounds);
+
+			if (!image || nv != 4 || v[0] != 1.0 || v[1] != 1.0 || v[2] != v[3] || v[2] < 1.0 || v[2] > 4096.0 ||
+				v[2] != (double)(int)v[2] || !matches || !onnx_string_is(node, "mode", "nearest", "bmVhcmVzdA=="))
+			{
+				error = "ann_import_onnx: unsupported Resize (needs nearest mode and one integer scale on H and W)";
+				goto fail;
+			}
+			kind = LAYER_KIND_UPSAMPLE2D;
+			kernel = (int)v[2];
+		}
+		else if (strcmp(op, "Reshape") == 0)
+		{
+			// to [batch, C, H, W], or [batch, n] (a Flatten); 0 copies the
+			// input's dim and one -1 is inferred, so the batch is -1, 0 or 1
+			double v[4];
+			int nv = onnx_constant_values(onnx_initializer(graph, onnx_io(node, "input", 1)), v, 4);
+			int in_dims[4], allow_zero = 0, infer = -1, product = 1, ok = nv == 2 || nv == 4;
+			JsonValue *az = onnx_attribute(node, "allowzero");
+			if (az && !onnx_int(onnx_get(az, "i"), &allow_zero))
+				allow_zero = 1;
+
+			in_dims[0] = 1;
+			in_dims[1] = image ? prev->shape.c : prev->node_count;
+			in_dims[2] = prev->shape.h;
+			in_dims[3] = prev->shape.w;
+			for (int d = 0; ok && d < nv; d++)
+			{
+				if (v[d] == -1.0 && infer < 0)
+				{
+					infer = d;
+					dims4[d] = 1;
+				}
+				else if (v[d] == 0.0 && !allow_zero && d < (image ? 4 : 2))
+					dims4[d] = in_dims[d];
+				else if (v[d] >= 1.0 && v[d] <= (double)prev->node_count && v[d] == (double)(int)v[d])
+					dims4[d] = (int)v[d];
+				else
+					ok = 0;
+				if (ok && d > 0)
+					product *= dims4[d];
+				if (ok && product > prev->node_count)
+					ok = 0;
+			}
+			if (ok && infer > 0)
+			{
+				ok = prev->node_count % product == 0;
+				dims4[infer] = prev->node_count / product;
+				product = prev->node_count;
+			}
+			if (!ok || (infer != 0 && dims4[0] != 1) || product != prev->node_count)
+			{
+				error = "ann_import_onnx: unsupported Reshape (needs a constant [batch, C, H, W] or [batch, n] shape)";
+				goto fail;
+			}
+
+			if (nv == 2)
+			{
+				current = output;
+				if (!image)
+					continue;	// flat to flat: nothing to do
+				image = 0;
+				kind = LAYER_KIND_FLATTEN;
+			}
+			else
+				kind = LAYER_KIND_RESHAPE;
+		}
 		else
 		{
 			error = "ann_import_onnx: unsupported op";
@@ -5286,7 +5725,7 @@ PNetwork ann_import_onnx(const char *filename)
 		{
 			int ok;
 			Activation_type next_act = onnx_node_activation(next, &ok);
-			if (!ok || (next_act != ACTIVATION_NULL && (kind == LAYER_KIND_MAXPOOL2D || kind == LAYER_KIND_FLATTEN)))
+			if (!ok || (next_act != ACTIVATION_NULL && kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D))
 			{
 				error = "ann_import_onnx: unsupported activation";
 				goto fail;
@@ -5304,6 +5743,8 @@ PNetwork ann_import_onnx(const char *filename)
 		case LAYER_KIND_DENSE:		err = ann_add_layer(pnet, units, LAYER_HIDDEN, act); break;
 		case LAYER_KIND_CONV2D:		err = ann_add_conv2d(pnet, units, kernel, stride, pad, act); break;
 		case LAYER_KIND_MAXPOOL2D:	err = ann_add_maxpool2d(pnet, kernel, stride); break;
+		case LAYER_KIND_UPSAMPLE2D:	err = ann_add_upsample2d(pnet, kernel); break;
+		case LAYER_KIND_RESHAPE:	err = ann_add_reshape(pnet, dims4[1], dims4[2], dims4[3]); break;
 		default:					err = ann_add_flatten(pnet); break;
 		}
 		if (err != ERR_OK)
@@ -5322,7 +5763,7 @@ PNetwork ann_import_onnx(const char *filename)
 			goto fail;
 		}
 
-		if (kind == LAYER_KIND_CONV2D || kind == LAYER_KIND_MAXPOOL2D)
+		if (onnx_makes_image(kind))
 			image = 1;
 		current = output;
 	}

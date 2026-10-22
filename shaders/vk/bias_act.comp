@@ -2,7 +2,9 @@
 #include "common.glsl"
 // y = activate(y + bias) over a [rows x cols] buffer, first saving y + bias
 // in z when save_z is set (the values before activation, for GELU's
-// derivative). Softmax passes through here and is applied by softmax.comp.
+// derivative). Without has_bias there is no bias: layers without parameters
+// (upsample, flatten, reshape) apply their activation this way. Softmax
+// passes through here and is applied by softmax.comp.
 
 layout(local_size_x = 256) in;
 
@@ -15,13 +17,16 @@ layout(push_constant) uniform Params {
     uint cols;
     uint act;
     uint save_z;
+    uint has_bias;
 } pc;
 
 void main()
 {
     GRID_LOOP(i, pc.n)
     {
-        float v = y[i] + bias[i % pc.cols];
+        float v = y[i];
+        if (pc.has_bias != 0)
+            v += bias[i % pc.cols];
         if (pc.save_z != 0)
             z[i] = v;
         y[i] = activate(v, pc.act);

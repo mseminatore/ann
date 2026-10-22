@@ -3,9 +3,10 @@
 //   op(A) [M x K] is A, or A^T when TRANS_A (A stored [K x M])
 //   op(B) [K x N] is B, or B^T when TRANS_B (B stored [N x K])
 // The host builds one pipeline per (TRANS_A, TRANS_B) pair it uses. Each
-// 16x16 workgroup computes a 64x64 tile of C, each invocation a 4x4 block of
-// it, staging 16-deep slices of op(A) and op(B) in shared memory. When beta
-// is 0, C is written without being read, so it may hold anything.
+// 16x16 workgroup computes 64x64 tiles of C, each invocation a 4x4 block of
+// them, staging 16-deep slices of op(A) and op(B) in shared memory. When beta
+// is 0, C is written without being read, so it may hold anything. With split-K
+// (more than one workgroup in z) each z writes partial sums to its own block.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -19,6 +20,7 @@ layout(std430, binding = 2) buffer BufC { float c[]; };
 layout(push_constant) uniform Params {
     uint M, N, K;
     float alpha, beta;
+    uint k_slice;   // depth of each workgroup z's slice of K (K when not split)
 } pc;
 
 #define TILE 64
@@ -28,16 +30,16 @@ layout(push_constant) uniform Params {
 shared float tile_a[DEPTH][TILE + 1];
 shared float tile_b[DEPTH][TILE + 1];
 
-float load_a(uint m, uint k)
+float load_a(uint m, uint k, uint k_end)
 {
-    if (m >= pc.M || k >= pc.K)
+    if (m >= pc.M || k >= k_end)
         return 0.0;
     return TRANS_A != 0 ? a[k * pc.M + m] : a[m * pc.K + k];
 }
 
-float load_b(uint k, uint n)
+float load_b(uint k, uint n, uint k_end)
 {
-    if (k >= pc.K || n >= pc.N)
+    if (k >= k_end || n >= pc.N)
         return 0.0;
     return TRANS_B != 0 ? b[n * pc.K + k] : b[k * pc.N + n];
 }
@@ -47,63 +49,74 @@ void main()
     uint tx = gl_LocalInvocationID.x;
     uint ty = gl_LocalInvocationID.y;
     uint tid = ty * 16 + tx;
-    uint row0 = gl_WorkGroupID.y * TILE;
     uint col0 = gl_WorkGroupID.x * TILE;
 
-    float acc[4][4];
-    for (uint i = 0; i < 4; i++)
-        for (uint j = 0; j < 4; j++)
-            acc[i][j] = 0.0;
+    // Split-K: workgroup z takes K's slice [k_begin, k_end) and writes its
+    // own [M x N] block of C, which the host has sum_partials.comp add up
+    uint k_begin = gl_WorkGroupID.z * pc.k_slice;
+    uint k_end = min(pc.K, k_begin + pc.k_slice);
+    uint c_base = gl_WorkGroupID.z * pc.M * pc.N;
 
-    for (uint k0 = 0; k0 < pc.K; k0 += DEPTH)
+    // Row tiles beyond the workgroup count (capped at the device limit) are
+    // taken in turn; the loop bounds are the same for the whole workgroup,
+    // so its barriers stay uniform
+    for (uint row0 = gl_WorkGroupID.y * TILE; row0 < pc.M; row0 += gl_NumWorkGroups.y * TILE)
     {
-        // 256 invocations load the 16x64 slices, 4 elements each. Consecutive
-        // invocations take consecutive addresses in the stored matrix: along
-        // k when A is not transposed (row-major [M x K]), along m when it is.
-        for (uint e = 0; e < 4; e++)
-        {
-            uint idx = tid + e * 256;
-            uint k, m, n;
-            if (TRANS_A != 0) { k = idx / TILE; m = idx % TILE; }
-            else              { m = idx / DEPTH; k = idx % DEPTH; }
-            tile_a[k][m] = load_a(row0 + m, k0 + k);
-
-            if (TRANS_B != 0) { n = idx / DEPTH; k = idx % DEPTH; }
-            else              { k = idx / TILE; n = idx % TILE; }
-            tile_b[k][n] = load_b(k0 + k, col0 + n);
-        }
-        barrier();
-
-        // Invocation (tx, ty) owns rows ty + 16i and columns tx + 16j of the tile
-        for (uint k = 0; k < DEPTH; k++)
-        {
-            float av[4], bv[4];
-            for (uint i = 0; i < 4; i++)
-                av[i] = tile_a[k][ty + 16 * i];
+        float acc[4][4];
+        for (uint i = 0; i < 4; i++)
             for (uint j = 0; j < 4; j++)
-                bv[j] = tile_b[k][tx + 16 * j];
-            for (uint i = 0; i < 4; i++)
-                for (uint j = 0; j < 4; j++)
-                    acc[i][j] += av[i] * bv[j];
-        }
-        barrier();
-    }
+                acc[i][j] = 0.0;
 
-    for (uint i = 0; i < 4; i++)
-    {
-        uint r = row0 + ty + 16 * i;
-        if (r >= pc.M)
-            continue;
-        for (uint j = 0; j < 4; j++)
+        for (uint k0 = k_begin; k0 < k_end; k0 += DEPTH)
         {
-            uint col = col0 + tx + 16 * j;
-            if (col >= pc.N)
+            // 256 invocations load the 16x64 slices, 4 elements each. Consecutive
+            // invocations take consecutive addresses in the stored matrix: along
+            // k when A is not transposed (row-major [M x K]), along m when it is.
+            for (uint e = 0; e < 4; e++)
+            {
+                uint idx = tid + e * 256;
+                uint k, m, n;
+                if (TRANS_A != 0) { k = idx / TILE; m = idx % TILE; }
+                else              { m = idx / DEPTH; k = idx % DEPTH; }
+                tile_a[k][m] = load_a(row0 + m, k0 + k, k_end);
+
+                if (TRANS_B != 0) { n = idx / DEPTH; k = idx % DEPTH; }
+                else              { k = idx / TILE; n = idx % TILE; }
+                tile_b[k][n] = load_b(k0 + k, col0 + n, k_end);
+            }
+            barrier();
+
+            // Invocation (tx, ty) owns rows ty + 16i and columns tx + 16j of the tile
+            for (uint k = 0; k < DEPTH; k++)
+            {
+                float av[4], bv[4];
+                for (uint i = 0; i < 4; i++)
+                    av[i] = tile_a[k][ty + 16 * i];
+                for (uint j = 0; j < 4; j++)
+                    bv[j] = tile_b[k][tx + 16 * j];
+                for (uint i = 0; i < 4; i++)
+                    for (uint j = 0; j < 4; j++)
+                        acc[i][j] += av[i] * bv[j];
+            }
+            barrier();
+        }
+
+        for (uint i = 0; i < 4; i++)
+        {
+            uint r = row0 + ty + 16 * i;
+            if (r >= pc.M)
                 continue;
-            uint o = r * pc.N + col;
-            float v = pc.alpha * acc[i][j];
-            if (pc.beta != 0.0)
-                v += pc.beta * c[o];
-            c[o] = v;
+            for (uint j = 0; j < 4; j++)
+            {
+                uint col = col0 + tx + 16 * j;
+                if (col >= pc.N)
+                    continue;
+                uint o = c_base + r * pc.N + col;
+                float v = pc.alpha * acc[i][j];
+                if (pc.beta != 0.0)
+                    v += pc.beta * c[o];
+                c[o] = v;
+            }
         }
     }
 }

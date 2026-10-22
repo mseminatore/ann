@@ -1,8 +1,11 @@
 #version 450
 #include "common.glsl"
-// bias_grad[col] += sum over rows of dl_dz[row][col], one invocation per column
+// bias_grad[col] += sum over rows of dl_dz[row][col]. One workgroup per column
+// (looping over columns beyond the workgroup count): its invocations sum every
+// 256th row, then add up their sums in shared memory. Conv layers have
+// batch*OH*OW rows, far too many for one invocation per column.
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) readonly buffer BufDelta { float dl_dz[]; };
 layout(std430, binding = 1) buffer BufGrad { float bias_grad[]; };
@@ -12,13 +15,26 @@ layout(push_constant) uniform Params {
     uint cols;
 } pc;
 
+shared float part[256];
+
 void main()
 {
-    GRID_LOOP(col, pc.cols)
+    uint t = gl_LocalInvocationID.x;
+    for (uint col = gl_WorkGroupID.x; col < pc.cols; col += gl_NumWorkGroups.x)
     {
         float s = 0.0;
-        for (uint r = 0; r < pc.rows; r++)
+        for (uint r = t; r < pc.rows; r += 256)
             s += dl_dz[r * pc.cols + col];
-        bias_grad[col] += s;
+        part[t] = s;
+        barrier();
+        for (uint w = 128; w > 0; w /= 2)
+        {
+            if (t < w)
+                part[t] += part[t + w];
+            barrier();
+        }
+        if (t == 0)
+            bias_grad[col] += part[0];
+        barrier();
     }
 }

@@ -1,0 +1,28 @@
+#version 450
+#include "common.glsl"
+// Conv backward: dz [batch][F][OH*OW] times the activation's derivative (act,
+// from av: the layer's activations, or Z for GELU) rearranged to rows
+// [batch*OH*OW x F], the layout of the forward GEMM's output
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufDz { float dz[]; };
+layout(std430, binding = 1) writeonly buffer BufRows { float rows[]; };
+layout(std430, binding = 2) readonly buffer BufAv { float av[]; };
+
+layout(push_constant) uniform Params {
+    WindowDims d;
+    uint act;
+} pc;
+
+void main()
+{
+    WindowDims d = pc.d;
+    uint positions = d.OH * d.OW;
+    GRID_LOOP(i, d.batch * d.F * positions)
+    {
+        uint pos = i % positions, t = i / positions;
+        uint f = t % d.F, b = t / d.F;
+        rows[(b * positions + pos) * d.F + f] = dz[i] * derivative(av[i], pc.act);
+    }
+}

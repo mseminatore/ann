@@ -375,8 +375,13 @@ add_custom_command(OUTPUT ${C_EXPORT_FILES}
     COMMAND gen_c_export ${C_EXPORT_DIR}
     DEPENDS gen_c_export ${CMAKE_SOURCE_DIR}/ann_rt.h
     COMMENT "Exporting test models as C headers")
+# one target owns the headers: listing them in both tests' sources would run
+# the export once per test, and in a parallel build the two runs overwrite
+# each other's files
+add_custom_target(c_export_headers DEPENDS ${C_EXPORT_FILES})
 foreach(target test_c_export test_c_export_int8)
-    add_executable(${target} tests/test_c_export.c ${C_EXPORT_FILES})
+    add_executable(${target} tests/test_c_export.c)
+    add_dependencies(${target} c_export_headers)
     target_include_directories(${target} PRIVATE ${C_EXPORT_DIR})
     if(NOT MSVC)
         target_compile_options(${target} PRIVATE -std=c99 -Wall -Wextra -pedantic -Werror)

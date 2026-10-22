@@ -571,28 +571,41 @@ void test_main(int argc, char *argv[])
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 
-        // a conv autoencoder (pool 3, upsample 3) trained to reproduce its inputs
-        cpu_net = ann_make_network(OPT_ADAM, LOSS_MSE);
-        gpu_net = ann_make_network(OPT_ADAM, LOSS_MSE);
-        PNetwork ae[2] = { cpu_net, gpu_net };
-        for (int i = 0; i < 2; i++) {
-            ann_add_input(ae[i], 2, 9, 9);
-            ann_add_conv2d(ae[i], 4, 3, 1, 1, ACTIVATION_RELU);     // 4x9x9
-            ann_add_maxpool2d(ae[i], 3, 3);                         // 4x3x3
-            ann_add_upsample2d(ae[i], 3);                           // 4x9x9
-            ann_add_conv2d(ae[i], 2, 3, 1, 1, ACTIVATION_SIGMOID);  // 2x9x9
-            ann_set_learning_rate(ae[i], 0.01f);
-            ann_set_convergence(ae[i], 0.0f);
-            ann_set_epoch_limit(ae[i], 3);
-            ann_set_batch_size(ae[i], 8);
+        // a conv autoencoder (pool 3, upsample 3) trained to reproduce its
+        // inputs, with MSE and with binary cross-entropy (the output conv
+        // layer's delta then has no activation derivative)
+        const Loss_type ae_losses[] = { LOSS_MSE, LOSS_BINARY_CROSS_ENTROPY };
+        for (int k = 0; k < 2; k++) {
+            cpu_net = ann_make_network(OPT_ADAM, ae_losses[k]);
+            gpu_net = ann_make_network(OPT_ADAM, ae_losses[k]);
+            PNetwork ae[2] = { cpu_net, gpu_net };
+            for (int i = 0; i < 2; i++) {
+                ann_add_input(ae[i], 2, 9, 9);
+                ann_add_conv2d(ae[i], 4, 3, 1, 1, ACTIVATION_RELU);     // 4x9x9
+                ann_add_maxpool2d(ae[i], 3, 3);                         // 4x3x3
+                ann_add_upsample2d(ae[i], 3);                           // 4x9x9
+                ann_add_conv2d(ae[i], 2, 3, 1, 1, ACTIVATION_SIGMOID);  // 2x9x9
+                ann_set_learning_rate(ae[i], 0.01f);
+                ann_set_convergence(ae[i], 0.0f);
+                ann_set_epoch_limit(ae[i], 3);
+                ann_set_batch_size(ae[i], 8);
+            }
+            int uploaded = ann_gpu_upload_network(gpu_net) == ERR_OK;
+            if (k == 0) {
+                TESTEX("A network with upsampling uploads", uploaded);
+            }
+            train_cnn(cpu_net, inputs, inputs);
+            train_cnn(gpu_net, inputs, inputs);
+            if (k == 0) {
+                TESTEX("GPU autoencoder training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+                TESTEX("GPU autoencoder inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+            } else {
+                TESTEX("GPU autoencoder training with cross-entropy matches CPU training",
+                       uploaded && cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+            }
+            ann_free_network(cpu_net);
+            ann_free_network(gpu_net);
         }
-        TESTEX("A network with upsampling uploads", ann_gpu_upload_network(gpu_net) == ERR_OK);
-        train_cnn(cpu_net, inputs, inputs);
-        train_cnn(gpu_net, inputs, inputs);
-        TESTEX("GPU autoencoder training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
-        TESTEX("GPU autoencoder inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
-        ann_free_network(cpu_net);
-        ann_free_network(gpu_net);
 
         // a dense bottleneck reshaped to an image, upsampled and convolved
         cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
@@ -628,6 +641,30 @@ void test_main(int argc, char *argv[])
         TESTEX("A network starting with a pool layer uploads", ann_gpu_upload_network(pool_net) == ERR_OK);
         TESTEX("and its GPU inference matches the CPU", cnn_gpu_matches_cpu(pool_net, inputs, TOLERANCE));
         ann_free_network(pool_net);
+
+        // non-overlapping pooling that leaves the last input row and column
+        // out of every window: their gradients must be zero
+        cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        gpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        PNetwork edge[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(edge[i], 2, 9, 9);
+            ann_add_conv2d(edge[i], 4, 3, 1, 1, ACTIVATION_RELU);   // 4x9x9
+            ann_add_maxpool2d(edge[i], 2, 2);                       // 4x4x4
+            ann_add_flatten(edge[i]);
+            ann_add_layer(edge[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(edge[i], 0.01f);
+            ann_set_convergence(edge[i], 0.0f);
+            ann_set_epoch_limit(edge[i], 3);
+            ann_set_batch_size(edge[i], 8);
+        }
+        int edge_uploaded = ann_gpu_upload_network(gpu_net) == ERR_OK;
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU training through a 2x2 pool with uncovered edges matches CPU training",
+               edge_uploaded && cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
 
         tensor_free(inputs);
         tensor_free(targets);

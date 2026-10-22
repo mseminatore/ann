@@ -108,6 +108,10 @@ typedef struct {
     id<MTLComputePipelineState> pso_conv_col2im;
     id<MTLComputePipelineState> pso_maxpool_forward;
     id<MTLComputePipelineState> pso_maxpool_backward;
+    id<MTLComputePipelineState> pso_maxpool_backward_tiled;
+    id<MTLComputePipelineState> pso_conv_direct_forward;
+    id<MTLComputePipelineState> pso_conv_direct_input_grad;
+    id<MTLComputePipelineState> pso_conv_direct_weight_grad;
     id<MTLComputePipelineState> pso_upsample_forward;
     id<MTLComputePipelineState> pso_upsample_backward;
     id<MTLComputePipelineState> pso_copy_buffer;
@@ -235,6 +239,19 @@ int tensor_metal_init(void)
         "    case ACT_SOFTSIGN: return x / (1.0f + fabs(x));\n"
         "    case ACT_GELU: return 0.5f * x * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x)));\n"
         "    default: return x; } }\n"
+        // The activation's derivative, from a (z for GELU) as the deriv_*
+        // kernels below compute it; 1 for anything else
+        "inline float derivative(float v, uint act) {\n"
+        "    switch (act) {\n"
+        "    case ACT_SIGMOID: return v * (1.0f - v);\n"
+        "    case ACT_RELU: return v > 0.0f ? 1.0f : 0.0f;\n"
+        "    case ACT_LEAKY_RELU: return v > 0.0f ? 1.0f : 0.01f;\n"
+        "    case ACT_TANH: return 1.0f - v * v;\n"
+        "    case ACT_SOFTSIGN: { float d = 1.0f - fabs(v); return d * d; }\n"
+        "    case ACT_GELU: {\n"
+        "        float t = tanh(0.7978845608f * (v + 0.044715f * v * v * v));\n"
+        "        return 0.5f * (1.0f + t) + 0.5f * v * (1.0f - t * t) * 0.7978845608f * (1.0f + 3.0f * 0.044715f * v * v); }\n"
+        "    default: return 1.0f; } }\n"
         // y = activate(y + bias), first saving y + bias in z when save_z
         "kernel void bias_add(\n"
         "    device float *buf [[buffer(0)]],\n"
@@ -430,8 +447,9 @@ int tensor_metal_init(void)
         "    dl_dz[gid] *= m;\n"
         "    if (m != 0.0f) a[gid] /= m; }\n"
         // ----------------------------------------------------------------
-        // Output layer: delta = t - y and each row's loss term, one thread
-        // per row. mode 0 = MSE (squared error), 1 = categorical cross-entropy,
+        // Output layer: delta = t - y and each row's loss term, one
+        // threadgroup (a power of two, at most 256 threads) per row.
+        // mode 0 = MSE (squared error), 1 = categorical cross-entropy,
         // 2 = binary cross-entropy (sigmoid outputs); y is clamped like
         // ann_cross_entropy_term().
         // ----------------------------------------------------------------
@@ -442,9 +460,12 @@ int tensor_metal_init(void)
         "    device float *row_loss [[buffer(3)]],\n"
         "    constant uint &cols [[buffer(4)]],\n"
         "    constant uint &mode [[buffer(5)]],\n"
-        "    uint row [[thread_position_in_grid]]) {\n"
+        "    uint row [[threadgroup_position_in_grid]],\n"
+        "    uint tid [[thread_position_in_threadgroup]],\n"
+        "    uint tn [[threads_per_threadgroup]]) {\n"
+        "    threadgroup float part[256];\n"
         "    float s = 0.0f;\n"
-        "    for (uint n = 0; n < cols; n++) {\n"
+        "    for (uint n = tid; n < cols; n += tn) {\n"
         "        uint i = row * cols + n;\n"
         "        float yi = y[i], ti = t[i];\n"
         "        delta[i] = ti - yi;\n"
@@ -453,7 +474,12 @@ int tensor_metal_init(void)
         "            float c = clamp(yi, 1e-7f, 1.0f - 1e-7f);\n"
         "            s += mode == 2 ? -(ti * log(c) + (1.0f - ti) * log(1.0f - c)) : -ti * log(c);\n"
         "        } }\n"
-        "    row_loss[row] = s; }\n"
+        "    part[tid] = s;\n"
+        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "    for (uint w = tn / 2; w > 0; w /= 2) {\n"
+        "        if (tid < w) part[tid] += part[tid + w];\n"
+        "        threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+        "    if (tid == 0) row_loss[row] = part[0]; }\n"
         // ----------------------------------------------------------------
         // MSE through a softmax output: d = y * (d - sum(d * y)) per row
         // ----------------------------------------------------------------
@@ -517,46 +543,67 @@ int tensor_metal_init(void)
         "    float v = rows[(gid.z * pos_n + gid.x) * f_n + gid.y] + bias[gid.y];\n"
         "    if (act_save_z.y) z[i] = v;\n"
         "    y[i] = activate(v, act_save_z.x); }\n"
-        // dz [batch][F][P] -> rows [batch*P x F]; grid (P, F, batch)
+        // dz [batch][F][P] times the activation's derivative (act, from av:
+        // the layer's A, or Z for GELU) -> rows [batch*P x F]; grid (P, F, batch)
         "kernel void conv_grad_rows(\n"
         "    device const float *dz [[buffer(0)]],\n"
         "    device float *rows [[buffer(1)]],\n"
+        "    device const float *av [[buffer(2)]],\n"
+        "    constant uint &act [[buffer(3)]],\n"
         "    uint3 gid [[thread_position_in_grid]],\n"
         "    uint3 dims [[threads_per_grid]]) {\n"
-        "    uint pos_n = dims.x, f_n = dims.y;\n"
-        "    rows[(gid.z * pos_n + gid.x) * f_n + gid.y] = dz[(gid.z * f_n + gid.y) * pos_n + gid.x]; }\n"
-        // db[f] += sum of dz over the batch and positions; one threadgroup
-        // (a power of two, at most 256 threads) per filter
+        "    uint pos_n = dims.x, f_n = dims.y, i = (gid.z * f_n + gid.y) * pos_n + gid.x;\n"
+        "    rows[(gid.z * pos_n + gid.x) * f_n + gid.y] = dz[i] * derivative(av[i], act); }\n"
+        // db[f] += sum of the dz rows' column f; one threadgroup (a power of
+        // two, at most 256 threads) per filter
         "kernel void conv_bias_grad(\n"
-        "    device const float *dz [[buffer(0)]],\n"
+        "    device const float *dz_rows [[buffer(0)]],\n"
         "    device float *db [[buffer(1)]],\n"
         "    constant WindowDims &d [[buffer(2)]],\n"
         "    uint f [[threadgroup_position_in_grid]],\n"
         "    uint t [[thread_position_in_threadgroup]],\n"
         "    uint n [[threads_per_threadgroup]]) {\n"
         "    threadgroup float part[256];\n"
-        "    uint pos_n = d.OH * d.OW; float s = 0.0f;\n"
-        "    for (uint i = t; i < d.batch * pos_n; i += n)\n"
-        "        s += dz[((i / pos_n) * d.F + f) * pos_n + i % pos_n];\n"
+        "    float s = 0.0f;\n"
+        "    for (uint i = t; i < d.batch * d.OH * d.OW; i += n)\n"
+        "        s += dz_rows[i * d.F + f];\n"
         "    part[t] = s;\n"
         "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
         "    for (uint w = n / 2; w > 0; w /= 2) {\n"
         "        if (t < w) part[t] += part[t + w];\n"
         "        threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
         "    if (t == 0) db[f] += part[0]; }\n"
+        // Reading im2col columns without building them: a ColWalk follows row
+        // r's (sample, oh, ow) as r advances, and col_input gives column
+        // (c, i, j) of that row from the input x (for conv_direct_weight_grad)
+        "struct ColWalk { uint b, oh, ow; };\n"
+        "inline ColWalk col_walk_start(uint r, constant WindowDims &d) {\n"
+        "    uint pos = d.OH * d.OW; ColWalk w;\n"
+        "    w.b = r / pos; w.oh = (r % pos) / d.OW; w.ow = r % d.OW; return w; }\n"
+        "inline void col_walk_advance(thread ColWalk &w, uint step, constant WindowDims &d) {\n"
+        "    w.ow += step;\n"
+        "    while (w.ow >= d.OW) { w.ow -= d.OW; if (++w.oh == d.OH) { w.oh = 0; w.b++; } } }\n"
+        "inline float col_input(device const float *x, constant WindowDims &d, thread const ColWalk &w,\n"
+        "                       uint c, uint i, uint j) {\n"
+        "    int ih = int(w.oh * d.S + i) - int(d.P), iw = int(w.ow * d.S + j) - int(d.P);\n"
+        "    return ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W)\n"
+        "        ? x[((w.b * d.C + c) * d.H + uint(ih)) * d.W + uint(iw)] : 0.0f; }\n"
         // dW [F x P] += dz_rows^T * cols (P = C*K*K), a sum over batch*OH*OW rows
-        // with few outputs (F*P < 8192). Threadgroups (p blocks, f blocks of 16,
-        // row chunks) of (PX, Y) threads: a thread takes one p, so a SIMD group
-        // reads cols rows contiguously, keeps the sums for its 16 filters, and
-        // takes every Y-th row of the chunk (n = rows, rows per chunk, F, P); the
-        // threadgroup then adds up its Y sums. With one chunk the sums are added to
-        // dW, else stored in partial[chunk][F][P] for sum_partials. The _vec4
-        // version, for F % 4 == 0, reads dz_rows as float4.
+        // with few outputs (F*P < 8192), and db [F] += column sums of dz_rows,
+        // taken as column P of cols, all ones. Threadgroups (p blocks over P + 1
+        // columns, f blocks of 16, row chunks) of (PX, Y) threads: a thread takes
+        // one p, so a SIMD group reads cols rows contiguously, keeps the sums for
+        // its 16 filters, and takes every Y-th row of the chunk (n = rows, rows
+        // per chunk, F, P); the threadgroup then adds up its Y sums. With one
+        // chunk the sums are added to dW and db, else stored in partial[chunk]
+        // (dW's F*P sums, then db's F) for sum_partials. The _vec4 version, for
+        // F % 4 == 0, reads dz_rows as float4.
         "kernel void conv_weight_grad_lanes(\n"
         "    device const float *dz_rows [[buffer(0)]],\n"
         "    device const float *cols [[buffer(1)]],\n"
         "    device float *out [[buffer(2)]],\n"
-        "    constant uint4 &n [[buffer(3)]],\n"
+        "    device float *db [[buffer(3)]],\n"
+        "    constant uint4 &n [[buffer(4)]],\n"
         "    uint3 tg [[threadgroup_position_in_grid]],\n"
         "    uint3 tgs [[threadgroups_per_grid]],\n"
         "    uint3 tid [[thread_position_in_threadgroup]],\n"
@@ -567,26 +614,28 @@ int tensor_metal_init(void)
         "    uint r1 = min((tg.z + 1) * n.y, n.x);\n"
         "    float acc[16];\n"
         "    for (uint i = 0; i < 16; i++) acc[i] = 0.0f;\n"
-        "    if (p < P)\n"
+        "    if (p <= P)\n"
         "        for (uint r = tg.z * n.y + tid.y; r < r1; r += Y) {\n"
-        "            float c = cols[r * P + p];\n"
-        "            device const float *d = dz_rows + r * F + f0;\n"
+        "            float c = p < P ? cols[r * P + p] : 1.0f;\n"
+        "            device const float *g = dz_rows + r * F + f0;\n"
         "            for (uint i = 0; i < 16; i++)\n"
-        "                if (i < fb) acc[i] += d[i] * c; }\n"
+        "                if (i < fb) acc[i] += g[i] * c; }\n"
         "    for (uint i = 0; i < 16; i++) red[(tid.y * 16 + i) * PX + tid.x] = acc[i];\n"
         "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
         "    for (uint o = tid.y * PX + tid.x; o < 16 * PX; o += PX * Y) {\n"
         "        uint i = o / PX, x = o % PX, pp = tg.x * PX + x, f = f0 + i;\n"
-        "        if (pp >= P || i >= fb) continue;\n"
+        "        if (pp > P || i >= fb) continue;\n"
         "        float s = 0.0f;\n"
         "        for (uint y = 0; y < Y; y++) s += red[(y * 16 + i) * PX + x];\n"
-        "        if (tgs.z == 1) out[f * P + pp] += s;\n"
-        "        else out[(tg.z * F + f) * P + pp] = s; } }\n"
+        "        if (tgs.z > 1) out[tg.z * F * (P + 1) + (pp < P ? f * P + pp : F * P + f)] = s;\n"
+        "        else if (pp < P) out[f * P + pp] += s;\n"
+        "        else db[f] += s; } }\n"
         "kernel void conv_weight_grad_lanes_vec4(\n"
         "    device const float *dz_rows [[buffer(0)]],\n"
         "    device const float *cols [[buffer(1)]],\n"
         "    device float *out [[buffer(2)]],\n"
-        "    constant uint4 &n [[buffer(3)]],\n"
+        "    device float *db [[buffer(3)]],\n"
+        "    constant uint4 &n [[buffer(4)]],\n"
         "    uint3 tg [[threadgroup_position_in_grid]],\n"
         "    uint3 tgs [[threadgroups_per_grid]],\n"
         "    uint3 tid [[thread_position_in_threadgroup]],\n"
@@ -596,37 +645,82 @@ int tensor_metal_init(void)
         "    uint p = tg.x * PX + tid.x, fb4 = min(4u, F4 - tg.y * 4);\n"
         "    uint r1 = min((tg.z + 1) * n.y, n.x);\n"
         "    float4 acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };\n"
-        "    if (p < P) {\n"
-        "        device const float4 *d = (device const float4 *)dz_rows + tg.y * 4;\n"
+        "    if (p <= P) {\n"
+        "        device const float4 *g = (device const float4 *)dz_rows + tg.y * 4;\n"
         "        if (fb4 == 4)\n"
         "            for (uint r = tg.z * n.y + tid.y; r < r1; r += Y) {\n"
-        "                float c = cols[r * P + p];\n"
-        "                acc[0] += d[r * F4] * c; acc[1] += d[r * F4 + 1] * c;\n"
-        "                acc[2] += d[r * F4 + 2] * c; acc[3] += d[r * F4 + 3] * c; }\n"
+        "                float c = p < P ? cols[r * P + p] : 1.0f;\n"
+        "                acc[0] += g[r * F4] * c; acc[1] += g[r * F4 + 1] * c;\n"
+        "                acc[2] += g[r * F4 + 2] * c; acc[3] += g[r * F4 + 3] * c; }\n"
         "        else\n"
         "            for (uint r = tg.z * n.y + tid.y; r < r1; r += Y) {\n"
-        "                float c = cols[r * P + p];\n"
-        "                for (uint i = 0; i < fb4; i++) acc[i] += d[r * F4 + i] * c; } }\n"
+        "                float c = p < P ? cols[r * P + p] : 1.0f;\n"
+        "                for (uint i = 0; i < fb4; i++) acc[i] += g[r * F4 + i] * c; } }\n"
         "    for (uint i = 0; i < 4; i++) red[(tid.y * 4 + i) * PX + tid.x] = acc[i];\n"
         "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
         "    for (uint o = tid.y * PX + tid.x; o < 4 * PX; o += PX * Y) {\n"
         "        uint i = o / PX, x = o % PX, pp = tg.x * PX + x;\n"
-        "        if (pp >= P || i >= fb4) continue;\n"
+        "        if (pp > P || i >= fb4) continue;\n"
         "        float4 s = 0.0f;\n"
         "        for (uint y = 0; y < Y; y++) s += red[(y * 4 + i) * PX + x];\n"
         "        for (uint j = 0; j < 4; j++) {\n"
         "            uint f = tg.y * 16 + i * 4 + j;\n"
-        "            if (tgs.z == 1) out[f * P + pp] += s[j];\n"
-        "            else out[(tg.z * n.z + f) * P + pp] = s[j]; } } }\n"
+        "            if (tgs.z > 1) out[tg.z * n.z * (P + 1) + (pp < P ? f * P + pp : n.z * P + f)] = s[j];\n"
+        "            else if (pp < P) out[f * P + pp] += s[j];\n"
+        "            else db[f] += s[j]; } } }\n"
+        // dW and db for a direct conv (F <= 4), without im2col columns: one
+        // threadgroup (a power of two, at most 256 threads) per column p of the
+        // P + 1 (column P is the bias, all ones) and row chunk (n = rows, rows
+        // per chunk). Its threads take consecutive rows, so a SIMD group reads
+        // x and dz_rows contiguously; each keeps a sum per filter, and the
+        // threadgroup adds them up into dW and db, or into partial[chunk] for
+        // sum_partials when there are chunks (laid out as for the lanes kernels).
+        "kernel void conv_direct_weight_grad(\n"
+        "    device const float *dz_rows [[buffer(0)]],\n"
+        "    device const float *x [[buffer(1)]],\n"
+        "    device float *out [[buffer(2)]],\n"
+        "    device float *db [[buffer(3)]],\n"
+        "    constant uint2 &n [[buffer(4)]],\n"
+        "    constant WindowDims &d [[buffer(5)]],\n"
+        "    uint2 tg [[threadgroup_position_in_grid]],\n"
+        "    uint2 tgs [[threadgroups_per_grid]],\n"
+        "    uint2 tid [[thread_position_in_threadgroup]],\n"
+        "    uint2 tpg [[threads_per_threadgroup]]) {\n"
+        "    threadgroup float4 red[256];\n"
+        "    uint t = tid.x, T = tpg.x, kk = d.K * d.K, P = d.C * kk, p = tg.x;\n"
+        "    uint ci = p / kk, ki = p % kk / d.K, kj = p % d.K;\n"
+        "    uint r = tg.y * n.y + t, r1 = min((tg.y + 1) * n.y, n.x);\n"
+        "    ColWalk w = col_walk_start(r, d);\n"
+        "    float4 acc = 0.0f;\n"
+        "    for (; r < r1; r += T) {\n"
+        "        float c = p < P ? col_input(x, d, w, ci, ki, kj) : 1.0f;\n"
+        "        col_walk_advance(w, T, d);\n"
+        "        device const float *g = dz_rows + r * d.F;\n"
+        "        for (uint f = 0; f < 4; f++)\n"
+        "            if (f < d.F) acc[f] += g[f] * c; }\n"
+        "    red[t] = acc;\n"
+        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "    for (uint s = T / 2; s > 0; s /= 2) {\n"
+        "        if (t < s) red[t] += red[t + s];\n"
+        "        threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+        "    if (t >= d.F) return;\n"
+        "    float v = red[0][t];\n"
+        "    if (tgs.y > 1) out[tg.y * d.F * (P + 1) + (p < P ? t * P + p : d.F * P + t)] = v;\n"
+        "    else if (p < P) out[t * P + p] += v;\n"
+        "    else db[t] += v; }\n"
+        // adds up the chunks' partial sums, each dW [F x P] followed by db [F],
+        // into dW and db (n = chunks, F*P); grid F*(P + 1)
         "kernel void sum_partials(\n"
         "    device const float *partial [[buffer(0)]],\n"
-        "    device float *out [[buffer(1)]],\n"
-        "    constant uint &chunks [[buffer(2)]],\n"
+        "    device float *dw [[buffer(1)]],\n"
+        "    device float *db [[buffer(2)]],\n"
+        "    constant uint2 &n [[buffer(3)]],\n"
         "    uint gid [[thread_position_in_grid]],\n"
         "    uint count [[threads_per_grid]]) {\n"
         "    float s = 0.0f;\n"
-        "    for (uint c = 0; c < chunks; c++) s += partial[c * count + gid];\n"
-        "    out[gid] += s; }\n"
+        "    for (uint c = 0; c < n.x; c++) s += partial[c * count + gid];\n"
+        "    if (gid < n.y) dw[gid] += s;\n"
+        "    else db[gid - n.y] += s; }\n"
         // dx[b][c][ih][iw] = sum of the column gradients that read it (a
         // gather, so no atomics); grid (W, H, batch*C)
         "kernel void conv_col2im(\n"
@@ -635,15 +729,76 @@ int tensor_metal_init(void)
         "    constant WindowDims &d [[buffer(2)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
         "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.K, ckk = d.C * kk;\n"
-        "    int S = int(d.S); float s = 0.0f;\n"
+        "    float s = 0.0f;\n"
         "    for (uint i = 0; i < d.K; i++) {\n"
         "        int ty = int(gid.y + d.P) - int(i);\n"
-        "        if (ty < 0 || ty % S != 0 || uint(ty / S) >= d.OH) continue;\n"
+        "        if (ty < 0) continue;\n"
+        "        uint oh = uint(ty);\n"
+        "        if (d.S > 1) { if (oh % d.S) continue; oh /= d.S; }\n"
+        "        if (oh >= d.OH) continue;\n"
         "        for (uint j = 0; j < d.K; j++) {\n"
         "            int tx = int(gid.x + d.P) - int(j);\n"
-        "            if (tx < 0 || tx % S != 0 || uint(tx / S) >= d.OW) continue;\n"
-        "            uint row = b * d.OH * d.OW + uint(ty / S) * d.OW + uint(tx / S);\n"
+        "            if (tx < 0) continue;\n"
+        "            uint ow = uint(tx);\n"
+        "            if (d.S > 1) { if (ow % d.S) continue; ow /= d.S; }\n"
+        "            if (ow >= d.OW) continue;\n"
+        "            uint row = (b * d.OH + oh) * d.OW + ow;\n"
         "            s += dcols[row * ckk + c * kk + i * d.K + j]; } }\n"
+        "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
+        // Direct convolution for layers with few filters, where a GEMM over
+        // im2col columns has too few outputs to be efficient: one thread per
+        // output sums its window (in the im2col order, c then i then j), adds
+        // the bias and activates as conv_output does; grid (OW, OH, batch*F)
+        "kernel void conv_direct_forward(\n"
+        "    device const float *x [[buffer(0)]],\n"
+        "    device const float *w [[buffer(1)]],\n"
+        "    device const float *bias [[buffer(2)]],\n"
+        "    device float *y [[buffer(3)]],\n"
+        "    device float *z [[buffer(4)]],\n"
+        "    constant WindowDims &d [[buffer(5)]],\n"
+        "    constant uint2 &act_save_z [[buffer(6)]],\n"
+        "    uint3 gid [[thread_position_in_grid]]) {\n"
+        "    uint b = gid.z / d.F, f = gid.z % d.F, kk = d.K * d.K;\n"
+        "    int ih0 = int(gid.y * d.S) - int(d.P), iw0 = int(gid.x * d.S) - int(d.P);\n"
+        "    float s = 0.0f;\n"
+        "    for (uint c = 0; c < d.C; c++) {\n"
+        "        device const float *xs = x + (b * d.C + c) * d.H * d.W;\n"
+        "        device const float *wf = w + (f * d.C + c) * kk;\n"
+        "        for (uint i = 0; i < d.K; i++) {\n"
+        "            int ih = ih0 + int(i);\n"
+        "            if (ih < 0 || ih >= int(d.H)) continue;\n"
+        "            for (uint j = 0; j < d.K; j++) {\n"
+        "                int iw = iw0 + int(j);\n"
+        "                if (iw >= 0 && iw < int(d.W)) s += xs[ih * int(d.W) + iw] * wf[i * d.K + j]; } } }\n"
+        "    uint o = (gid.z * d.OH + gid.y) * d.OW + gid.x;\n"
+        "    float v = s + bias[f];\n"
+        "    if (act_save_z.y) z[o] = v;\n"
+        "    y[o] = activate(v, act_save_z.x); }\n"
+        // dx[b][c][ih][iw] = sum of dz_rows * W over the outputs whose
+        // windows read it (conv_col2im without the column gradients);
+        // grid (W, H, batch*C)
+        "kernel void conv_direct_input_grad(\n"
+        "    device const float *dz_rows [[buffer(0)]],\n"
+        "    device const float *w [[buffer(1)]],\n"
+        "    device float *dx [[buffer(2)]],\n"
+        "    constant WindowDims &d [[buffer(3)]],\n"
+        "    uint3 gid [[thread_position_in_grid]]) {\n"
+        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.K;\n"
+        "    float s = 0.0f;\n"
+        "    for (uint i = 0; i < d.K; i++) {\n"
+        "        int ty = int(gid.y + d.P) - int(i);\n"
+        "        if (ty < 0) continue;\n"
+        "        uint oh = uint(ty);\n"
+        "        if (d.S > 1) { if (oh % d.S) continue; oh /= d.S; }\n"
+        "        if (oh >= d.OH) continue;\n"
+        "        for (uint j = 0; j < d.K; j++) {\n"
+        "            int tx = int(gid.x + d.P) - int(j);\n"
+        "            if (tx < 0) continue;\n"
+        "            uint ow = uint(tx);\n"
+        "            if (d.S > 1) { if (ow % d.S) continue; ow /= d.S; }\n"
+        "            if (ow >= d.OW) continue;\n"
+        "            device const float *g = dz_rows + ((b * d.OH + oh) * d.OW + ow) * d.F;\n"
+        "            for (uint f = 0; f < d.F; f++) s += g[f] * w[(f * d.C + c) * kk + i * d.K + j]; } }\n"
         "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
         // Each output takes its window's largest input (the first on ties,
         // scanning as the CPU does) and records its index within the sample;
@@ -681,6 +836,25 @@ int tensor_metal_init(void)
         "            uint out = (gid.z * d.OH + oh) * d.OW + ow;\n"
         "            if (arg[out] == me) s += dz[out]; }\n"
         "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
+        // The same when K == S: the windows tile the input, so each output
+        // writes its window, dz at the input it took and zero elsewhere; the
+        // last row and column of outputs also zero the inputs no window
+        // covers. grid (OW, OH, batch*C)
+        "kernel void maxpool_backward_tiled(\n"
+        "    device const float *dz [[buffer(0)]],\n"
+        "    device float *dx [[buffer(1)]],\n"
+        "    device const uint *arg [[buffer(2)]],\n"
+        "    constant WindowDims &d [[buffer(3)]],\n"
+        "    uint3 gid [[thread_position_in_grid]]) {\n"
+        "    uint out = (gid.z * d.OH + gid.y) * d.OW + gid.x;\n"
+        "    uint best = arg[out] - (gid.z % d.C) * d.H * d.W;\n"
+        "    float g = dz[out];\n"
+        "    uint h0 = gid.y * d.S, w0 = gid.x * d.S;\n"
+        "    uint h1 = gid.y + 1 == d.OH ? d.H : h0 + d.K, w1 = gid.x + 1 == d.OW ? d.W : w0 + d.K;\n"
+        "    device float *plane = dx + gid.z * d.H * d.W;\n"
+        "    for (uint h = h0; h < h1; h++)\n"
+        "        for (uint w = w0; w < w1; w++)\n"
+        "            plane[h * d.W + w] = h * d.W + w == best ? g : 0.0f; }\n"
         // Nearest-neighbour upsampling by K (the scale): each input fills a
         // K x K block; grid (OW, OH, batch*C)
         "kernel void upsample_forward(\n"
@@ -772,6 +946,10 @@ int tensor_metal_init(void)
     g_metal.pso_sum_partials     = make_pso(g_metal.library, "sum_partials");
     g_metal.pso_maxpool_forward  = make_pso(g_metal.library, "maxpool_forward");
     g_metal.pso_maxpool_backward = make_pso(g_metal.library, "maxpool_backward");
+    g_metal.pso_maxpool_backward_tiled = make_pso(g_metal.library, "maxpool_backward_tiled");
+    g_metal.pso_conv_direct_forward = make_pso(g_metal.library, "conv_direct_forward");
+    g_metal.pso_conv_direct_input_grad = make_pso(g_metal.library, "conv_direct_input_grad");
+    g_metal.pso_conv_direct_weight_grad = make_pso(g_metal.library, "conv_direct_weight_grad");
     g_metal.pso_upsample_forward = make_pso(g_metal.library, "upsample_forward");
     g_metal.pso_upsample_backward = make_pso(g_metal.library, "upsample_backward");
     g_metal.pso_copy_buffer      = make_pso(g_metal.library, "copy_buffer");
@@ -781,7 +959,10 @@ int tensor_metal_init(void)
         !g_metal.pso_conv_bias_grad || !g_metal.pso_conv_col2im ||
         !g_metal.pso_conv_weight_grad_lanes || !g_metal.pso_conv_weight_grad_lanes_vec4 ||
         !g_metal.pso_sum_partials ||
-        !g_metal.pso_maxpool_forward || !g_metal.pso_maxpool_backward || !g_metal.pso_copy_buffer ||
+        !g_metal.pso_maxpool_forward || !g_metal.pso_maxpool_backward ||
+        !g_metal.pso_maxpool_backward_tiled ||
+        !g_metal.pso_conv_direct_forward || !g_metal.pso_conv_direct_input_grad ||
+        !g_metal.pso_conv_direct_weight_grad || !g_metal.pso_copy_buffer ||
         !g_metal.pso_upsample_forward || !g_metal.pso_upsample_backward ||
         !g_metal.pso_transpose)
         return 0;
@@ -1118,7 +1299,7 @@ static void encode_grid(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> ps
 //   SCRATCH_COLS  - conv im2col columns [batch*OH*OW x C*K*K]; pool argmax
 //   SCRATCH_ROWS  - conv output rows, then dZ rows [batch*OH*OW x F]
 //   SCRATCH_DCOLS - conv column gradients [batch*OH*OW x C*K*K]
-//   SCRATCH_PARTIAL - conv weight gradient partial sums [chunks x F*C*K*K]
+//   SCRATCH_PARTIAL - conv weight and bias gradient partial sums [chunks x F*(C*K*K + 1)]
 //-----------------------------------------------------------
 enum { SCRATCH_COLS, SCRATCH_ROWS, SCRATCH_DCOLS, SCRATCH_PARTIAL, SCRATCH_SLOTS };
 
@@ -1131,10 +1312,28 @@ static id<MTLBuffer> layer_scratch(int layer, int slot, size_t bytes)
     return buf;
 }
 
+// Conv2D layers with at most this many filters convolve directly, with no
+// im2col columns: a GEMM with so few outputs per column row runs slowly
+// (fashion_dae's 16 -> 1 output conv at batch 32 on an Intel Iris Plus 655:
+// MPS took 2.6 ms, the direct kernel 0.3 ms), and the columns are C*K*K
+// times the input's size to write and read back. The weight gradient reads
+// the input too (conv_direct_weight_grad), unless the layer is big enough
+// for the GEMM; with 8 filters the GEMM path was as fast or faster.
+#define CONV_DIRECT_FILTERS 4
+// Their weight gradient's threadgroup size and the number of threadgroups
+// to aim for
+#define CONV_DIRECT_THREADS 128
+#define CONV_DIRECT_GROUPS 256
+
+static int conv_direct(const WindowDims *d)
+{
+    return d->F <= CONV_DIRECT_FILTERS;
+}
+
 //-----------------------------------------------------------
 // Conv2D forward for a batch, as on the CPU but with one GEMM for the whole
 // batch: rows [batch*OH*OW x F] = im2col(X) * W^T, then Y = rows + b
-// rearranged to [batch][F][OH*OW]
+// rearranged to [batch][F][OH*OW]; or directly (conv_direct)
 //-----------------------------------------------------------
 static int encode_conv_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
                                id<MTLBuffer> X, id<MTLBuffer> Y, id<MTLBuffer> Z)
@@ -1142,6 +1341,24 @@ static int encode_conv_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int laye
     PLayer l = &pnet->layers[layer];
     WindowDims d = window_dims(pnet, layer, batch_size);
     NSUInteger positions = d.OH * d.OW, rows = (NSUInteger)batch_size * positions, patch = d.C * d.K * d.K;
+    uint32_t act_save_z[2] = { (uint32_t)l->activation, Z != nil };
+    if (conv_direct(&d)) {
+        id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
+        id<MTLComputePipelineState> pso = g_metal.pso_conv_direct_forward;
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:X offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)l->params[0].value->gpu_buf offset:0 atIndex:1];
+        [enc setBuffer:(__bridge id<MTLBuffer>)l->params[1].value->gpu_buf offset:0 atIndex:2];
+        [enc setBuffer:Y offset:0 atIndex:3];
+        [enc setBuffer:Z ? Z : Y offset:0 atIndex:4];
+        [enc setBytes:&d length:sizeof(d) atIndex:5];
+        [enc setBytes:act_save_z length:sizeof(act_save_z) atIndex:6];
+        NSUInteger tw = MIN(pso.threadExecutionWidth, (NSUInteger)d.OW);
+        NSUInteger th = MIN(pso.maxTotalThreadsPerThreadgroup / tw, (NSUInteger)d.OH);
+        [enc dispatchThreads:MTLSizeMake(d.OW, d.OH, (NSUInteger)batch_size * d.F) threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+        return 1;
+    }
+
     id<MTLBuffer> cols = layer_scratch(layer, SCRATCH_COLS, rows * patch * sizeof(float));
     id<MTLBuffer> out_rows = layer_scratch(layer, SCRATCH_ROWS, rows * d.F * sizeof(float));
     if (!cols || !out_rows)
@@ -1152,7 +1369,6 @@ static int encode_conv_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int laye
                 MTLSizeMake(d.OW, d.OH, (NSUInteger)batch_size * d.C));
     encode_gemm(cmd, cols, rows, patch, NO, (__bridge id<MTLBuffer>)l->params[0].value->gpu_buf, d.F, patch, YES,
                 out_rows, 1.0, 0.0);
-    uint32_t act_save_z[2] = { (uint32_t)l->activation, Z != nil };
     id<MTLBuffer> out_bufs[4] = { out_rows, (__bridge id<MTLBuffer>)l->params[1].value->gpu_buf, Y, Z ? Z : Y };
     encode_grid(cmd, g_metal.pso_conv_output, out_bufs, 4, act_save_z, sizeof(act_save_z),
                 MTLSizeMake(positions, d.F, (NSUInteger)batch_size));
@@ -1167,77 +1383,131 @@ static int encode_conv_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int laye
 #define CONV_SPLIT_GROUPS 64
 
 //-----------------------------------------------------------
-// Conv2D backward for a batch: dW += dZ_rows^T * cols, db += sums of dZ,
-// and, when dX is given, dX = col2im(dZ_rows * W). cols is kept from the
-// forward pass.
+// Conv2D backward for a batch: dZ_rows = dZ * f'(z) for the activation act
+// (ACTIVATION_NULL when dZ already has it), dW += dZ_rows^T * cols,
+// db += sums of dZ_rows, and, when dX is given, dX = col2im(dZ_rows * W).
+// cols is kept from the forward pass. A direct conv has none: its weight
+// gradient reads the layer's input X (or builds cols from it for the GEMM),
+// and dX is computed directly.
 //-----------------------------------------------------------
 static int encode_conv_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
-                                id<MTLBuffer> dZ, id<MTLBuffer> dX)
+                                id<MTLBuffer> X, id<MTLBuffer> dZ, id<MTLBuffer> dX, Activation_type act)
 {
     PLayer l = &pnet->layers[layer];
     WindowDims d = window_dims(pnet, layer, batch_size);
     NSUInteger positions = d.OH * d.OW, rows = (NSUInteger)batch_size * positions, patch = d.C * d.K * d.K;
+    NSUInteger outputs = d.F * patch;
     id<MTLBuffer> W = (__bridge id<MTLBuffer>)l->params[0].value->gpu_buf;
-    id<MTLBuffer> cols = layer_scratch(layer, SCRATCH_COLS, rows * patch * sizeof(float));
     id<MTLBuffer> dz_rows = layer_scratch(layer, SCRATCH_ROWS, rows * d.F * sizeof(float));
-    if (!cols || !dz_rows)
+    if (!dz_rows)
         return 0;
 
-    id<MTLBuffer> row_bufs[2] = { dZ, dz_rows };
-    encode_grid(cmd, g_metal.pso_conv_grad_rows, row_bufs, 2, NULL, 0, MTLSizeMake(positions, d.F, (NSUInteger)batch_size));
+    // A direct conv has no columns from the forward pass: its weight
+    // gradient reads the input instead, unless it is big enough for the GEMM
+    id<MTLBuffer> cols = X;
+    int implicit = conv_direct(&d) && outputs < CONV_SPLIT_OUTPUTS;
+    if (!implicit) {
+        if (!(cols = layer_scratch(layer, SCRATCH_COLS, rows * patch * sizeof(float))))
+            return 0;
+        if (conv_direct(&d)) {
+            id<MTLBuffer> im2col_bufs[2] = { X, cols };
+            encode_grid(cmd, g_metal.pso_conv_im2col, im2col_bufs, 2, &d, sizeof(d),
+                        MTLSizeMake(d.OW, d.OH, (NSUInteger)batch_size * d.C));
+        }
+    }
 
-    // dW += dz_rows^T * cols. With few outputs, each summing many rows, a
-    // GEMM runs with little parallelism, so below CONV_SPLIT_OUTPUTS the rows
-    // are split into chunks, about CONV_SPLIT_GROUPS threadgroups in all,
-    // whose partial sums are then added up; larger layers use the (tiled)
-    // MPS GEMM.
-    NSUInteger outputs = d.F * patch;
+    // the derivative reads A, or Z for GELU (the only one the forward pass saves)
+    uint32_t act_code = (uint32_t)act;
+    id<MTLBuffer> av = (__bridge id<MTLBuffer>)(act == ACTIVATION_GELU ? l->t_batch_z : l->t_batch_values)->gpu_buf;
+    id<MTLBuffer> row_bufs[3] = { dZ, dz_rows, av };
+    encode_grid(cmd, g_metal.pso_conv_grad_rows, row_bufs, 3, &act_code, sizeof(act_code),
+                MTLSizeMake(positions, d.F, (NSUInteger)batch_size));
+
+    // dW += dz_rows^T * cols and db += column sums of dz_rows. With few
+    // outputs, each summing many rows, a GEMM runs with little parallelism,
+    // so below CONV_SPLIT_OUTPUTS the rows are split into chunks, about
+    // CONV_SPLIT_GROUPS threadgroups in all, whose partial sums are then
+    // added up; the bias is one more column there. Larger layers use the
+    // (tiled) MPS GEMM and a reduction per filter for the bias.
     id<MTLBuffer> dW = (__bridge id<MTLBuffer>)l->params[0].grad->gpu_buf;
-    if (outputs >= CONV_SPLIT_OUTPUTS)
+    id<MTLBuffer> db = (__bridge id<MTLBuffer>)l->params[1].grad->gpu_buf;
+    if (outputs >= CONV_SPLIT_OUTPUTS) {
         encode_gemm(cmd, dz_rows, rows, d.F, YES, cols, rows, patch, NO, dW, 1.0, 1.0);
-    else {
+
+        // one threadgroup per filter; the kernel's reduction needs a power of two
+        NSUInteger tg = 256;
+        while (tg > g_metal.pso_conv_bias_grad.maxTotalThreadsPerThreadgroup)
+            tg /= 2;
+        id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
+        [enc setComputePipelineState:g_metal.pso_conv_bias_grad];
+        [enc setBuffer:dz_rows offset:0 atIndex:0];
+        [enc setBuffer:db offset:0 atIndex:1];
+        [enc setBytes:&d length:sizeof(d) atIndex:2];
+        [enc dispatchThreadgroups:MTLSizeMake(d.F, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    } else if (implicit) {
+        // a threadgroup per column and row chunk, about CONV_DIRECT_GROUPS in all
+        NSUInteger columns = patch + 1, threads = CONV_DIRECT_THREADS;
+        while (threads > g_metal.pso_conv_direct_weight_grad.maxTotalThreadsPerThreadgroup)
+            threads /= 2;
+        NSUInteger chunks = MIN(MAX(CONV_DIRECT_GROUPS / columns, (NSUInteger)1), (rows + threads - 1) / threads);
+        uint32_t n[2] = { (uint32_t)rows, (uint32_t)((rows + chunks - 1) / chunks) };
+        chunks = (rows + n[1] - 1) / n[1];
+        uint32_t sum_n[2] = { (uint32_t)chunks, (uint32_t)outputs };
+        id<MTLBuffer> partial = dW;
+        if (chunks > 1 && !(partial = layer_scratch(layer, SCRATCH_PARTIAL, chunks * d.F * columns * sizeof(float))))
+            return 0;
+        id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
+        [enc setComputePipelineState:g_metal.pso_conv_direct_weight_grad];
+        [enc setBuffer:dz_rows offset:0 atIndex:0];
+        [enc setBuffer:X offset:0 atIndex:1];
+        [enc setBuffer:partial offset:0 atIndex:2];
+        [enc setBuffer:db offset:0 atIndex:3];
+        [enc setBytes:n length:sizeof(n) atIndex:4];
+        [enc setBytes:&d length:sizeof(d) atIndex:5];
+        [enc dispatchThreadgroups:MTLSizeMake(columns, chunks, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+        if (chunks > 1) {
+            id<MTLBuffer> sum_bufs[3] = { partial, dW, db };
+            encode_grid(cmd, g_metal.pso_sum_partials, sum_bufs, 3, sum_n, sizeof(sum_n),
+                        MTLSizeMake(d.F * columns, 1, 1));
+        }
+    } else {
         id<MTLComputePipelineState> pso = d.F % 4 == 0 ? g_metal.pso_conv_weight_grad_lanes_vec4
                                                        : g_metal.pso_conv_weight_grad_lanes;
+        NSUInteger columns = patch + 1;
         NSUInteger threads = MIN((NSUInteger)256, pso.maxTotalThreadsPerThreadgroup);
-        NSUInteger px = patch <= threads ? patch : threads / 2, y = threads / px;
-        NSUInteger blocks = ((patch + px - 1) / px) * ((d.F + 15) / 16);
+        NSUInteger px = columns <= threads ? columns : threads / 2, y = threads / px;
+        NSUInteger blocks = ((columns + px - 1) / px) * ((d.F + 15) / 16);
         NSUInteger chunks = MIN(MAX(CONV_SPLIT_GROUPS / blocks, (NSUInteger)1), (rows + y - 1) / y);
         uint32_t n[4] = { (uint32_t)rows, (uint32_t)((rows + chunks - 1) / chunks), d.F, (uint32_t)patch };
         chunks = (rows + n[1] - 1) / n[1];
-        uint32_t chunk_count = (uint32_t)chunks;
+        uint32_t sum_n[2] = { (uint32_t)chunks, (uint32_t)outputs };
         id<MTLBuffer> partial = dW;
-        if (chunks > 1 && !(partial = layer_scratch(layer, SCRATCH_PARTIAL, chunks * outputs * sizeof(float))))
+        if (chunks > 1 && !(partial = layer_scratch(layer, SCRATCH_PARTIAL, chunks * d.F * columns * sizeof(float))))
             return 0;
         id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
         [enc setComputePipelineState:pso];
         [enc setBuffer:dz_rows offset:0 atIndex:0];
         [enc setBuffer:cols offset:0 atIndex:1];
         [enc setBuffer:partial offset:0 atIndex:2];
-        [enc setBytes:n length:sizeof(n) atIndex:3];
-        [enc dispatchThreadgroups:MTLSizeMake((patch + px - 1) / px, (d.F + 15) / 16, chunks)
+        [enc setBuffer:db offset:0 atIndex:3];
+        [enc setBytes:n length:sizeof(n) atIndex:4];
+        [enc dispatchThreadgroups:MTLSizeMake((columns + px - 1) / px, (d.F + 15) / 16, chunks)
             threadsPerThreadgroup:MTLSizeMake(px, y, 1)];
         if (chunks > 1) {
-            id<MTLBuffer> sum_bufs[2] = { partial, dW };
-            encode_grid(cmd, g_metal.pso_sum_partials, sum_bufs, 2, &chunk_count, sizeof(chunk_count),
-                        MTLSizeMake(outputs, 1, 1));
+            id<MTLBuffer> sum_bufs[3] = { partial, dW, db };
+            encode_grid(cmd, g_metal.pso_sum_partials, sum_bufs, 3, sum_n, sizeof(sum_n),
+                        MTLSizeMake(d.F * columns, 1, 1));
         }
     }
 
-    // one threadgroup per filter; the kernel's reduction needs a power of two
-    {
-        NSUInteger tg = 256;
-        while (tg > g_metal.pso_conv_bias_grad.maxTotalThreadsPerThreadgroup)
-            tg /= 2;
-        id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
-        [enc setComputePipelineState:g_metal.pso_conv_bias_grad];
-        [enc setBuffer:dZ offset:0 atIndex:0];
-        [enc setBuffer:(__bridge id<MTLBuffer>)l->params[1].grad->gpu_buf offset:0 atIndex:1];
-        [enc setBytes:&d length:sizeof(d) atIndex:2];
-        [enc dispatchThreadgroups:MTLSizeMake(d.F, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-            }
-
     if (!dX)
         return 1;
+    if (conv_direct(&d)) {
+        id<MTLBuffer> grad_bufs[3] = { dz_rows, W, dX };
+        encode_grid(cmd, g_metal.pso_conv_direct_input_grad, grad_bufs, 3, &d, sizeof(d),
+                    MTLSizeMake(d.W, d.H, (NSUInteger)batch_size * d.C));
+        return 1;
+    }
     id<MTLBuffer> dcols = layer_scratch(layer, SCRATCH_DCOLS, rows * patch * sizeof(float));
     if (!dcols)
         return 0;
@@ -1273,7 +1543,12 @@ static int encode_maxpool_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int 
     if (!arg)
         return 0;
     id<MTLBuffer> bufs[3] = { dZ, dX, arg };
-    encode_grid(cmd, g_metal.pso_maxpool_backward, bufs, 3, &d, sizeof(d), MTLSizeMake(d.W, d.H, (NSUInteger)batch_size * d.C));
+    if (d.K == d.S)
+        encode_grid(cmd, g_metal.pso_maxpool_backward_tiled, bufs, 3, &d, sizeof(d),
+                    MTLSizeMake(d.OW, d.OH, (NSUInteger)batch_size * d.C));
+    else
+        encode_grid(cmd, g_metal.pso_maxpool_backward, bufs, 3, &d, sizeof(d),
+                    MTLSizeMake(d.W, d.H, (NSUInteger)batch_size * d.C));
     return 1;
 }
 
@@ -1784,6 +2059,15 @@ static void encode_activation_derivative(id<MTLCommandBuffer> cmd, PLayer l, int
 }
 
 //-----------------------------------------------------------
+// Conv2D layers apply their activation's derivative in encode_conv_backward
+// (softmax keeps its own kernel)
+//-----------------------------------------------------------
+static int conv_fuses_derivative(PLayer l)
+{
+    return l->kind == LAYER_KIND_CONV2D && l->activation != ACTIVATION_SOFTMAX;
+}
+
+//-----------------------------------------------------------
 // Encode the output layer's delta (t - y, then the activation derivative for
 // MSE; cross-entropy with softmax/sigmoid needs none) and each row's loss
 //-----------------------------------------------------------
@@ -1802,17 +2086,22 @@ static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, in
     [enc setBuffer:row_loss offset:0 atIndex:3];
     [enc setBytes:&cols length:sizeof(cols) atIndex:4];
     [enc setBytes:&mode length:sizeof(mode) atIndex:5];
-    NSUInteger tg = MIN(g_metal.pso_output_delta_loss.maxTotalThreadsPerThreadgroup, (NSUInteger)batch_size);
-    [enc dispatchThreads:MTLSizeMake((NSUInteger)batch_size, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    
-    if (pnet->loss_type == LOSS_MSE)
+    // a threadgroup per row: the smallest power of two covering the row, at most 256
+    NSUInteger tg = 1;
+    while (tg < cols && tg < 256 && tg * 2 <= g_metal.pso_output_delta_loss.maxTotalThreadsPerThreadgroup)
+        tg *= 2;
+    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)batch_size, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+
+    if (pnet->loss_type == LOSS_MSE && !conv_fuses_derivative(out))
         encode_activation_derivative(cmd, out, batch_size);
 }
 
 //-----------------------------------------------------------
 // Encode the backward pass. On entry the output layer's t_batch_dl_dz holds
-// -dL/dz. For each layer, from the output down to layer 1:
-//   1. hidden layers: undo dropout, then the activation derivative
+// -dL/dz (-dL/da for a Conv2D output). For each layer, from the output down
+// to layer 1:
+//   1. hidden layers: undo dropout, then the activation derivative (Conv2D
+//      applies it in its backward pass)
 //   2. the kind's backward pass: accumulate parameter gradients (dense:
 //      dW += dl_dz^T * A_prev, bias_grad += column sums of dl_dz) and write
 //      dl_dz_prev (not for layer 1, whose input needs none)
@@ -1838,7 +2127,8 @@ static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_si
                 id<MTLBuffer> bufs[3] = { dl_dz, (__bridge id<MTLBuffer>)layer->t_batch_values->gpu_buf, mask };
                 encode_1d(cmd, g_metal.pso_dropout_backward, bufs, 3, NULL, 0, count);
             }
-            encode_activation_derivative(cmd, layer, batch_size);
+            if (!conv_fuses_derivative(layer))
+                encode_activation_derivative(cmd, layer, batch_size);
         }
 
         switch (layer->kind) {
@@ -1867,7 +2157,11 @@ static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_si
                             dX, 1.0, 0.0);
             break;
         case LAYER_KIND_CONV2D:
-            if (!encode_conv_backward(cmd, pnet, li, batch_size, dl_dz, dX)) return 0;
+            // the output layer's delta already has its derivative, if any
+            if (!encode_conv_backward(cmd, pnet, li, batch_size, A_prev, dl_dz, dX,
+                                      li < pnet->layer_count - 1 || pnet->loss_type == LOSS_MSE ? layer->activation
+                                                                                                 : ACTIVATION_NULL))
+                return 0;
             break;
         case LAYER_KIND_MAXPOOL2D:
             if (dX && !encode_maxpool_backward(cmd, pnet, li, batch_size, dl_dz, dX)) return 0;

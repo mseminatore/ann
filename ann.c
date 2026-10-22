@@ -4497,6 +4497,28 @@ PNetwork ann_load_network(const char *filename)
 //-----------------------------------------------
 // display the network properties
 //-----------------------------------------------
+//------------------------------
+// report how this build computes
+//------------------------------
+int ann_get_backend_info(Backend_info *info)
+{
+	if (!info)
+		return ERR_NULL_PTR;
+
+	info->blas = ann_blas_backend_name();
+#if defined(USE_METAL)
+	info->gpu = "Metal";
+#elif defined(USE_CUDA)
+	info->gpu = "CUDA";
+#else
+	info->gpu = "none";
+#endif
+	info->gpu_active = g_gpu_backend != NULL;
+	info->threads = ann_get_num_threads();
+	info->real_bytes = (int)sizeof(real);
+	return ERR_OK;
+}
+
 void ann_print_props(const PNetwork pnet)
 {
 	ann_printf(pnet, "%s  Network shape:%s %s", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_CYAN));
@@ -4517,6 +4539,21 @@ void ann_print_props(const PNetwork pnet)
 	ann_printf(pnet, "%s      Optimizer:%s %s%s%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_MAGENTA), optimizers[pnet->optimizer], RESET());
 	ann_printf(pnet, "%s  Loss function:%s %s%s%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_YELLOW), loss_types[pnet->loss_type], RESET());
 	ann_printf(pnet, "%sMini-batch size:%s %s%u%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_BLUE), pnet->batchSize, RESET());
+
+	// what training and batched inference run on: the GPU when this network
+	// is uploaded to one, else the CPU
+	Backend_info info;
+	ann_get_backend_info(&info);
+#ifdef USE_GPU
+	if (gpu_uploaded(pnet))
+	{
+		ann_printf(pnet, "%s        Backend:%s %s%s GPU%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_GREEN), info.gpu, RESET());
+		return;
+	}
+#endif
+	ann_printf(pnet, "%s        Backend:%s %sCPU, %d thread%s, %s%s%s\n", COLOR(ANSI_DIM), RESET(), COLOR(ANSI_GREEN),
+	           info.threads, info.threads == 1 ? "" : "s",
+	           strcmp(info.blas, "none") == 0 ? "no BLAS" : info.blas, strcmp(info.blas, "none") == 0 ? "" : " BLAS", RESET());
 }
 
 //-----------------------------------------------

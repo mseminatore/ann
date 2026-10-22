@@ -1388,6 +1388,28 @@ ANN_API void ann_set_num_threads(int threads);
  */
 ANN_API int ann_get_num_threads(void);
 
+//------------------------------
+// What a libann build computes with; see ann_get_backend_info()
+//------------------------------
+typedef struct {
+	const char *blas;					// BLAS library: "none" (libann's own loops), "Accelerate",
+										// "OpenBLAS", "MKL", "CBLAS" or "BLAS" (another one)
+	const char *gpu;					// GPU backend compiled in: "Metal", "CUDA" or "none"
+	int gpu_active;						// 1 once ann_gpu_init() has started the GPU backend
+	int threads;						// CPU threads for libann's own loops (ann_get_num_threads())
+	int real_bytes;						// sizeof(real): 4 (float) or 8 (double)
+} Backend_info;
+
+/**
+ * Report how this build of libann computes: its BLAS library, GPU backend,
+ * CPU thread count and number type. Training prints the same as its
+ * "Backend" line (see ann_print_props()).
+ * 
+ * @param info Receives the information (its strings are static)
+ * @return ERR_OK, or ERR_NULL_PTR
+ */
+ANN_API int ann_get_backend_info(Backend_info *info);
+
 /**
  * Set where a network's progress output goes (training progress, loading
  * messages, ann_print_props, ...).

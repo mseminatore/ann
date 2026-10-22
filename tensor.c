@@ -118,6 +118,29 @@
 
 #include "ann_parallel.h"
 
+//------------------------------
+// the BLAS library this file was built with: ANN_BLAS_NAME when the build
+// defines it, else recognized from the build flags and the BLAS header
+//------------------------------
+const char *ann_blas_backend_name(void)
+{
+#if defined(ANN_BLAS_NAME)
+	return ANN_BLAS_NAME;
+#elif !defined(USE_BLAS)
+	return "none";
+#elif defined(USE_MKL)
+	return "MKL";
+#elif defined(USE_CBLAS)
+	return "CBLAS";
+#elif defined(OPENBLAS_VERSION)
+	return "OpenBLAS";
+#elif defined(__APPLE__) && defined(CBLAS_ENUM_DEFINED_H)
+	return "Accelerate";	// vecLib's cblas.h
+#else
+	return "BLAS";
+#endif
+}
+
 //================================================================================================
 // THREAD POOL for ann_parallel_for (see ann_parallel.h)
 //

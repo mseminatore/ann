@@ -63,6 +63,8 @@ optimizer, loss and activation, and for CNNs and conv autoencoders).
 | `ANN_VK_DEVICE=<n>` | Use the n-th Vulkan device. By default, a discrete GPU is preferred over an integrated one, and either over a CPU implementation such as lavapipe. `vulkaninfo --summary` lists the devices in order. |
 | `ANN_VK_DEBUG=1` | Enable the Khronos validation layer (installed with the Vulkan SDK), with synchronization validation, and print its warnings and errors. Much slower; for debugging. |
 | `ANN_VK_STAGING=1` / `0` | Force copies through staging memory (`1`), or mapped device memory (`0`); see below. For testing. |
+| `ANN_VK_PROFILE=1` | Time every GPU command with timestamp queries and print the GPU time by kernel at exit (count, total, average, share). For finding what to optimize; adds a little overhead. |
+| `ANN_VK_CONV_DIRECT=<n>` | Convolve layers with at most `n` filters (up to 16) directly instead of through im2col and GEMM; default 8. For tuning on other GPUs: compare `ANN_VK_PROFILE` totals. |
 
 `ann_gpu_init()` prints the device it chose and how data reaches it, e.g.
 `[Vulkan] Device 0: AMD Radeon HD 7700 Series (copies through staging memory)`.
@@ -82,10 +84,18 @@ optimizer, loss and activation, and for CNNs and conv autoencoders).
 - **Conv backward.** A conv layer's weight gradient sums over every output position of the batch
   (`batch·OH·OW` rows) into only `F x C·K·K` outputs, too few tiles to keep a GPU busy, so its
   GEMM is split over K: about 128 workgroups each sum a slice into their own block, and
-  `sum_partials.comp` adds the blocks up. Bias gradients use one workgroup per column with a
-  shared-memory reduction. Without these, CNN training on the GPU was about 10x slower than on
-  the CPU. Metal's further fast paths (direct convolution for layers with few filters, kernels
-  fused into the backward pass) are not ported yet.
+  `sum_partials.comp` adds the blocks up (a workgroup per output). Bias gradients use one
+  workgroup per column with a shared-memory reduction. Without these, CNN training on the GPU
+  was about 10x slower than on the CPU.
+- **Direct convolution.** Layers with at most 8 filters (`ANN_VK_CONV_DIRECT`) skip im2col: their
+  GEMMs would fill a sliver of the 64-wide tiles. The forward pass sums each output's window
+  directly; the weight gradient (`conv_direct_weight_grad.comp`) gives each invocation one
+  weight column and every filter's sum, with the bias as one more column of ones, so it also
+  replaces the bias reduction; the input gradient gathers `dZ·W` over the windows. With more
+  filters the direct input gradient reads too much, and im2col + GEMM wins. Max pooling whose
+  windows tile the input (size == stride) writes each window from its output in the backward
+  pass rather than gathering. On the Radeon HD 7700 these cut fashion_cnn's GPU time per epoch
+  from 4.0 s to 3.0 s at batch 32 and from 2.8 s to 1.8 s at batch 256.
 - **Work buffers.** Each conv layer keeps its im2col columns, GEMM rows, column gradients and
   partial sums, and each max pool layer its argmax, between a batch's forward and backward
   passes. They grow to the largest batch seen and are freed with `ann_gpu_free_network()`.

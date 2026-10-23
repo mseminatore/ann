@@ -1,0 +1,58 @@
+#version 450
+#include "common.glsl"
+// Direct convolution for layers with few filters, where a GEMM over im2col
+// columns has too few outputs per row to fill its tiles: one invocation per
+// output sums its window (in the im2col order: c, then i, then j), adds the bias
+// and activates as conv_output.comp does (z gets the values before activation
+// when save_z is set). y is [batch][F][OH][OW].
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufX { float x[]; };
+layout(std430, binding = 1) readonly buffer BufW { float w[]; };
+layout(std430, binding = 2) readonly buffer BufBias { float bias[]; };
+layout(std430, binding = 3) writeonly buffer BufY { float y[]; };
+layout(std430, binding = 4) writeonly buffer BufZ { float z[]; };
+
+layout(push_constant) uniform Params {
+    WindowDims d;
+    uint act;
+    uint save_z;
+} pc;
+
+void main()
+{
+    WindowDims d = pc.d;
+    uint kk = d.K * d.K;
+    GRID_LOOP(o, d.batch * d.F * d.OH * d.OW)
+    {
+        uint ow = o % d.OW, t = o / d.OW;
+        uint oh = t % d.OH;
+        t /= d.OH;
+        uint f = t % d.F, b = t / d.F;
+
+        int ih0 = int(oh * d.S) - int(d.P), iw0 = int(ow * d.S) - int(d.P);
+        float s = 0.0;
+        for (uint c = 0; c < d.C; c++)
+        {
+            uint xs = (b * d.C + c) * d.H * d.W;
+            uint wf = (f * d.C + c) * kk;
+            for (uint i = 0; i < d.K; i++)
+            {
+                int ih = ih0 + int(i);
+                if (ih < 0 || ih >= int(d.H))
+                    continue;
+                for (uint j = 0; j < d.K; j++)
+                {
+                    int iw = iw0 + int(j);
+                    if (iw >= 0 && iw < int(d.W))
+                        s += x[xs + uint(ih) * d.W + uint(iw)] * w[wf + i * d.K + j];
+                }
+            }
+        }
+        float v = s + bias[f];
+        if (pc.save_z != 0)
+            z[o] = v;
+        y[o] = activate(v, pc.act);
+    }
+}

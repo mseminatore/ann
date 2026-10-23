@@ -2,8 +2,8 @@
 #include "common.glsl"
 // im2col: one row of columns per output position, cols [batch*OH*OW x C*K*K],
 // column index (c*K + i)*K + j as the CPU path orders them; zero outside the
-// input (padding). One invocation per (sample, channel, output position) writes
-// that position's K*K values for its channel.
+// input (padding). One invocation per column value, so consecutive invocations
+// write consecutive addresses.
 
 layout(local_size_x = 256) in;
 
@@ -15,26 +15,16 @@ layout(push_constant) uniform Params { WindowDims d; } pc;
 void main()
 {
     WindowDims d = pc.d;
-    uint kk = d.K * d.K;
-    GRID_LOOP(idx, d.batch * d.C * d.OH * d.OW)
+    uint kk = d.K * d.K, ckk = d.C * kk;
+    GRID_LOOP(idx, d.batch * d.OH * d.OW * ckk)
     {
-        uint ow = idx % d.OW, t = idx / d.OW;
-        uint oh = t % d.OH;
-        t /= d.OH;
-        uint c = t % d.C, b = t / d.C;
+        uint col = idx % ckk, row = idx / ckk;
+        uint c = col / kk, i = (col % kk) / d.K, j = col % d.K;
+        uint ow = row % d.OW, t = row / d.OW;
+        uint oh = t % d.OH, b = t / d.OH;
 
-        uint xs = (b * d.C + c) * d.H * d.W;
-        uint out_i = ((b * d.OH + oh) * d.OW + ow) * d.C * kk + c * kk;
-        int ih0 = int(oh * d.S) - int(d.P), iw0 = int(ow * d.S) - int(d.P);
-        for (uint i = 0; i < d.K; i++)
-        {
-            int ih = ih0 + int(i);
-            bool row_in = ih >= 0 && ih < int(d.H);
-            for (uint j = 0; j < d.K; j++)
-            {
-                int iw = iw0 + int(j);
-                cols[out_i + i * d.K + j] = row_in && iw >= 0 && iw < int(d.W) ? x[xs + uint(ih) * d.W + uint(iw)] : 0.0;
-            }
-        }
+        int ih = int(oh * d.S + i) - int(d.P), iw = int(ow * d.S + j) - int(d.P);
+        cols[idx] = ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W)
+            ? x[((b * d.C + c) * d.H + uint(ih)) * d.W + uint(iw)] : 0.0;
     }
 }

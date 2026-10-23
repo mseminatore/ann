@@ -166,7 +166,8 @@ if ( USE_VULKAN )
     set(VULKAN_SHADERS gemm bias_act softmax act_deriv softmax_jacobian output_delta_loss
                        bias_grad_sum grad_clip optimizer regularize dropout
                        conv_im2col conv_output conv_grad_rows conv_col2im
-                       maxpool_forward maxpool_backward upsample sum_partials)
+                       maxpool_forward maxpool_backward upsample sum_partials
+                       conv_direct_forward conv_direct_input_grad conv_direct_weight_grad)
     set(VULKAN_SPV_DIR ${CMAKE_CURRENT_BINARY_DIR}/vk_spv)
     file(MAKE_DIRECTORY ${VULKAN_SPV_DIR})
     set(VULKAN_SPV_FILES "")

@@ -1,7 +1,11 @@
 #version 450
 #include "common.glsl"
-// MaxPool backward: dx = sum of dz over the outputs that took this input, a
-// gather over the windows covering it (one invocation per input, no atomics)
+// MaxPool backward. In general (tiled == 0), dx = sum of dz over the outputs
+// that took this input, a gather over the windows covering it, one invocation
+// per input (no atomics). When K == S (tiled), the windows tile the input, so
+// one invocation per output writes its window instead: dz at the input it
+// took, zero elsewhere; the last row and column of outputs also zero the inputs
+// no window covers.
 
 layout(local_size_x = 256) in;
 
@@ -9,11 +13,33 @@ layout(std430, binding = 0) readonly buffer BufDz { float dz[]; };
 layout(std430, binding = 1) writeonly buffer BufDx { float dx[]; };
 layout(std430, binding = 2) readonly buffer BufArg { uint arg[]; };
 
-layout(push_constant) uniform Params { WindowDims d; } pc;
+layout(push_constant) uniform Params {
+    WindowDims d;
+    uint tiled;
+} pc;
 
 void main()
 {
     WindowDims d = pc.d;
+    if (pc.tiled != 0)
+    {
+        GRID_LOOP(out_i, d.batch * d.C * d.OH * d.OW)
+        {
+            uint ow = out_i % d.OW, t = out_i / d.OW;
+            uint oh = t % d.OH;
+            uint plane = t / d.OH;
+            uint best = arg[out_i] - (plane % d.C) * d.H * d.W;
+            float g = dz[out_i];
+            uint h0 = oh * d.S, w0 = ow * d.S;
+            uint h1 = oh + 1 == d.OH ? d.H : h0 + d.K, w1 = ow + 1 == d.OW ? d.W : w0 + d.K;
+            uint base = plane * d.H * d.W;
+            for (uint h = h0; h < h1; h++)
+                for (uint w = w0; w < w1; w++)
+                    dx[base + h * d.W + w] = h * d.W + w == best ? g : 0.0;
+        }
+        return;
+    }
+
     GRID_LOOP(idx, d.batch * d.C * d.H * d.W)
     {
         uint iw = idx % d.W, t = idx / d.W;

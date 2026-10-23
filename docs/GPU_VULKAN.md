@@ -8,8 +8,9 @@ and reshape. It consists of:
 - `tensor_vulkan.c`: device setup, buffers, command recording, and the inference and training
   paths
 - `shaders/vk/*.comp`: GLSL compute shaders (GEMM, bias + activation, softmax, activation
-  derivatives, output delta and loss, bias gradients, gradient clipping, the five optimizers,
-  L1/L2 regularization, dropout; im2col, conv output and gradient rows, col2im, max pooling,
+  derivatives, output delta and loss, bias gradients, the optimizer step (gradient clipping, the
+  five optimizers and L1/L2 regularization of a layer's weights and bias in one dispatch),
+  dropout; im2col, conv output and gradient rows, col2im, direct convolution, max pooling,
   upsampling, split-K partial sums), with shared code in `shaders/vk/common.glsl`
 - `cmake/embed_spirv.cmake`: embeds the compiled SPIR-V in a generated `shaders_vk_spv.h`
 - `CMakeLists.txt` option `-DUSE_VULKAN=1`

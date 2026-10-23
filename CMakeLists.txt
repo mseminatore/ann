@@ -164,7 +164,7 @@ if ( USE_VULKAN )
     add_compile_options(-DUSE_VULKAN)
     # compile each shader to SPIR-V, then embed them all in shaders_vk_spv.h
     set(VULKAN_SHADERS gemm bias_act softmax act_deriv softmax_jacobian output_delta_loss
-                       bias_grad_sum grad_clip optimizer regularize dropout
+                       bias_grad_sum optimizer dropout
                        conv_im2col conv_output conv_grad_rows conv_col2im
                        maxpool_forward maxpool_backward upsample sum_partials
                        conv_direct_forward conv_direct_input_grad conv_direct_weight_grad)

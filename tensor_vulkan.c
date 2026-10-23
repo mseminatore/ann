@@ -113,7 +113,7 @@ static PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT;
 typedef enum {
     K_GEMM_NN, K_GEMM_NT, K_GEMM_TN,
     K_BIAS_ACT, K_SOFTMAX, K_ACT_DERIV, K_SOFTMAX_JACOBIAN, K_OUTPUT_DELTA_LOSS,
-    K_BIAS_GRAD_SUM, K_GRAD_CLIP, K_OPTIMIZER, K_REGULARIZE, K_DROPOUT,
+    K_BIAS_GRAD_SUM, K_OPTIMIZER, K_DROPOUT,
     K_CONV_IM2COL, K_CONV_OUTPUT, K_CONV_GRAD_ROWS, K_CONV_COL2IM,
     K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_SUM_PARTIALS,
     K_CONV_DIRECT_FORWARD, K_CONV_DIRECT_INPUT_GRAD, K_CONV_DIRECT_WEIGHT_GRAD,
@@ -135,9 +135,7 @@ static const struct {
     { SPV(softmax_jacobian), 0, 0 },
     { SPV(output_delta_loss), 0, 0 },
     { SPV(bias_grad_sum), 0, 0 },
-    { SPV(grad_clip), 0, 0 },
     { SPV(optimizer), 0, 0 },
-    { SPV(regularize), 0, 0 },
     { SPV(dropout), 0, 0 },
     { SPV(conv_im2col), 0, 0 },
     { SPV(conv_output), 0, 0 },
@@ -156,7 +154,7 @@ static const struct {
 static const char *const g_kernel_names[K_COUNT + 1] = {
     "gemm (A * B)", "gemm (A * B^T)", "gemm (A^T * B)",
     "bias_act", "softmax", "act_deriv", "softmax_jacobian", "output_delta_loss",
-    "bias_grad_sum", "grad_clip", "optimizer", "regularize", "dropout",
+    "bias_grad_sum", "optimizer", "dropout",
     "conv_im2col", "conv_output", "conv_grad_rows", "conv_col2im",
     "maxpool_forward", "maxpool_backward", "upsample", "sum_partials",
     "conv_direct_forward", "conv_direct_input_grad", "conv_direct_weight_grad",
@@ -170,7 +168,7 @@ static const char *const g_kernel_names[K_COUNT + 1] = {
 // Optimizer codes in shaders/vk/optimizer.comp
 enum { VK_OPT_SGD, VK_OPT_MOMENTUM, VK_OPT_ADAGRAD, VK_OPT_RMSPROP, VK_OPT_ADAM };
 
-#define VK_MAX_BINDINGS     6       // storage buffers a kernel binds
+#define VK_MAX_BINDINGS     8       // storage buffers a kernel binds
 #define VK_PUSH_BYTES       64      // push constant space a kernel uses
 #define VK_POOL_SETS        256     // descriptor sets per pool
 #define VK_MAX_POOLS        256     // pools a command buffer may use
@@ -436,7 +434,9 @@ static int pick_device(int *queue_family)
     {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(devices[i], &props);
-        if (props.apiVersion < VK_API_VERSION_1_1 || compute_queue_family(devices[i]) < 0)
+        if (props.apiVersion < VK_API_VERSION_1_1 || compute_queue_family(devices[i]) < 0 ||
+            props.limits.maxPerStageDescriptorStorageBuffers < VK_MAX_BINDINGS ||
+            props.limits.maxPushConstantsSize < VK_PUSH_BYTES)
             continue;
         int rank = device_rank(props.deviceType);
         if (want >= 0 ? (int)i == want : rank > best_rank)
@@ -2052,8 +2052,9 @@ static void encode_backward(PNetwork pnet, int batch_size, VkSlot *slot)
 static void encode_optimizer(PNetwork pnet)
 {
     struct {
-        uint32_t n, opt;
-        float lr, beta, beta1, beta2, eps, bc1, bc2;
+        uint32_t n0, n1, opt;
+        float lr, beta, beta1, beta2, eps, bc1, bc2, max_grad;
+        float decay0, l1_0, decay1, l1_1;
     } p;
     p.lr = (float)pnet->learning_rate;
     p.beta = 0.9f;
@@ -2061,6 +2062,7 @@ static void encode_optimizer(PNetwork pnet)
     p.beta2 = 0.999f;
     p.eps = 1e-8f;
     p.bc1 = p.bc2 = 0.0f;
+    p.max_grad = pnet->max_gradient > 0.0f ? (float)pnet->max_gradient : 0.0f;
     switch (pnet->optimizer)
     {
     case OPT_SGD:      p.opt = VK_OPT_SGD; break;
@@ -2080,37 +2082,47 @@ static void encode_optimizer(PNetwork pnet)
         return;
     }
 
+    // L2 multiplies by decay and L1 moves weights l1 toward zero, for parameters that take
+    // regularization (weights, not biases)
+    float decay = pnet->l2_lambda > 0.0f ? 1.0f - (float)(pnet->learning_rate * pnet->l2_lambda) : 1.0f;
+    float l1 = pnet->l1_lambda > 0.0f ? (float)(pnet->learning_rate * pnet->l1_lambda) : 0.0f;
+
+    // One dispatch per pair of parameters (a dense or conv layer's weights and bias), which
+    // clips, updates and regularizes both
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
-        for (int i = 0; i < l->param_count; i++)
+        for (int i = 0; i < l->param_count; i += 2)
         {
-            Layer_param *param = &l->params[i];
-            size_t count = (size_t)param->value->rows * param->value->cols;
-            uint32_t groups = groups_for(count, 256);
-            VkBuf *w = (VkBuf *)param->value->gpu_buf;
-            VkBuf *g = (VkBuf *)param->grad->gpu_buf;
-
-            if (pnet->max_gradient > 0.0f)
+            VkBuf *bufs[8];
+            uint32_t n[2] = { 0, 0 };
+            float reg[2][2] = { { 1.0f, 0.0f }, { 1.0f, 0.0f } };
+            for (int k = 0; k < 2; k++)
             {
-                struct { uint32_t n; float max_grad; } cp = { (uint32_t)count, (float)pnet->max_gradient };
-                cmd_dispatch(K_GRAD_CLIP, &g, 1, &cp, sizeof(cp), groups, 1);
+                // a missing second parameter repeats the first, with no elements
+                Layer_param *param = &l->params[i + k < l->param_count ? i + k : i];
+                VkBuf *w = (VkBuf *)param->value->gpu_buf;
+                // optimizers without m or v never touch the binding; w stands in
+                bufs[4 * k + 0] = w;
+                bufs[4 * k + 1] = (VkBuf *)param->grad->gpu_buf;
+                bufs[4 * k + 2] = param->m ? (VkBuf *)param->m->gpu_buf : w;
+                bufs[4 * k + 3] = param->v ? (VkBuf *)param->v->gpu_buf : w;
+                if (i + k >= l->param_count)
+                    continue;
+                n[k] = (uint32_t)(param->value->rows * param->value->cols);
+                if (param->regularize)
+                {
+                    reg[k][0] = decay;
+                    reg[k][1] = l1;
+                }
             }
-
-            // optimizers without m or v never touch the binding; w stands in
-            VkBuf *bufs[4] = { w, g, param->m ? (VkBuf *)param->m->gpu_buf : w, param->v ? (VkBuf *)param->v->gpu_buf : w };
-            p.n = (uint32_t)count;
-            cmd_dispatch(K_OPTIMIZER, bufs, 4, &p, sizeof(p), groups, 1);
-
-            if (param->regularize && (pnet->l2_lambda > 0.0f || pnet->l1_lambda > 0.0f))
-            {
-                struct { uint32_t n; float decay, l1; } rp = {
-                    (uint32_t)count,
-                    pnet->l2_lambda > 0.0f ? 1.0f - (float)(pnet->learning_rate * pnet->l2_lambda) : 1.0f,
-                    pnet->l1_lambda > 0.0f ? (float)(pnet->learning_rate * pnet->l1_lambda) : 0.0f
-                };
-                cmd_dispatch(K_REGULARIZE, &w, 1, &rp, sizeof(rp), groups, 1);
-            }
+            p.n0 = n[0];
+            p.n1 = n[1];
+            p.decay0 = reg[0][0];
+            p.l1_0 = reg[0][1];
+            p.decay1 = reg[1][0];
+            p.l1_1 = reg[1][1];
+            cmd_dispatch(K_OPTIMIZER, bufs, 8, &p, sizeof(p), groups_for((size_t)n[0] + n[1], 256), 1);
         }
     }
 }

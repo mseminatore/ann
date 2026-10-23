@@ -1,14 +1,16 @@
 #version 450
 #include "common.glsl"
 // Add up partial sums from slices of a split sum: element i of the result is
-// the sum over slices s of partial[s * n + i]. The first n_first elements are
-// added to c, the rest (n - n_first of them) to c2: a conv weight gradient's
-// dW then db. The host binds c as c2 when n_first == n.
+// s = the sum over slices k of partial[k * n + i]. The first n_first elements
+// go to c, the rest (n - n_first of them) to c2: a conv weight gradient's dW
+// then db. Each becomes s + beta * its old value; beta 0 overwrites it without
+// reading it (a GEMM with beta 0). The host binds c as c2 when n_first == n.
 //
-// One workgroup per element (looping over elements beyond the workgroup
-// count): its invocations take every 64th slice, then add up their sums in
-// shared memory. There are few elements and up to hundreds of slices, so one
-// invocation per element would leave the GPU nearly idle.
+// With few slices (per_invocation), one invocation per element adds them up.
+// With many, one workgroup per element (looping over elements beyond the
+// workgroup count): its invocations take every 64th slice, then add up their
+// sums in shared memory, as there are then few elements, and one invocation
+// per element would leave the GPU nearly idle.
 
 layout(local_size_x = 64) in;
 
@@ -20,12 +22,34 @@ layout(push_constant) uniform Params {
     uint n;         // elements in each slice
     uint slices;
     uint n_first;   // elements that go to c
+    float beta;
+    uint per_invocation;
 } pc;
 
 shared float part[64];
 
+void store(uint i, float s)
+{
+    if (i < pc.n_first)
+        c[i] = pc.beta != 0.0 ? s + pc.beta * c[i] : s;
+    else
+        c2[i - pc.n_first] = pc.beta != 0.0 ? s + pc.beta * c2[i - pc.n_first] : s;
+}
+
 void main()
 {
+    if (pc.per_invocation != 0)
+    {
+        GRID_LOOP(i, pc.n)
+        {
+            float s = 0.0;
+            for (uint k = 0; k < pc.slices; k++)
+                s += partial[k * pc.n + i];
+            store(i, s);
+        }
+        return;
+    }
+
     uint t = gl_LocalInvocationID.x;
     for (uint i = gl_WorkGroupID.x; i < pc.n; i += gl_NumWorkGroups.x)
     {
@@ -41,12 +65,7 @@ void main()
             barrier();
         }
         if (t == 0)
-        {
-            if (i < pc.n_first)
-                c[i] += part[0];
-            else
-                c2[i - pc.n_first] += part[0];
-        }
+            store(i, part[0]);
         barrier();
     }
 }

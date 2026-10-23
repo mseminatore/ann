@@ -2,10 +2,16 @@
 #include "common.glsl"
 // im2col: one row of columns per output position, cols [batch*OH*OW x C*K*K],
 // column index (c*K + i)*K + j as the CPU path orders them; zero outside the
-// input (padding). One invocation per column value, so consecutive invocations
-// write consecutive addresses.
+// input (padding).
+//
+// Workgroups are 16 columns by 16 rows, so the invocations along x write
+// consecutive addresses of a row. An invocation keeps one column, whose
+// (c, i, j) it works out once, and takes every (16 * workgroups in y)-th row,
+// following the row's (sample, oh, ow) by adding with carries: integer
+// division is slow on GPUs (several dozen instructions on AMD and Intel), and
+// dividing for every element made this kernel slower than the GEMM it feeds.
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(std430, binding = 0) readonly buffer BufX { float x[]; };
 layout(std430, binding = 1) writeonly buffer BufCols { float cols[]; };
@@ -16,15 +22,41 @@ void main()
 {
     WindowDims d = pc.d;
     uint kk = d.K * d.K, ckk = d.C * kk;
-    GRID_LOOP(idx, d.batch * d.OH * d.OW * ckk)
-    {
-        uint col = idx % ckk, row = idx / ckk;
-        uint c = col / kk, i = (col % kk) / d.K, j = col % d.K;
-        uint ow = row % d.OW, t = row / d.OW;
-        uint oh = t % d.OH, b = t / d.OH;
+    uint col = gl_GlobalInvocationID.x;
+    if (col >= ckk)
+        return;
+    uint c = col / kk, i = (col % kk) / d.K, j = col % d.K;
+    uint plane = d.H * d.W;
 
+    uint rows = d.batch * d.OH * d.OW;
+    uint row = gl_GlobalInvocationID.y, step = gl_NumWorkGroups.y * gl_WorkGroupSize.y;
+    if (row >= rows)
+        return;
+
+    // the row's sample and output position, and the step split the same way, so
+    // advancing is an add with carries
+    uint ow = row % d.OW, t = row / d.OW;
+    uint oh = t % d.OH, b = t / d.OH;
+    uint step_ow = step % d.OW, step_t = step / d.OW;
+    uint step_oh = step_t % d.OH, step_b = step_t / d.OH;
+    for (; row < rows; row += step)
+    {
         int ih = int(oh * d.S + i) - int(d.P), iw = int(ow * d.S + j) - int(d.P);
-        cols[idx] = ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W)
-            ? x[((b * d.C + c) * d.H + uint(ih)) * d.W + uint(iw)] : 0.0;
+        cols[row * ckk + col] = ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W)
+            ? x[(b * d.C + c) * plane + uint(ih) * d.W + uint(iw)] : 0.0;
+
+        ow += step_ow;
+        oh += step_oh;
+        b += step_b;
+        if (ow >= d.OW)
+        {
+            ow -= d.OW;
+            oh++;
+        }
+        if (oh >= d.OH)
+        {
+            oh -= d.OH;
+            b++;
+        }
     }
 }

@@ -1359,6 +1359,9 @@ static void free_scratch(void)
 // ANN_VK_CONV_DIRECT=<filters> overrides it, for tuning on other GPUs; at most 16.
 //-----------------------------------------------------------
 #define CONV_DIRECT_FILTERS 8
+// Rows each im2col invocation takes: they share its one-time index math. On the Radeon HD
+// 7700, 16 beat 8 and 4, and beat keeping at least 256 workgroups for small layers.
+#define IM2COL_ROWS         16
 // The direct weight gradient aims for about this many workgroups
 #define CONV_DIRECT_GROUPS  256
 
@@ -1480,8 +1483,13 @@ static void encode_conv_forward(PNetwork pnet, int layer, int batch_size, VkBuf 
 
     VkBuf *cols = scratch_of(layer, SCRATCH_COLS), *rows = scratch_of(layer, SCRATCH_ROWS);
     VkBuf *im2col_bufs[2] = { X, cols };
-    cmd_dispatch(K_CONV_IM2COL, im2col_bufs, 2, &d, sizeof(d),
-                 groups_for((size_t)out_rows * patch, 256), 1);
+    // 16 x 16 workgroups over (columns, rows); each invocation takes about
+    // IM2COL_ROWS rows (see conv_im2col.comp)
+    uint32_t col_groups = (patch + 15) / 16;
+    uint32_t row_groups = (out_rows + 16 * IM2COL_ROWS - 1) / (16 * IM2COL_ROWS);
+    if (row_groups > g_vk.max_groups[1])
+        row_groups = g_vk.max_groups[1];
+    cmd_dispatch(K_CONV_IM2COL, im2col_bufs, 2, &d, sizeof(d), col_groups, row_groups);
     k_gemm(0, 1, out_rows, d.F, patch, 1.0f, cols, (VkBuf *)l->params[0].value->gpu_buf, 0.0f, rows);
 
     VkBuf *out_bufs[4] = { rows, (VkBuf *)l->params[1].value->gpu_buf, Y, Z ? Z : Y };

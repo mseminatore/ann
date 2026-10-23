@@ -1,0 +1,62 @@
+#version 450
+#include "common.glsl"
+// Direct convolution input gradient: dx[b][c][ih][iw] = sum of dz_rows * W over
+// the outputs whose windows read it (conv_col2im.comp without the column
+// gradients). dz_rows is [batch*OH*OW x F]. A gather, so no atomics.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufDz { float dz_rows[]; };
+layout(std430, binding = 1) readonly buffer BufW { float w[]; };
+layout(std430, binding = 2) writeonly buffer BufDx { float dx[]; };
+
+layout(push_constant) uniform Params { WindowDims d; } pc;
+
+void main()
+{
+    WindowDims d = pc.d;
+    uint kk = d.K * d.K;
+    GRID_LOOP(idx, d.batch * d.C * d.H * d.W)
+    {
+        uint iw = idx % d.W, t = idx / d.W;
+        uint ih = t % d.H;
+        t /= d.H;
+        uint c = t % d.C, b = t / d.C;
+
+        float s = 0.0;
+        for (uint i = 0; i < d.K; i++)
+        {
+            int ty = int(ih + d.P) - int(i);
+            if (ty < 0)
+                continue;
+            uint oh = uint(ty);
+            if (d.S > 1)
+            {
+                if (oh % d.S != 0)
+                    continue;
+                oh /= d.S;
+            }
+            if (oh >= d.OH)
+                continue;
+            for (uint j = 0; j < d.K; j++)
+            {
+                int tx = int(iw + d.P) - int(j);
+                if (tx < 0)
+                    continue;
+                uint ow = uint(tx);
+                if (d.S > 1)
+                {
+                    if (ow % d.S != 0)
+                        continue;
+                    ow /= d.S;
+                }
+                if (ow >= d.OW)
+                    continue;
+                uint g = ((b * d.OH + oh) * d.OW + ow) * d.F;
+                for (uint f = 0; f < d.F; f++)
+                    s += dz_rows[g + f] * w[(f * d.C + c) * kk + i * d.K + j];
+            }
+        }
+        dx[idx] = s;
+    }
+}

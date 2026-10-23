@@ -1,0 +1,103 @@
+#version 450
+#include "common.glsl"
+// Direct convolution weight and bias gradients, without im2col columns:
+// dW[f][p] += sum over rows r of dz_rows[r][f] * col(r, p), where col(r, p) is
+// the input value im2col would have put in row r, column p (P = C*K*K columns),
+// and db[f] += sum of dz_rows[r][f], taken as column P, all ones. Rows are the
+// batch's output positions, batch*OH*OW of them; F is at most MAX_F.
+//
+// A workgroup takes px columns (lanes) and one chunk of rows. Its 256
+// invocations form px lanes by 256/px rows: an invocation keeps one column's
+// sums for every filter and takes every (256/px)-th row of the chunk, so the
+// lanes on a row share its dz_rows values, and it follows (sample, oh, ow) as
+// the row advances rather than dividing for each. The workgroup then adds up
+// its rows' sums in shared memory. With one chunk the sums go straight into dW
+// and db; with more, each chunk stores them in partial[chunk] (dW's F*P sums,
+// then db's F) for sum_partials.comp to add up.
+
+#define MAX_F 16
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufDz { float dz_rows[]; };
+layout(std430, binding = 1) readonly buffer BufX { float x[]; };
+layout(std430, binding = 2) buffer BufOut { float out_w[]; };
+layout(std430, binding = 3) buffer BufDb { float db[]; };
+
+layout(push_constant) uniform Params {
+    WindowDims d;
+    uint chunk_rows;    // rows per chunk
+    uint px;            // lanes (columns) per workgroup, dividing 256
+} pc;
+
+shared float red[MAX_F * 256];
+
+void main()
+{
+    WindowDims d = pc.d;
+    uint t = gl_LocalInvocationID.x;
+    uint px = pc.px, ys = 256 / px;
+    uint lane = t % px, y = t / px;
+    uint kk = d.K * d.K, P = d.C * kk;
+    uint p = gl_WorkGroupID.x * px + lane, chunk = gl_WorkGroupID.y;
+    uint positions = d.OH * d.OW, rows = d.batch * positions;
+    uint r = chunk * pc.chunk_rows + y, r1 = min((chunk + 1) * pc.chunk_rows, rows);
+
+    float acc[MAX_F];
+    for (uint f = 0; f < MAX_F; f++)
+        acc[f] = 0.0;
+
+    if (p <= P && r < r1)
+    {
+        uint ci = p / kk, ki = (p % kk) / d.K, kj = p % d.K;
+        // the row's sample and output position, advanced by ys rows at a time
+        uint b = r / positions, oh = (r % positions) / d.OW, ow = r % d.OW;
+        for (; r < r1; r += ys)
+        {
+            float c = 1.0;
+            if (p < P)
+            {
+                int ih = int(oh * d.S + ki) - int(d.P), iw = int(ow * d.S + kj) - int(d.P);
+                c = ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W)
+                    ? x[((b * d.C + ci) * d.H + uint(ih)) * d.W + uint(iw)] : 0.0;
+            }
+            uint g = r * d.F;
+            for (uint f = 0; f < MAX_F; f++)
+                if (f < d.F)
+                    acc[f] += dz_rows[g + f] * c;
+
+            ow += ys;
+            while (ow >= d.OW)
+            {
+                ow -= d.OW;
+                if (++oh == d.OH)
+                {
+                    oh = 0;
+                    b++;
+                }
+            }
+        }
+    }
+
+    for (uint f = 0; f < MAX_F; f++)
+        red[f * 256 + t] = acc[f];
+    barrier();
+
+    // add up each (filter, lane)'s sums over the workgroup's rows
+    for (uint o = t; o < MAX_F * px; o += 256)
+    {
+        uint f = o / px, l = o % px, pp = gl_WorkGroupID.x * px + l;
+        if (f >= d.F || pp > P)
+            continue;
+        float s = 0.0;
+        for (uint yy = 0; yy < ys; yy++)
+            s += red[f * 256 + yy * px + l];
+        uint idx = pp < P ? f * P + pp : d.F * P + f;   // dW's sums, then db's
+        if (gl_NumWorkGroups.y > 1)
+            out_w[chunk * d.F * (P + 1) + idx] = s;
+        else if (pp < P)
+            out_w[idx] += s;
+        else
+            db[f] += s;
+    }
+}

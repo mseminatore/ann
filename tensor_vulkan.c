@@ -97,7 +97,8 @@ typedef char vk_activation_values_match[(ACTIVATION_NULL == 0 && ACTIVATION_SIGM
     X(vkResetCommandBuffer) X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkCmdBindPipeline) \
     X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) X(vkCmdDispatch) X(vkCmdPipelineBarrier) \
     X(vkCmdCopyBuffer) X(vkCmdFillBuffer) X(vkCreateFence) X(vkResetFences) X(vkWaitForFences) \
-    X(vkQueueSubmit)
+    X(vkQueueSubmit) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) \
+    X(vkGetQueryPoolResults)
 
 #define VK_DECLARE(f) static PFN_##f f;
 static PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
@@ -115,6 +116,7 @@ typedef enum {
     K_BIAS_GRAD_SUM, K_GRAD_CLIP, K_OPTIMIZER, K_REGULARIZE, K_DROPOUT,
     K_CONV_IM2COL, K_CONV_OUTPUT, K_CONV_GRAD_ROWS, K_CONV_COL2IM,
     K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_SUM_PARTIALS,
+    K_CONV_DIRECT_FORWARD, K_CONV_DIRECT_INPUT_GRAD, K_CONV_DIRECT_WEIGHT_GRAD,
     K_COUNT
 } Kernel;
 
@@ -145,12 +147,30 @@ static const struct {
     { SPV(maxpool_backward), 0, 0 },
     { SPV(upsample), 0, 0 },
     { SPV(sum_partials), 0, 0 },
+    { SPV(conv_direct_forward), 0, 0 },
+    { SPV(conv_direct_input_grad), 0, 0 },
+    { SPV(conv_direct_weight_grad), 0, 0 },
 };
+
+// Kernel names for the ANN_VK_PROFILE report; the last is the copies and fills
+static const char *const g_kernel_names[K_COUNT + 1] = {
+    "gemm (A * B)", "gemm (A * B^T)", "gemm (A^T * B)",
+    "bias_act", "softmax", "act_deriv", "softmax_jacobian", "output_delta_loss",
+    "bias_grad_sum", "grad_clip", "optimizer", "regularize", "dropout",
+    "conv_im2col", "conv_output", "conv_grad_rows", "conv_col2im",
+    "maxpool_forward", "maxpool_backward", "upsample", "sum_partials",
+    "conv_direct_forward", "conv_direct_input_grad", "conv_direct_weight_grad",
+    "copy / fill",
+};
+#define K_TRANSFER K_COUNT
+
+// Timestamps a command buffer records for ANN_VK_PROFILE; commands beyond this go unmeasured
+#define VK_PROFILE_QUERIES  4096
 
 // Optimizer codes in shaders/vk/optimizer.comp
 enum { VK_OPT_SGD, VK_OPT_MOMENTUM, VK_OPT_ADAGRAD, VK_OPT_RMSPROP, VK_OPT_ADAM };
 
-#define VK_MAX_BINDINGS     4       // storage buffers a kernel binds
+#define VK_MAX_BINDINGS     6       // storage buffers a kernel binds
 #define VK_PUSH_BYTES       64      // push constant space a kernel uses
 #define VK_POOL_SETS        256     // descriptor sets per pool
 #define VK_MAX_POOLS        256     // pools a command buffer may use
@@ -197,6 +217,9 @@ typedef struct {
     VkCommandBuffer cmd;
     VkFence fence;
     int pending;                // submitted and not yet waited for
+    VkQueryPool queries;        // ANN_VK_PROFILE timestamps: one at the start, one after each command
+    uint32_t query_count;
+    uint8_t query_kind[VK_PROFILE_QUERIES];     // the Kernel (or K_TRANSFER) each timestamp ends
     VkDescriptorPool pools[VK_MAX_POOLS];
     int pool_count, pool_cur;   // pools created, and the one sets come from now
     VkBuf *staging;             // host-visible; uploads and downloads pass through it
@@ -233,6 +256,10 @@ typedef struct {
     VkSlot slots[TRAIN_SLOTS];
     int next_slot;              // the slot the next operation uses (the older pending one)
     VkSlot *rec;                // the slot being recorded; see cmd_begin()
+    int profile;                // ANN_VK_PROFILE: time each command on the GPU
+    double ns_per_tick;         // timestamp period
+    double profile_ns[K_COUNT + 1];         // GPU time and commands by kernel
+    unsigned long long profile_calls[K_COUNT + 1];
     int record_failed;          // a command could not be recorded; the submit fails
     int barrier_pending;        // a command since the last barrier wrote memory
 
@@ -436,6 +463,7 @@ static int pick_device(int *queue_family)
     g_vk.max_groups[0] = props.limits.maxComputeWorkGroupCount[0];
     g_vk.max_groups[1] = props.limits.maxComputeWorkGroupCount[1];
     g_vk.max_groups[2] = props.limits.maxComputeWorkGroupCount[2];
+    g_vk.ns_per_tick = props.limits.timestampPeriod;
     *queue_family = compute_queue_family(g_vk.physical);
     g_vk.device_index = best;
     memcpy(g_vk.device_name, props.deviceName, sizeof(g_vk.device_name));
@@ -578,6 +606,8 @@ static int create_pipelines(void)
     return 1;
 }
 
+static void start_profile(int queue_family);
+
 static int vk_init(void)
 {
     if (g_vk.initialized)
@@ -611,6 +641,7 @@ static int vk_init(void)
         fprintf(stderr, "[Vulkan] Device setup failed\n");
         return 0;
     }
+    start_profile(queue_family);
 
     g_vk.init_failed = 0;
     g_vk.initialized = 1;
@@ -723,6 +754,89 @@ static VkBuf *buf_create(size_t bytes, int host)
 }
 
 //-----------------------------------------------------------
+// ANN_VK_PROFILE=1: the GPU time of every command, added up by kernel and printed at exit.
+// Each command's time runs from the previous command's end to its own, so it includes the
+// barrier before it.
+//-----------------------------------------------------------
+static int profile_order(const void *a, const void *b)
+{
+    double ta = g_vk.profile_ns[*(const int *)a], tb = g_vk.profile_ns[*(const int *)b];
+    return ta < tb ? 1 : (ta > tb ? -1 : 0);
+}
+
+static void print_profile(void)
+{
+    int order[K_COUNT + 1];
+    double total = 0.0;
+    for (int k = 0; k <= K_COUNT; k++)
+    {
+        order[k] = k;
+        total += g_vk.profile_ns[k];
+    }
+    qsort(order, K_COUNT + 1, sizeof(order[0]), profile_order);
+    printf("\n[Vulkan] GPU time by kernel (ANN_VK_PROFILE):\n");
+    printf("  %-20s %10s %12s %10s %7s\n", "kernel", "commands", "total ms", "avg us", "share");
+    for (int i = 0; i <= K_COUNT; i++)
+    {
+        int k = order[i];
+        if (!g_vk.profile_calls[k])
+            continue;
+        printf("  %-20s %10llu %12.2f %10.2f %6.1f%%\n", g_kernel_names[k], g_vk.profile_calls[k],
+               g_vk.profile_ns[k] / 1e6, g_vk.profile_ns[k] / 1e3 / (double)g_vk.profile_calls[k],
+               total > 0.0 ? 100.0 * g_vk.profile_ns[k] / total : 0.0);
+    }
+    printf("  %-20s %10s %12.2f\n", "total", "", total / 1e6);
+}
+
+// Turn profiling on when ANN_VK_PROFILE is set and the queue records timestamps
+static void start_profile(int queue_family)
+{
+    const char *env = getenv("ANN_VK_PROFILE");
+    if (!env || !*env || strcmp(env, "0") == 0)
+        return;
+
+    uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(g_vk.physical, &count, NULL);
+    VkQueueFamilyProperties props[16];
+    if (count > 16)
+        count = 16;
+    vkGetPhysicalDeviceQueueFamilyProperties(g_vk.physical, &count, props);
+    if (props[queue_family].timestampValidBits == 0)
+    {
+        fprintf(stderr, "[Vulkan] ANN_VK_PROFILE: this queue has no timestamps\n");
+        return;
+    }
+
+    for (int s = 0; s < TRAIN_SLOTS; s++)
+    {
+        VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = VK_PROFILE_QUERIES;
+        if (vkCreateQueryPool(g_vk.device, &qi, NULL, &g_vk.slots[s].queries) != VK_SUCCESS)
+            return;
+    }
+    g_vk.profile = 1;
+    atexit(print_profile);
+}
+
+// Add a completed command buffer's command times to the totals
+static void collect_profile(VkSlot *slot)
+{
+    static uint64_t stamps[VK_PROFILE_QUERIES];
+    uint32_t n = slot->query_count;
+    slot->query_count = 0;
+    if (vkGetQueryPoolResults(g_vk.device, slot->queries, 0, n, sizeof(stamps), stamps, sizeof(stamps[0]),
+                              VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS)
+        return;
+    for (uint32_t i = 1; i < n; i++)
+    {
+        int k = slot->query_kind[i];
+        g_vk.profile_ns[k] += (double)(stamps[i] - stamps[i - 1]) * g_vk.ns_per_tick;
+        g_vk.profile_calls[k]++;
+    }
+}
+
+//-----------------------------------------------------------
 // Wait for a slot's operation; a training step then adds its batch loss (averaged as on the
 // CPU) to g_vk.loss_sum, or flags its failure. Returns 0 if the operation failed.
 //-----------------------------------------------------------
@@ -742,6 +856,8 @@ static int finish_slot(int s)
         slot->loss_src = NULL;
         return 0;
     }
+    if (slot->query_count > 1)
+        collect_profile(slot);
     if (slot->loss_src)
     {
         real total = 0.0f;
@@ -847,7 +963,26 @@ static int cmd_begin(int s)
 
     VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    return vkBeginCommandBuffer(slot->cmd, &bi) == VK_SUCCESS;
+    if (vkBeginCommandBuffer(slot->cmd, &bi) != VK_SUCCESS)
+        return 0;
+    slot->query_count = 0;
+    if (g_vk.profile)
+    {
+        vkCmdResetQueryPool(slot->cmd, slot->queries, 0, VK_PROFILE_QUERIES);
+        vkCmdWriteTimestamp(slot->cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, slot->queries, 0);
+        slot->query_count = 1;
+    }
+    return 1;
+}
+
+// ANN_VK_PROFILE: stamp the time the command just recorded (a Kernel, or K_TRANSFER) ends
+static void profile_mark(int kind)
+{
+    VkSlot *slot = g_vk.rec;
+    if (!g_vk.profile || slot->query_count >= VK_PROFILE_QUERIES)
+        return;
+    vkCmdWriteTimestamp(slot->cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, slot->queries, slot->query_count);
+    slot->query_kind[slot->query_count++] = (uint8_t)kind;
 }
 
 // Make earlier commands' writes visible to the next command
@@ -939,6 +1074,7 @@ static void cmd_upload(VkBuf *dst, const void *src, size_t bytes)
     cmd_barrier();
     VkBufferCopy region = { off, 0, bytes };
     vkCmdCopyBuffer(g_vk.rec->cmd, g_vk.rec->staging->buffer, dst->buffer, 1, &region);
+    profile_mark(K_TRANSFER);
     g_vk.barrier_pending = 1;
 }
 
@@ -954,6 +1090,7 @@ static const void *cmd_download(VkBuf *src, size_t bytes)
     cmd_barrier();
     VkBufferCopy region = { 0, off, bytes };
     vkCmdCopyBuffer(g_vk.rec->cmd, src->buffer, g_vk.rec->staging->buffer, 1, &region);
+    profile_mark(K_TRANSFER);
     g_vk.barrier_pending = 1;
     return (const char *)g_vk.rec->staging->map + off;
 }
@@ -962,6 +1099,7 @@ static void cmd_zero(VkBuf *b)
 {
     cmd_barrier();
     vkCmdFillBuffer(g_vk.rec->cmd, b->buffer, 0, VK_WHOLE_SIZE, 0);
+    profile_mark(K_TRANSFER);
     g_vk.barrier_pending = 1;
 }
 
@@ -973,6 +1111,7 @@ static void cmd_copy(VkBuf *src, VkBuf *dst, size_t bytes)
     cmd_barrier();
     VkBufferCopy region = { 0, 0, bytes };
     vkCmdCopyBuffer(g_vk.rec->cmd, src->buffer, dst->buffer, 1, &region);
+    profile_mark(K_TRANSFER);
     g_vk.barrier_pending = 1;
 }
 
@@ -1053,6 +1192,7 @@ static void cmd_dispatch_3d(Kernel k, VkBuf *const *bufs, int n_bufs, const void
     vkCmdBindDescriptorSets(g_vk.rec->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk.pipe_layout, 0, 1, &set, 0, NULL);
     vkCmdPushConstants(g_vk.rec->cmd, g_vk.pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, params_size, params);
     vkCmdDispatch(g_vk.rec->cmd, groups_x, groups_y, groups_z);
+    profile_mark((int)k);
     g_vk.barrier_pending = 1;
 }
 
@@ -1116,9 +1256,9 @@ static void k_gemm_accumulate(int trans_a, int trans_b, uint32_t M, uint32_t N, 
     slices = (K + k_slice - 1) / k_slice;
     k_gemm_slices(trans_a, trans_b, M, N, K, 1.0f, A, B, 0.0f, partial, k_slice, slices);
 
-    struct { uint32_t n, slices; } p = { M * N, slices };
-    VkBuf *bufs[2] = { partial, C };
-    cmd_dispatch(K_SUM_PARTIALS, bufs, 2, &p, sizeof(p), groups_for((size_t)M * N, 256), 1);
+    struct { uint32_t n, slices, n_first; } p = { M * N, slices, M * N };
+    VkBuf *bufs[3] = { partial, C, C };
+    cmd_dispatch(K_SUM_PARTIALS, bufs, 3, &p, sizeof(p), groups_for((size_t)M * N, 1), 1);
 }
 
 // dl_dz *= the activation's derivative for a layer, reading A, or Z for GELU, as the CPU
@@ -1210,8 +1350,59 @@ static void free_scratch(void)
 }
 
 //-----------------------------------------------------------
+// Conv2D layers with at most this many filters convolve directly, with no im2col columns:
+// their GEMMs would have F outputs per row, a sliver of gemm.comp's 64-wide tiles, and the
+// columns are C*K*K times the input's size to write and read back. On an AMD Radeon HD 7700,
+// fashion_cnn's 8-filter layer cut its GPU time 14% (batch 32) to 26% (batch 256) this way;
+// at 16 filters the direct input gradient, which reads F values per window position, lost to
+// the GEMM and col2im. (Metal, whose MPS GEMM handles thin matrices well, stops at 4.)
+// ANN_VK_CONV_DIRECT=<filters> overrides it, for tuning on other GPUs; at most 16.
+//-----------------------------------------------------------
+#define CONV_DIRECT_FILTERS 8
+// The direct weight gradient aims for about this many workgroups
+#define CONV_DIRECT_GROUPS  256
+
+static int conv_direct(const WindowDims *d)
+{
+    static int limit = -1;
+    if (limit < 0)
+    {
+        const char *env = getenv("ANN_VK_CONV_DIRECT");
+        limit = env && *env ? atoi(env) : CONV_DIRECT_FILTERS;
+    }
+    // conv_direct_weight_grad.comp keeps a sum per filter, for up to 16
+    return (int)d->F <= (limit < 16 ? limit : 16);
+}
+
+// Lanes (columns) per workgroup for a direct conv's weight gradient
+// (conv_direct_weight_grad.comp): the columns, the bias one included, rounded up to a power
+// of two, at most 128 so a workgroup has at least two rows at a time
+static uint32_t direct_lanes(const WindowDims *d)
+{
+    uint32_t columns = d->C * d->K * d->K + 1, px = 1;
+    while (px < columns && px < 128)
+        px *= 2;
+    return px;
+}
+
+// Chunks of rows for a direct conv's weight gradient, which has a workgroup per block of
+// lanes and chunk
+static uint32_t direct_chunks(const WindowDims *d, uint32_t rows)
+{
+    uint32_t px = direct_lanes(d), ys = 256 / px;
+    uint32_t blocks = (d->C * d->K * d->K + 1 + px - 1) / px;
+    uint32_t chunks = blocks >= CONV_DIRECT_GROUPS ? 1 : CONV_DIRECT_GROUPS / blocks;
+    if (chunks > rows / ys)
+        chunks = rows / ys;
+    if (chunks > g_vk.max_groups[1])
+        chunks = g_vk.max_groups[1];
+    return chunks < 1 ? 1 : chunks;
+}
+
+//-----------------------------------------------------------
 // Allocate the work buffers a batch of rows needs: conv columns and GEMM rows (and, for
-// training, column gradients, which layer 1 never needs), and max pool argmax
+// training, column gradients, which layer 1 never needs, and weight gradient partial sums;
+// a direct conv needs only gradient rows and partial sums), and max pool argmax
 //-----------------------------------------------------------
 static int ensure_layer_scratch(PNetwork pnet, int rows, int training)
 {
@@ -1222,6 +1413,15 @@ static int ensure_layer_scratch(PNetwork pnet, int rows, int training)
         {
             WindowDims d = window_dims(pnet, layer, rows);
             size_t out_rows = (size_t)rows * d.OH * d.OW, patch = (size_t)d.C * d.K * d.K;
+            if (conv_direct(&d))
+            {
+                if (training &&
+                    (!layer_scratch(layer, SCRATCH_ROWS, out_rows * d.F * sizeof(float)) ||
+                     !layer_scratch(layer, SCRATCH_PARTIAL, (size_t)direct_chunks(&d, (uint32_t)out_rows) *
+                                                            d.F * (patch + 1) * sizeof(float))))
+                    return 0;
+                continue;
+            }
             if (!layer_scratch(layer, SCRATCH_COLS, out_rows * patch * sizeof(float)) ||
                 !layer_scratch(layer, SCRATCH_ROWS, out_rows * d.F * sizeof(float)) ||
                 (training && layer > 1 && !layer_scratch(layer, SCRATCH_DCOLS, out_rows * patch * sizeof(float))) ||
@@ -1248,7 +1448,7 @@ static size_t forward_bytes_per_sample(const PNetwork pnet)
         const Layer *l = &pnet->layers[layer];
         if ((size_t)l->node_count > max_nodes)
             max_nodes = (size_t)l->node_count;
-        if (l->kind == LAYER_KIND_CONV2D)
+        if (l->kind == LAYER_KIND_CONV2D && l->shape.c > CONV_DIRECT_FILTERS)
             floats += (size_t)l->shape.h * l->shape.w * (l->params[0].value->cols + l->shape.c);
         else if (l->kind == LAYER_KIND_MAXPOOL2D)
             floats += (size_t)l->node_count;
@@ -1259,21 +1459,31 @@ static size_t forward_bytes_per_sample(const PNetwork pnet)
 //-----------------------------------------------------------
 // Conv2D forward for a batch, as on the CPU but with one GEMM for the whole batch:
 // rows [batch*OH*OW x F] = im2col(X) * W^T, then Y = activate(rows + b) rearranged to
-// [batch][F][OH*OW] (saving the values before activation in Z when given)
+// [batch][F][OH*OW] (saving the values before activation in Z when given); or directly
+// (conv_direct)
 //-----------------------------------------------------------
 static void encode_conv_forward(PNetwork pnet, int layer, int batch_size, VkBuf *X, VkBuf *Y, VkBuf *Z)
 {
     PLayer l = &pnet->layers[layer];
     WindowDims d = window_dims(pnet, layer, batch_size);
     uint32_t out_rows = (uint32_t)batch_size * d.OH * d.OW, patch = d.C * d.K * d.K;
-    VkBuf *cols = scratch_of(layer, SCRATCH_COLS), *rows = scratch_of(layer, SCRATCH_ROWS);
+    struct { WindowDims d; uint32_t act, save_z; } p = { d, (uint32_t)l->activation, Z != NULL };
 
+    if (conv_direct(&d))
+    {
+        VkBuf *bufs[5] = { X, (VkBuf *)l->params[0].value->gpu_buf, (VkBuf *)l->params[1].value->gpu_buf,
+                           Y, Z ? Z : Y };
+        cmd_dispatch(K_CONV_DIRECT_FORWARD, bufs, 5, &p, sizeof(p),
+                     groups_for((size_t)l->node_count * batch_size, 256), 1);
+        return;
+    }
+
+    VkBuf *cols = scratch_of(layer, SCRATCH_COLS), *rows = scratch_of(layer, SCRATCH_ROWS);
     VkBuf *im2col_bufs[2] = { X, cols };
     cmd_dispatch(K_CONV_IM2COL, im2col_bufs, 2, &d, sizeof(d),
-                 groups_for((size_t)batch_size * d.C * d.OH * d.OW, 256), 1);
+                 groups_for((size_t)out_rows * patch, 256), 1);
     k_gemm(0, 1, out_rows, d.F, patch, 1.0f, cols, (VkBuf *)l->params[0].value->gpu_buf, 0.0f, rows);
 
-    struct { WindowDims d; uint32_t act, save_z; } p = { d, (uint32_t)l->activation, Z != NULL };
     VkBuf *out_bufs[4] = { rows, (VkBuf *)l->params[1].value->gpu_buf, Y, Z ? Z : Y };
     cmd_dispatch(K_CONV_OUTPUT, out_bufs, 4, &p, sizeof(p), groups_for((size_t)l->node_count * batch_size, 256), 1);
 }
@@ -1282,29 +1492,61 @@ static void encode_conv_forward(PNetwork pnet, int layer, int batch_size, VkBuf 
 // Conv2D backward for a batch: dZ_rows = dZ * f'(z) for the activation act
 // (ACTIVATION_NULL when dZ already has it), dW += dZ_rows^T * cols, db += column sums of
 // dZ_rows, and, when dX is given, dX = col2im(dZ_rows * W). cols is kept from the forward pass.
+// A direct conv has none: its weight gradient reads the layer's input X, with the bias as one
+// more column, and dX is computed directly.
 //-----------------------------------------------------------
-static void encode_conv_backward(PNetwork pnet, int layer, int batch_size, VkBuf *dZ, VkBuf *dX, Activation_type act)
+static void encode_conv_backward(PNetwork pnet, int layer, int batch_size, VkBuf *X, VkBuf *dZ, VkBuf *dX,
+                                 Activation_type act)
 {
     PLayer l = &pnet->layers[layer];
     WindowDims d = window_dims(pnet, layer, batch_size);
     uint32_t out_rows = (uint32_t)batch_size * d.OH * d.OW, patch = d.C * d.K * d.K;
     VkBuf *W = (VkBuf *)l->params[0].value->gpu_buf;
-    VkBuf *cols = scratch_of(layer, SCRATCH_COLS), *dz_rows = scratch_of(layer, SCRATCH_ROWS);
+    VkBuf *dW = (VkBuf *)l->params[0].grad->gpu_buf, *db = (VkBuf *)l->params[1].grad->gpu_buf;
+    VkBuf *dz_rows = scratch_of(layer, SCRATCH_ROWS);
 
     // the derivative reads A, or Z for GELU (the only one the forward pass saves)
     struct { WindowDims d; uint32_t act; } p = { d, (uint32_t)act };
     VkBuf *row_bufs[3] = { dZ, dz_rows, (VkBuf *)(act == ACTIVATION_GELU ? l->t_batch_z : l->t_batch_values)->gpu_buf };
     cmd_dispatch(K_CONV_GRAD_ROWS, row_bufs, 3, &p, sizeof(p), groups_for((size_t)l->node_count * batch_size, 256), 1);
 
+    if (conv_direct(&d))
+    {
+        // dW and db: a workgroup per block of columns (the bias is column patch) and row
+        // chunk, whose partial sums are then added up when there are chunks
+        uint32_t px = direct_lanes(&d), chunks = direct_chunks(&d, out_rows);
+        uint32_t chunk_rows = (out_rows + chunks - 1) / chunks;
+        chunks = (out_rows + chunk_rows - 1) / chunk_rows;
+        VkBuf *partial = chunks > 1 ? scratch_of(layer, SCRATCH_PARTIAL) : dW;
+        struct { WindowDims d; uint32_t chunk_rows, px; } wp = { d, chunk_rows, px };
+        VkBuf *grad_bufs[4] = { dz_rows, X, partial, db };
+        cmd_dispatch(K_CONV_DIRECT_WEIGHT_GRAD, grad_bufs, 4, &wp, sizeof(wp), (patch + 1 + px - 1) / px, chunks);
+        if (chunks > 1)
+        {
+            struct { uint32_t n, slices, n_first; } sp = { d.F * (patch + 1), chunks, d.F * patch };
+            VkBuf *sum_bufs[3] = { partial, dW, db };
+            cmd_dispatch(K_SUM_PARTIALS, sum_bufs, 3, &sp, sizeof(sp), groups_for((size_t)d.F * (patch + 1), 1), 1);
+        }
+
+        if (dX)
+        {
+            VkBuf *dx_bufs[3] = { dz_rows, W, dX };
+            cmd_dispatch(K_CONV_DIRECT_INPUT_GRAD, dx_bufs, 3, &d, sizeof(d),
+                         groups_for((size_t)batch_size * d.C * d.H * d.W, 256), 1);
+        }
+        return;
+    }
+
+    VkBuf *cols = scratch_of(layer, SCRATCH_COLS);
+
     // dW += dz_rows^T * cols  ([F x out_rows] * [out_rows x patch]): few outputs, each a sum
     // over every output position of the batch, so split over them
-    k_gemm_accumulate(1, 0, d.F, patch, out_rows, dz_rows, cols, (VkBuf *)l->params[0].grad->gpu_buf,
-                      scratch_of(layer, SCRATCH_PARTIAL));
+    k_gemm_accumulate(1, 0, d.F, patch, out_rows, dz_rows, cols, dW, scratch_of(layer, SCRATCH_PARTIAL));
 
     // db += column sums of dz_rows
     {
         struct { uint32_t rows, cols; } bp = { out_rows, d.F };
-        VkBuf *bufs[2] = { dz_rows, (VkBuf *)l->params[1].grad->gpu_buf };
+        VkBuf *bufs[2] = { dz_rows, db };
         cmd_dispatch(K_BIAS_GRAD_SUM, bufs, 2, &bp, sizeof(bp), groups_for(d.F, 1), 1);
     }
 
@@ -1328,8 +1570,12 @@ static void encode_maxpool_forward(PNetwork pnet, int layer, int batch_size, VkB
 static void encode_maxpool_backward(PNetwork pnet, int layer, int batch_size, VkBuf *dZ, VkBuf *dX)
 {
     WindowDims d = window_dims(pnet, layer, batch_size);
+    // when the windows tile the input, each output writes its window; else each input
+    // gathers from the windows covering it
+    struct { WindowDims d; uint32_t tiled; } p = { d, d.K == d.S };
     VkBuf *bufs[3] = { dZ, dX, scratch_of(layer, SCRATCH_COLS) };
-    cmd_dispatch(K_MAXPOOL_BACKWARD, bufs, 3, &d, sizeof(d), groups_for((size_t)batch_size * d.C * d.H * d.W, 256), 1);
+    size_t count = (size_t)batch_size * d.C * (p.tiled ? d.OH * d.OW : d.H * d.W);
+    cmd_dispatch(K_MAXPOOL_BACKWARD, bufs, 3, &p, sizeof(p), groups_for(count, 256), 1);
 }
 
 // Upsample2D forward (src = X, dst = Y) or backward (src = dZ, dst = dX)
@@ -1775,7 +2021,7 @@ static void encode_backward(PNetwork pnet, int batch_size, VkSlot *slot)
             break;
         case LAYER_KIND_CONV2D:
             // the output layer's delta already has its derivative, unless the loss is MSE
-            encode_conv_backward(pnet, li, batch_size, dl_dz, dX,
+            encode_conv_backward(pnet, li, batch_size, A_prev, dl_dz, dX,
                                  li < pnet->layer_count - 1 || pnet->loss_type == LOSS_MSE ? layer->activation
                                                                                             : ACTIVATION_NULL);
             break;

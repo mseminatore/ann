@@ -83,3 +83,28 @@ jobs:
     - name: Metal GPU tests (when the runner has a Metal GPU)
       continue-on-error: true
       run: ctest --test-dir build --output-on-failure --timeout 300 -C Release -R test_metal
+
+  # The CUDA backend in NVIDIA's CUDA container. Hosted runners have no NVIDIA GPU, so this
+  # job guarantees the CUDA build compiles and the CPU tests pass in it; test_cuda needs a
+  # GPU and is left out
+  cuda:
+    name: Linux (x64, CUDA build)
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.6.3-devel-ubuntu24.04
+
+    steps:
+    - name: Install build tools
+      run: apt-get update && apt-get install -y --no-install-recommends cmake git build-essential
+
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=1
+
+    - name: Build
+      run: cmake --build build --config Release -j 4
+
+    - name: Test
+      run: ctest --test-dir build --output-on-failure --timeout 180 -C Release -E test_cuda

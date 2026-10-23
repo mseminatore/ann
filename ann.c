@@ -64,16 +64,17 @@ extern GpuBackend cuda_backend;
 extern GpuBackend vulkan_backend;
 #endif
 
-// The compiled-in GPU backends, in the order ann_gpu_init() tries them
+// The compiled-in GPU backends, in the order ann_gpu_init() tries them.
+// Vulkan comes before CUDA: it runs every layer kind, CUDA only dense ones.
 static GpuBackend *const g_gpu_backends[] = {
 #ifdef USE_METAL
     &metal_backend,
 #endif
-#ifdef USE_CUDA
-    &cuda_backend,
-#endif
 #ifdef USE_VULKAN
     &vulkan_backend,
+#endif
+#ifdef USE_CUDA
+    &cuda_backend,
 #endif
     NULL
 };

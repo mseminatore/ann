@@ -1,8 +1,11 @@
 #version 450
 #include "common.glsl"
-// One optimizer update of a parameter w from its gradient g (which holds
-// -dL/dw, so every update adds), with its optimizer state m and v. The host
-// binds w in place of state an optimizer does not use.
+// A layer's optimizer step for up to two parameters (a dense or conv layer's
+// weights and bias) in one dispatch: for each element, clip the gradient to
+// [-max_grad, max_grad] (when max_grad > 0), apply the optimizer's update, then
+// L2 (w *= decay) and L1 (w moves l1 toward zero) regularization. The gradients
+// hold -dL/dw, so every update adds. The host binds w in place of state an
+// optimizer does not use, and parameter 0's buffers for parameter 1 when n1 == 0.
 
 layout(local_size_x = 256) in;
 
@@ -12,60 +15,87 @@ layout(local_size_x = 256) in;
 #define OPT_RMSPROP  3
 #define OPT_ADAM     4
 
-layout(std430, binding = 0) buffer BufW { float w[]; };
-layout(std430, binding = 1) readonly buffer BufG { float g[]; };
-layout(std430, binding = 2) buffer BufM { float m[]; };
-layout(std430, binding = 3) buffer BufV { float v[]; };
+layout(std430, binding = 0) buffer BufW0 { float w0[]; };
+layout(std430, binding = 1) readonly buffer BufG0 { float g0[]; };
+layout(std430, binding = 2) buffer BufM0 { float m0[]; };
+layout(std430, binding = 3) buffer BufV0 { float v0[]; };
+layout(std430, binding = 4) buffer BufW1 { float w1[]; };
+layout(std430, binding = 5) readonly buffer BufG1 { float g1[]; };
+layout(std430, binding = 6) buffer BufM1 { float m1[]; };
+layout(std430, binding = 7) buffer BufV1 { float v1[]; };
 
 layout(push_constant) uniform Params {
-    uint n;
+    uint n0, n1;            // elements of each parameter
     uint opt;
     float lr;
-    float beta;     // Momentum and RMSProp
+    float beta;             // Momentum and RMSProp
     float beta1, beta2, eps;
-    float bc1, bc2; // Adam bias corrections 1 / (1 - beta^t)
+    float bc1, bc2;         // Adam bias corrections 1 / (1 - beta^t)
+    float max_grad;         // gradient clipping, 0 for none
+    float decay0, l1_0;     // regularization of each parameter (1 and 0 for none)
+    float decay1, l1_1;
 } pc;
+
+// The new weight from weight w, gradient g and the optimizer state m and v,
+// updated in place; mirrors the CPU optimizers in ann.c
+float update(float w, float g, inout float m, inout float v)
+{
+    if (pc.max_grad > 0.0)
+        g = clamp(g, -pc.max_grad, pc.max_grad);
+    switch (pc.opt)
+    {
+    case OPT_SGD:
+        return w + pc.lr * g;
+    case OPT_MOMENTUM:
+        m = pc.beta * m + (1.0 - pc.beta) * g;
+        return w + pc.lr * m;
+    case OPT_ADAGRAD:
+        v += g * g;
+        return w + pc.lr * g / (sqrt(v) + pc.eps);
+    case OPT_RMSPROP:
+        v = pc.beta * v + (1.0 - pc.beta) * g * g;
+        return w + pc.lr * g / (sqrt(v) + pc.eps);
+    case OPT_ADAM:
+        m = pc.beta1 * m + (1.0 - pc.beta1) * g;
+        v = pc.beta2 * v + (1.0 - pc.beta2) * g * g;
+        return w + pc.lr * (m * pc.bc1) / (sqrt(v * pc.bc2) + pc.eps);
+    }
+    return w;
+}
+
+float regularize(float w, float decay, float l1)
+{
+    w *= decay;
+    if (w > 0.0)
+        w -= l1;
+    else if (w < 0.0)
+        w += l1;
+    return w;
+}
+
+// Only the optimizers that keep state read and write it, so the w buffers that
+// stand in for missing state are never touched through those bindings
+bool uses_m() { return pc.opt == OPT_MOMENTUM || pc.opt == OPT_ADAM; }
+bool uses_v() { return pc.opt == OPT_ADAGRAD || pc.opt == OPT_RMSPROP || pc.opt == OPT_ADAM; }
 
 void main()
 {
-    GRID_LOOP(i, pc.n)
+    GRID_LOOP(i, pc.n0 + pc.n1)
     {
-        float gi = g[i];
-        switch (pc.opt)
+        if (i < pc.n0)
         {
-        case OPT_SGD:
-            w[i] += pc.lr * gi;
-            break;
-        case OPT_MOMENTUM:
-        {
-            float mi = pc.beta * m[i] + (1.0 - pc.beta) * gi;
-            m[i] = mi;
-            w[i] += pc.lr * mi;
-            break;
+            float m = uses_m() ? m0[i] : 0.0, v = uses_v() ? v0[i] : 0.0;
+            w0[i] = regularize(update(w0[i], g0[i], m, v), pc.decay0, pc.l1_0);
+            if (uses_m()) m0[i] = m;
+            if (uses_v()) v0[i] = v;
         }
-        case OPT_ADAGRAD:
+        else
         {
-            float vi = v[i] + gi * gi;
-            v[i] = vi;
-            w[i] += pc.lr * gi / (sqrt(vi) + pc.eps);
-            break;
-        }
-        case OPT_RMSPROP:
-        {
-            float vi = pc.beta * v[i] + (1.0 - pc.beta) * gi * gi;
-            v[i] = vi;
-            w[i] += pc.lr * gi / (sqrt(vi) + pc.eps);
-            break;
-        }
-        case OPT_ADAM:
-        {
-            float mi = pc.beta1 * m[i] + (1.0 - pc.beta1) * gi;
-            float vi = pc.beta2 * v[i] + (1.0 - pc.beta2) * gi * gi;
-            m[i] = mi;
-            v[i] = vi;
-            w[i] += pc.lr * (mi * pc.bc1) / (sqrt(vi * pc.bc2) + pc.eps);
-            break;
-        }
+            uint j = i - pc.n0;
+            float m = uses_m() ? m1[j] : 0.0, v = uses_v() ? v1[j] : 0.0;
+            w1[j] = regularize(update(w1[j], g1[j], m, v), pc.decay1, pc.l1_1);
+            if (uses_m()) m1[j] = m;
+            if (uses_v()) v1[j] = v;
         }
     }
 }

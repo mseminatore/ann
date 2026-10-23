@@ -60,7 +60,7 @@ optimizer, loss and activation, and for CNNs and conv autoencoders).
 
 | Environment variable | Effect |
 |----------------------|--------|
-| `ANN_GPU=vulkan` | Use only the Vulkan backend, in a build that also has CUDA. `ANN_GPU=none` keeps everything on the CPU. |
+| `ANN_GPU=vulkan` | Use only the Vulkan backend. A build with both tries Vulkan before CUDA; `ANN_GPU=cuda` picks CUDA instead. `ANN_GPU=none` keeps everything on the CPU. |
 | `ANN_VK_DEVICE=<n>` | Use the n-th Vulkan device. By default, a discrete GPU is preferred over an integrated one, and either over a CPU implementation such as lavapipe. `vulkaninfo --summary` lists the devices in order. |
 | `ANN_VK_DEBUG=1` | Enable the Khronos validation layer (installed with the Vulkan SDK), with synchronization validation, and print its warnings and errors. Much slower; for debugging. |
 | `ANN_VK_STAGING=1` / `0` | Force copies through staging memory (`1`), or mapped device memory (`0`); see below. For testing. |

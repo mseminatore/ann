@@ -58,3 +58,28 @@ jobs:
 
     - name: Test
       run: ctest --test-dir build --output-on-failure --timeout 300 -C Release
+
+  # The Metal backend on macOS. Hosted runners are virtual machines that may not expose a
+  # Metal GPU, so this job guarantees the Metal build compiles and the CPU tests pass in it;
+  # the Metal GPU tests run too, but cannot fail the job
+  metal:
+    name: macOS (ARM, Metal build)
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_METAL=1
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Test
+      run: ctest --test-dir build --output-on-failure --timeout 180 -C Release -E test_metal
+
+    - name: Metal GPU tests (when the runner has a Metal GPU)
+      continue-on-error: true
+      run: ctest --test-dir build --output-on-failure --timeout 300 -C Release -R test_metal

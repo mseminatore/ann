@@ -196,8 +196,8 @@ void test_main(int argc, char *argv[])
             size_t n1, n4, n8, again_n;
             ann_set_num_threads(1);
             real *one = train_params(cnn, &n1);
-            // a BLAS library may not repeat its own results (Accelerate
-            // doesn't), and then no thread count can match another
+            // a BLAS library may not repeat its own results, and then no
+            // thread count can match another
             real *again = train_params(cnn, &again_n);
             int repeatable = again_n == n1 && memcmp(one, again, n1 * sizeof(real)) == 0;
             free(again);

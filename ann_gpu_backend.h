@@ -32,8 +32,8 @@
 // This header defines the GpuBackend vtable used by ann.c to dispatch GPU operations.
 // It is an internal interface — not part of the public libann API.
 //
-// Each backend (Metal, CUDA, Vulkan) implements all slots and registers a GpuBackend instance.
-// ann_gpu_init() tries the compiled-in backends in order (Metal, CUDA, Vulkan), or only the
+// Each backend (Metal, Vulkan, CUDA) implements all slots and registers a GpuBackend instance.
+// ann_gpu_init() tries the compiled-in backends in order (Metal, Vulkan, CUDA), or only the
 // one the ANN_GPU environment variable names, and sets g_gpu_backend to the first that starts.
 //
 // Adding a new backend requires only:
@@ -54,7 +54,7 @@
  */
 typedef struct {
     /**
-     * Backend name ("Metal", "CUDA", "Vulkan"), reported by ann_get_backend_info()
+     * Backend name ("Metal", "Vulkan", "CUDA"), reported by ann_get_backend_info()
      * and matched (ignoring case) against the ANN_GPU environment variable.
      */
     const char *name;

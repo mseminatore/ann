@@ -169,10 +169,10 @@ void test_main(int argc, char *argv[])
 #endif
 #if defined(USE_METAL)
         TESTEX("and the Metal GPU backend, not started", strcmp(info.gpu, "Metal") == 0 && !info.gpu_active);
-#elif defined(USE_CUDA)
-        TESTEX("and the CUDA GPU backend, not started", strcmp(info.gpu, "CUDA") == 0 && !info.gpu_active);
 #elif defined(USE_VULKAN)
         TESTEX("and the Vulkan GPU backend, not started", strcmp(info.gpu, "Vulkan") == 0 && !info.gpu_active);
+#elif defined(USE_CUDA)
+        TESTEX("and the CUDA GPU backend, not started", strcmp(info.gpu, "CUDA") == 0 && !info.gpu_active);
 #else
         TESTEX("and no GPU backend", strcmp(info.gpu, "none") == 0 && !info.gpu_active);
 #endif

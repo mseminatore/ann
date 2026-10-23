@@ -927,13 +927,38 @@ static void conv_forward_samples(void *arg, int begin, int end)
 	}
 }
 
-// dW (unless batched) and db for filters [begin, end), summed over the samples in order
+// Threads take the filters in blocks, with one dW GEMM per block: BLAS may
+// round a row of a product differently depending on how many rows the GEMM
+// has (Accelerate does), so the blocks depend only on the filter count, never
+// on the thread count. About CONV_FILTER_BLOCKS blocks of at least
+// CONV_FILTER_BLOCK_MIN filters: enough to split the work, and GEMMs big
+// enough not to re-read a sample's columns for every filter or two.
+#define CONV_FILTER_BLOCKS		8
+#define CONV_FILTER_BLOCK_MIN	2
+
+static int conv_filter_block(const Layer *layer)
+{
+	int block = (layer->shape.c + CONV_FILTER_BLOCKS - 1) / CONV_FILTER_BLOCKS;
+	return block < CONV_FILTER_BLOCK_MIN ? CONV_FILTER_BLOCK_MIN : block;
+}
+
+static int conv_filter_blocks(const Layer *layer)
+{
+	int block = conv_filter_block(layer);
+	return (layer->shape.c + block - 1) / block;
+}
+
+// dW (unless batched) and db for filter blocks [begin, end), summed over the samples in order
 static void conv_filter_grads(void *arg, int begin, int end)
 {
 	const conv_job *job = (const conv_job *)arg;
 	PLayer layer = job->layer;
 	int positions = layer->shape.h * layer->shape.w;
 	real *db = layer->params[1].grad->values;
+	int block = conv_filter_block(layer), first = begin * block, last = end * block;
+
+	if (last > layer->shape.c)
+		last = layer->shape.c;
 
 	for (int b = 0; b < job->rows; b++)
 	{
@@ -942,11 +967,15 @@ static void conv_filter_grads(void *arg, int begin, int end)
 		{
 			PTensor dW = layer->params[0].grad;
 			Tensor col = conv_columns(layer, b);
-			Tensor dz_rows = tensor_view((real *)dz + begin * positions, end - begin, positions);
-			Tensor dW_rows = tensor_view(dW->values + begin * dW->cols, end - begin, dW->cols);
-			tensor_gemm_transB((real)1.0, &dz_rows, &col, (real)1.0, &dW_rows);
+			for (int f = first; f < last; f += block)
+			{
+				int count = last - f < block ? last - f : block;
+				Tensor dz_rows = tensor_view((real *)dz + f * positions, count, positions);
+				Tensor dW_rows = tensor_view(dW->values + f * dW->cols, count, dW->cols);
+				tensor_gemm_transB((real)1.0, &dz_rows, &col, (real)1.0, &dW_rows);
+			}
 		}
-		for (int f = begin; f < end; f++)
+		for (int f = first; f < last; f++)
 		{
 			const real *dz_row = dz + f * positions;
 			for (int i = 0; i < positions; i++)
@@ -1120,7 +1149,7 @@ static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTens
 		Tensor cols = conv_batch_columns(layer, rows), dz = conv_batch_outputs(layer, rows);
 		ann_parallel_for(rows, 1, conv_batch_gather_grads, &job);
 		tensor_gemm_transB((real)1.0, &dz, &cols, (real)1.0, layer->params[0].grad);
-		ann_parallel_for(layer->shape.c, 1, conv_filter_grads, &job);
+		ann_parallel_for(conv_filter_blocks(layer), 1, conv_filter_grads, &job);
 		if (!dX)
 			return;
 		Tensor dcols = conv_batch_column_grads(layer, rows);
@@ -1129,7 +1158,7 @@ static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTens
 		return;
 	}
 #endif
-	ann_parallel_for(layer->shape.c, 1, conv_filter_grads, &job);
+	ann_parallel_for(conv_filter_blocks(layer), 1, conv_filter_grads, &job);
 	if (!dX || ensure_rows(&layer->t_scratch[1], rows, patch * positions) != ERR_OK)
 		return;
 	ann_parallel_for(rows, 1, conv_input_grads, &job);

@@ -41,6 +41,12 @@
 // BLAS, on the workers and on the calling thread alike, and may call it: many small GEMMs then
 // run side by side instead of one at a time, each too small for BLAS's own threads.
 //
+// Rule: results must not depend on the thread count, so the shape of every BLAS call a range
+// function makes must not depend on how the range was split. BLAS may round an output
+// differently depending on the shape of the product it is part of (Accelerate does), so
+// splitting one GEMM into per-thread pieces changes the results; split into pieces whose
+// shapes depend only on the problem instead (see conv_filter_block in ann.c).
+//
 // Build with ANN_NO_THREADS to compile the pool out; every loop then runs serially.
 //================================================================================================
 

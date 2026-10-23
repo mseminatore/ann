@@ -172,7 +172,21 @@ enum { VK_OPT_SGD, VK_OPT_MOMENTUM, VK_OPT_ADAGRAD, VK_OPT_RMSPROP, VK_OPT_ADAM 
 #define VK_PUSH_BYTES       64      // push constant space a kernel uses
 #define VK_POOL_SETS        256     // descriptor sets per pool
 #define VK_MAX_POOLS        256     // pools a command buffer may use
-#define GEMM_TILE           64      // gemm.comp's output tile
+// gemm.comp's tile shapes (rows x columns of the result), each 256 invocations of 4 x 4 results:
+// square, and thin ones for results with few rows or columns (a conv's filters, a small batch)
+#define GEMM_SHAPES 5
+static const uint32_t g_gemm_shapes[GEMM_SHAPES][2] = {
+    { 64, 64 }, { 128, 32 }, { 32, 128 }, { 256, 16 }, { 16, 256 },
+};
+
+// What ANN_VK_PROFILE reports separately: each Kernel, K_TRANSFER (copies and fills), and each
+// GEMM by layout and tile shape, from PROFILE_GEMM on
+#define PROFILE_GEMM        (K_COUNT + 1)
+// A thin tile shape replaces the square one when it pads the result this many times less
+#define GEMM_THIN_GAIN      3
+// sum_partials.comp gives each element one invocation, not a workgroup, up to this many slices
+#define SUM_PER_INVOCATION  32
+#define PROFILE_KINDS       (PROFILE_GEMM + 3 * GEMM_SHAPES)
 #define EVAL_BATCH_BYTES    ((size_t)256 << 20)
 #define EVAL_MAX_ROWS       (1 << 20)
 
@@ -182,13 +196,17 @@ enum { VK_OPT_SGD, VK_OPT_MOMENTUM, VK_OPT_ADAGRAD, VK_OPT_RMSPROP, VK_OPT_ADAM 
 //   SCRATCH_COLS  - conv im2col columns [batch*OH*OW x C*K*K]; max pool argmax [batch x nodes]
 //   SCRATCH_ROWS  - conv GEMM output rows, then dZ rows [batch*OH*OW x F]
 //   SCRATCH_DCOLS - conv column gradients [batch*OH*OW x C*K*K]
-//   SCRATCH_PARTIAL - conv weight gradient split-K partial sums [slices x F*C*K*K]
+//   SCRATCH_PARTIAL - direct conv weight gradient partial sums [chunks x F*(C*K*K + 1)]
 //-----------------------------------------------------------
 enum { SCRATCH_COLS, SCRATCH_ROWS, SCRATCH_DCOLS, SCRATCH_PARTIAL, SCRATCH_SLOTS };
 
-// Split-K GEMMs aim for about this many workgroups, with at least SPLIT_MIN_DEPTH of K each
+// Split-K GEMMs aim for about this many workgroups, with at least SPLIT_MIN_DEPTH of K each,
+// and their partial sums fit in g_vk.split (SPLIT_FLOATS floats). On the Radeon HD 7700, 64 to
+// 256 workgroups ran within 2% of each other; a depth of 32 beat 64 and 128 by 4-30% on dense
+// networks, and 16 made too many slices.
 #define SPLIT_GROUPS        128
-#define SPLIT_MIN_DEPTH     256
+#define SPLIT_MIN_DEPTH     32
+#define SPLIT_FLOATS        ((uint64_t)1 << 20)
 
 //-----------------------------------------------------------
 // A tensor's GPU buffer (t->gpu_buf), or a backend work buffer
@@ -217,7 +235,7 @@ typedef struct {
     int pending;                // submitted and not yet waited for
     VkQueryPool queries;        // ANN_VK_PROFILE timestamps: one at the start, one after each command
     uint32_t query_count;
-    uint8_t query_kind[VK_PROFILE_QUERIES];     // the Kernel (or K_TRANSFER) each timestamp ends
+    uint8_t query_kind[VK_PROFILE_QUERIES];     // the profile kind (PROFILE_KINDS) each timestamp ends
     VkDescriptorPool pools[VK_MAX_POOLS];
     int pool_count, pool_cur;   // pools created, and the one sets come from now
     VkBuf *staging;             // host-visible; uploads and downloads pass through it
@@ -249,6 +267,7 @@ typedef struct {
     VkDescriptorSetLayout set_layout;
     VkPipelineLayout pipe_layout;
     VkPipeline pipelines[K_COUNT];
+    VkPipeline gemm_pipes[3][GEMM_SHAPES];  // gemm.comp by (NN, NT, TN) and tile shape
 
     VkCommandPool cmd_pool;
     VkSlot slots[TRAIN_SLOTS];
@@ -256,13 +275,14 @@ typedef struct {
     VkSlot *rec;                // the slot being recorded; see cmd_begin()
     int profile;                // ANN_VK_PROFILE: time each command on the GPU
     double ns_per_tick;         // timestamp period
-    double profile_ns[K_COUNT + 1];         // GPU time and commands by kernel
-    unsigned long long profile_calls[K_COUNT + 1];
+    double profile_ns[PROFILE_KINDS];       // GPU time and commands by profile kind
+    unsigned long long profile_calls[PROFILE_KINDS];
     int record_failed;          // a command could not be recorded; the submit fails
     int barrier_pending;        // a command since the last barrier wrote memory
 
     VkBuf *infer[2];            // inference ping-pong buffers
     VkBuf **scratch;            // per-layer work buffers, scratch[layer * SCRATCH_SLOTS + slot]
+    VkBuf *split;               // split-K GEMM partial sums, SPLIT_FLOATS floats
     int scratch_layers;         // layers scratch has room for
     int training_buffers_ready; // optimizer state was uploaded since upload_network()
     real loss_sum;              // losses of the steps finished since vk_train_finish()
@@ -584,18 +604,39 @@ static int create_pipelines(void)
         if (vkCreateShaderModule(g_vk.device, &mi, NULL, &module) != VK_SUCCESS)
             return 0;
 
-        uint32_t spec[2] = { g_kernels[k].trans_a, g_kernels[k].trans_b };
-        VkSpecializationMapEntry entries[2] = { { 0, 0, sizeof(uint32_t) }, { 1, sizeof(uint32_t), sizeof(uint32_t) } };
-        VkSpecializationInfo si = { 2, entries, sizeof(spec), spec };
+        // gemm.comp: a pipeline per tile shape, with its transposes, tile and workgroup size
+        // as specialization constants 0-5
+        int shapes = k <= K_GEMM_TN ? GEMM_SHAPES : 1;
+        VkResult res = VK_SUCCESS;
+        for (int sh = 0; sh < shapes && res == VK_SUCCESS; sh++)
+        {
+            uint32_t tm = g_gemm_shapes[sh][0], tn = g_gemm_shapes[sh][1];
+            uint32_t spec[6] = { g_kernels[k].trans_a, g_kernels[k].trans_b, tm, tn, tn / 4, tm / 4 };
+            VkSpecializationMapEntry entries[6];
+            for (uint32_t e = 0; e < 6; e++)
+            {
+                entries[e].constantID = e;
+                entries[e].offset = e * (uint32_t)sizeof(uint32_t);
+                entries[e].size = sizeof(uint32_t);
+            }
+            VkSpecializationInfo si = { 6, entries, sizeof(spec), spec };
 
-        VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
-        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        ci.stage.module = module;
-        ci.stage.pName = "main";
-        ci.stage.pSpecializationInfo = k <= K_GEMM_TN ? &si : NULL;
-        ci.layout = g_vk.pipe_layout;
-        VkResult res = vkCreateComputePipelines(g_vk.device, VK_NULL_HANDLE, 1, &ci, NULL, &g_vk.pipelines[k]);
+            VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+            ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            ci.stage.module = module;
+            ci.stage.pName = "main";
+            ci.stage.pSpecializationInfo = k <= K_GEMM_TN ? &si : NULL;
+            ci.layout = g_vk.pipe_layout;
+            VkPipeline pipe;
+            res = vkCreateComputePipelines(g_vk.device, VK_NULL_HANDLE, 1, &ci, NULL, &pipe);
+            if (res != VK_SUCCESS)
+                break;
+            if (k <= K_GEMM_TN)
+                g_vk.gemm_pipes[k][sh] = pipe;
+            if (sh == 0)
+                g_vk.pipelines[k] = pipe;
+        }
         vkDestroyShaderModule(g_vk.device, module, NULL);
         if (res != VK_SUCCESS)
         {
@@ -766,26 +807,35 @@ static int profile_order(const void *a, const void *b)
 
 static void print_profile(void)
 {
-    int order[K_COUNT + 1];
+    int order[PROFILE_KINDS];
     double total = 0.0;
-    for (int k = 0; k <= K_COUNT; k++)
+    for (int k = 0; k < PROFILE_KINDS; k++)
     {
         order[k] = k;
         total += g_vk.profile_ns[k];
     }
-    qsort(order, K_COUNT + 1, sizeof(order[0]), profile_order);
+    qsort(order, PROFILE_KINDS, sizeof(order[0]), profile_order);
     printf("\n[Vulkan] GPU time by kernel (ANN_VK_PROFILE):\n");
-    printf("  %-20s %10s %12s %10s %7s\n", "kernel", "commands", "total ms", "avg us", "share");
-    for (int i = 0; i <= K_COUNT; i++)
+    printf("  %-26s %10s %12s %10s %7s\n", "kernel", "commands", "total ms", "avg us", "share");
+    for (int i = 0; i < PROFILE_KINDS; i++)
     {
         int k = order[i];
         if (!g_vk.profile_calls[k])
             continue;
-        printf("  %-20s %10llu %12.2f %10.2f %6.1f%%\n", g_kernel_names[k], g_vk.profile_calls[k],
+        char name[40];
+        if (k < PROFILE_GEMM)
+            snprintf(name, sizeof(name), "%s", g_kernel_names[k]);
+        else
+        {
+            int g = k - PROFILE_GEMM, shape = g % GEMM_SHAPES;
+            snprintf(name, sizeof(name), "%s %ux%u", g_kernel_names[g / GEMM_SHAPES],
+                     g_gemm_shapes[shape][0], g_gemm_shapes[shape][1]);
+        }
+        printf("  %-26s %10llu %12.2f %10.2f %6.1f%%\n", name, g_vk.profile_calls[k],
                g_vk.profile_ns[k] / 1e6, g_vk.profile_ns[k] / 1e3 / (double)g_vk.profile_calls[k],
                total > 0.0 ? 100.0 * g_vk.profile_ns[k] / total : 0.0);
     }
-    printf("  %-20s %10s %12.2f\n", "total", "", total / 1e6);
+    printf("  %-26s %10s %12.2f\n", "total", "", total / 1e6);
 }
 
 // Turn profiling on when ANN_VK_PROFILE is set and the queue records timestamps
@@ -1157,8 +1207,8 @@ static uint32_t groups_for(size_t n, uint32_t local)
 // Record a kernel: bufs bind to 0..n_bufs-1 (the rest repeat bufs[0]), params are its
 // push constants
 //-----------------------------------------------------------
-static void cmd_dispatch_3d(Kernel k, VkBuf *const *bufs, int n_bufs, const void *params, uint32_t params_size,
-                            uint32_t groups_x, uint32_t groups_y, uint32_t groups_z)
+static void cmd_dispatch_pipe(VkPipeline pipe, int profile_kind, VkBuf *const *bufs, int n_bufs, const void *params,
+                              uint32_t params_size, uint32_t groups_x, uint32_t groups_y, uint32_t groups_z)
 {
     if (g_vk.record_failed)
         return;
@@ -1188,12 +1238,19 @@ static void cmd_dispatch_3d(Kernel k, VkBuf *const *bufs, int n_bufs, const void
     vkUpdateDescriptorSets(g_vk.device, VK_MAX_BINDINGS, writes, 0, NULL);
 
     cmd_barrier();
-    vkCmdBindPipeline(g_vk.rec->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk.pipelines[k]);
+    vkCmdBindPipeline(g_vk.rec->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdBindDescriptorSets(g_vk.rec->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk.pipe_layout, 0, 1, &set, 0, NULL);
     vkCmdPushConstants(g_vk.rec->cmd, g_vk.pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, params_size, params);
     vkCmdDispatch(g_vk.rec->cmd, groups_x, groups_y, groups_z);
-    profile_mark((int)k);
+    profile_mark(profile_kind);
     g_vk.barrier_pending = 1;
+}
+
+// The same with kernel k's pipeline
+static void cmd_dispatch_3d(Kernel k, VkBuf *const *bufs, int n_bufs, const void *params, uint32_t params_size,
+                            uint32_t groups_x, uint32_t groups_y, uint32_t groups_z)
+{
+    cmd_dispatch_pipe(g_vk.pipelines[k], (int)k, bufs, n_bufs, params, params_size, groups_x, groups_y, groups_z);
 }
 
 static void cmd_dispatch(Kernel k, VkBuf *const *bufs, int n_bufs, const void *params, uint32_t params_size,
@@ -1206,59 +1263,104 @@ static void cmd_dispatch(Kernel k, VkBuf *const *bufs, int n_bufs, const void *p
 // Kernels
 //================================================================================================
 
-// Row-major C[M x N] = alpha * op(A) * op(B) + beta * C (see gemm.comp), with K split into
-// slices of k_slice, each written to its own [M x N] block of C, when slices > 1
-static void k_gemm_slices(int trans_a, int trans_b, uint32_t M, uint32_t N, uint32_t K,
-                          float alpha, VkBuf *A, VkBuf *B, float beta, VkBuf *C, uint32_t k_slice, uint32_t slices)
+// Add up n-element partial sums from slices into c (the first n_first) and c2 (the rest),
+// each becoming the sum + beta * its old value (see sum_partials.comp): one invocation per
+// element when there are few slices, else a workgroup per element
+static void k_sum_partials(VkBuf *partial, VkBuf *c, VkBuf *c2, uint32_t n, uint32_t slices, uint32_t n_first,
+                           float beta)
 {
-    struct { uint32_t M, N, K; float alpha, beta; uint32_t k_slice; } p = { M, N, K, alpha, beta, k_slice };
-    VkBuf *bufs[3] = { A, B, C };
-    Kernel k = trans_a ? K_GEMM_TN : (trans_b ? K_GEMM_NT : K_GEMM_NN);
-    // gemm.comp loops over row tiles beyond the device's workgroup limit
-    uint32_t row_tiles = (M + GEMM_TILE - 1) / GEMM_TILE;
-    if (row_tiles > g_vk.max_groups[1])
-        row_tiles = g_vk.max_groups[1];
-    cmd_dispatch_3d(k, bufs, 3, &p, sizeof(p), (N + GEMM_TILE - 1) / GEMM_TILE, row_tiles, slices);
+    uint32_t per_invocation = slices <= SUM_PER_INVOCATION;
+    struct { uint32_t n, slices, n_first; float beta; uint32_t per_invocation; } p = {
+        n, slices, n_first, beta, per_invocation
+    };
+    VkBuf *bufs[3] = { partial, c, c2 };
+    cmd_dispatch(K_SUM_PARTIALS, bufs, 3, &p, sizeof(p), groups_for(n, per_invocation ? 64 : 1), 1);
 }
 
+// The tile shape (gemm.comp's TM x TN) for a GEMM with an M x N result: square, unless a
+// thin shape pads the result at least GEMM_THIN_GAIN times less. On the Radeon HD 7700 the
+// thin shapes ran slower per useful result, so only a matrix that fills a sliver of the square
+// tiles (a 16-filter conv's forward pass: 16 of 64 columns) gained from them.
+static int gemm_shape(uint32_t M, uint32_t N)
+{
+    // ANN_VK_GEMM_SHAPE=<0..4> forces one shape of g_gemm_shapes, for tuning on other GPUs
+    static int forced = -2;
+    if (forced == -2)
+    {
+        const char *env = getenv("ANN_VK_GEMM_SHAPE");
+        forced = env && *env ? atoi(env) : -1;
+        if (forced >= GEMM_SHAPES)
+            forced = -1;
+    }
+    if (forced >= 0)
+        return forced;
+    int best = 0;
+    uint64_t best_work = UINT64_MAX;
+    uint32_t best_tiles = 0;
+    for (int s = 1; s < GEMM_SHAPES; s++)
+    {
+        uint32_t tm = g_gemm_shapes[s][0], tn = g_gemm_shapes[s][1];
+        uint32_t tiles = ((M + tm - 1) / tm) * ((N + tn - 1) / tn);
+        uint64_t work = (uint64_t)tiles * tm * tn;
+        if (work < best_work || (work == best_work && tiles > best_tiles))
+        {
+            best = s;
+            best_work = work;
+            best_tiles = tiles;
+        }
+    }
+    uint64_t square = (uint64_t)((M + 63) / 64) * ((N + 63) / 64) * 64 * 64;
+    return square >= GEMM_THIN_GAIN * best_work ? best : 0;
+}
+
+//-----------------------------------------------------------
+// Row-major C[M x N] = alpha * op(A) * op(B) + beta * C (see gemm.comp), in the tile shape
+// that wastes the least work. A GEMM with few output tiles and a deep K (a forward pass at a
+// small batch, a conv weight gradient summing over every output position of the batch) would
+// leave most of the GPU idle, so K is split over about SPLIT_GROUPS workgroups, each summing
+// its slice into its own block of g_vk.split, and sum_partials.comp adds the blocks into C.
+//-----------------------------------------------------------
 static void k_gemm(int trans_a, int trans_b, uint32_t M, uint32_t N, uint32_t K,
                    float alpha, VkBuf *A, VkBuf *B, float beta, VkBuf *C)
 {
-    k_gemm_slices(trans_a, trans_b, M, N, K, alpha, A, B, beta, C, K, 1);
-}
+    int shape = gemm_shape(M, N);
+    uint32_t tm = g_gemm_shapes[shape][0], tn = g_gemm_shapes[shape][1];
+    uint32_t col_tiles = (N + tn - 1) / tn, row_tiles = (M + tm - 1) / tm;
+    uint32_t tiles = col_tiles * row_tiles;
 
-// Slices of K for a GEMM with few output tiles and a deep K (a conv weight gradient, which
-// sums over every output position of the batch), so it runs on about SPLIT_GROUPS
-// workgroups instead of a handful; 1 when it has tiles enough
-static uint32_t split_slices(uint32_t M, uint32_t N, uint32_t K)
-{
-    uint32_t tiles = ((M + GEMM_TILE - 1) / GEMM_TILE) * ((N + GEMM_TILE - 1) / GEMM_TILE);
     uint32_t slices = tiles >= SPLIT_GROUPS ? 1 : SPLIT_GROUPS / tiles;
     if (slices > K / SPLIT_MIN_DEPTH)
         slices = K / SPLIT_MIN_DEPTH;
+    if (slices > SPLIT_FLOATS / ((uint64_t)M * N))
+        slices = (uint32_t)(SPLIT_FLOATS / ((uint64_t)M * N));
     if (slices > g_vk.max_groups[2])
         slices = g_vk.max_groups[2];
-    return slices < 1 ? 1 : slices;
-}
+    if (slices < 1)
+        slices = 1;
+    // slices a whole number of gemm.comp's 16-deep steps
+    uint32_t k_slice = (K + slices - 1) / slices;
+    k_slice = (k_slice + 15) / 16 * 16;
+    slices = (K + k_slice - 1) / k_slice;
 
-// C[M x N] += op(A) * op(B), split over K (split_slices) through partial, which holds
-// slices * M * N floats
-static void k_gemm_accumulate(int trans_a, int trans_b, uint32_t M, uint32_t N, uint32_t K,
-                              VkBuf *A, VkBuf *B, VkBuf *C, VkBuf *partial)
-{
-    uint32_t slices = split_slices(M, N, K);
+    // gemm.comp loops over row tiles beyond the device's workgroup limit
+    if (row_tiles > g_vk.max_groups[1])
+        row_tiles = g_vk.max_groups[1];
+    int kind = trans_a ? 2 : (trans_b ? 1 : 0);     // K_GEMM_NN, K_GEMM_NT or K_GEMM_TN
+    VkPipeline pipe = g_vk.gemm_pipes[kind][shape];
+    int profile_kind = PROFILE_GEMM + kind * GEMM_SHAPES + shape;
+
+    struct { uint32_t M, N, K; float alpha, beta; uint32_t k_slice; } p = { M, N, K, alpha, beta, k_slice };
     if (slices == 1)
     {
-        k_gemm(trans_a, trans_b, M, N, K, 1.0f, A, B, 1.0f, C);
+        VkBuf *bufs[3] = { A, B, C };
+        cmd_dispatch_pipe(pipe, profile_kind, bufs, 3, &p, sizeof(p), col_tiles, row_tiles, 1);
         return;
     }
-    uint32_t k_slice = (K + slices - 1) / slices;
-    slices = (K + k_slice - 1) / k_slice;
-    k_gemm_slices(trans_a, trans_b, M, N, K, 1.0f, A, B, 0.0f, partial, k_slice, slices);
+    p.beta = 0.0f;
+    VkBuf *bufs[3] = { A, B, g_vk.split };
+    cmd_dispatch_pipe(pipe, profile_kind, bufs, 3, &p, sizeof(p), col_tiles, row_tiles, slices);
 
-    struct { uint32_t n, slices, n_first; } p = { M * N, slices, M * N };
-    VkBuf *bufs[3] = { partial, C, C };
-    cmd_dispatch(K_SUM_PARTIALS, bufs, 3, &p, sizeof(p), groups_for((size_t)M * N, 1), 1);
+    k_sum_partials(g_vk.split, C, C, M * N, slices, M * N, beta);
 }
 
 // dl_dz *= the activation's derivative for a layer, reading A, or Z for GELU, as the CPU
@@ -1342,6 +1444,8 @@ static VkBuf *layer_scratch(int layer, int slot, size_t bytes)
 
 static void free_scratch(void)
 {
+    buf_destroy(g_vk.split);
+    g_vk.split = NULL;
     for (int i = 0; i < g_vk.scratch_layers * SCRATCH_SLOTS; i++)
         buf_destroy(g_vk.scratch[i]);
     free(g_vk.scratch);
@@ -1403,12 +1507,14 @@ static uint32_t direct_chunks(const WindowDims *d, uint32_t rows)
 }
 
 //-----------------------------------------------------------
-// Allocate the work buffers a batch of rows needs: conv columns and GEMM rows (and, for
-// training, column gradients, which layer 1 never needs, and weight gradient partial sums;
-// a direct conv needs only gradient rows and partial sums), and max pool argmax
+// Allocate the work buffers a batch of rows needs: split-K partial sums, conv columns and
+// GEMM rows (and, for training, column gradients, which layer 1 never needs; a direct conv
+// needs only gradient rows and weight gradient partial sums), and max pool argmax
 //-----------------------------------------------------------
 static int ensure_layer_scratch(PNetwork pnet, int rows, int training)
 {
+    if (!ensure_buf(&g_vk.split, SPLIT_FLOATS * sizeof(float)))
+        return 0;
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
@@ -1427,9 +1533,7 @@ static int ensure_layer_scratch(PNetwork pnet, int rows, int training)
             }
             if (!layer_scratch(layer, SCRATCH_COLS, out_rows * patch * sizeof(float)) ||
                 !layer_scratch(layer, SCRATCH_ROWS, out_rows * d.F * sizeof(float)) ||
-                (training && layer > 1 && !layer_scratch(layer, SCRATCH_DCOLS, out_rows * patch * sizeof(float))) ||
-                (training && !layer_scratch(layer, SCRATCH_PARTIAL, (size_t)split_slices(d.F, (uint32_t)patch,
-                                            (uint32_t)out_rows) * d.F * patch * sizeof(float))))
+                (training && layer > 1 && !layer_scratch(layer, SCRATCH_DCOLS, out_rows * patch * sizeof(float))))
                 return 0;
         }
         else if (l->kind == LAYER_KIND_MAXPOOL2D)
@@ -1531,9 +1635,7 @@ static void encode_conv_backward(PNetwork pnet, int layer, int batch_size, VkBuf
         cmd_dispatch(K_CONV_DIRECT_WEIGHT_GRAD, grad_bufs, 4, &wp, sizeof(wp), (patch + 1 + px - 1) / px, chunks);
         if (chunks > 1)
         {
-            struct { uint32_t n, slices, n_first; } sp = { d.F * (patch + 1), chunks, d.F * patch };
-            VkBuf *sum_bufs[3] = { partial, dW, db };
-            cmd_dispatch(K_SUM_PARTIALS, sum_bufs, 3, &sp, sizeof(sp), groups_for((size_t)d.F * (patch + 1), 1), 1);
+            k_sum_partials(partial, dW, db, d.F * (patch + 1), chunks, d.F * patch, 1.0f);
         }
 
         if (dX)
@@ -1549,7 +1651,7 @@ static void encode_conv_backward(PNetwork pnet, int layer, int batch_size, VkBuf
 
     // dW += dz_rows^T * cols  ([F x out_rows] * [out_rows x patch]): few outputs, each a sum
     // over every output position of the batch, so split over them
-    k_gemm_accumulate(1, 0, d.F, patch, out_rows, dz_rows, cols, dW, scratch_of(layer, SCRATCH_PARTIAL));
+    k_gemm(1, 0, d.F, patch, out_rows, 1.0f, dz_rows, cols, 1.0f, dW);
 
     // db += column sums of dz_rows
     {

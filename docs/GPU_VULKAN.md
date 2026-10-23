@@ -66,6 +66,7 @@ optimizer, loss and activation, and for CNNs and conv autoencoders).
 | `ANN_VK_STAGING=1` / `0` | Force copies through staging memory (`1`), or mapped device memory (`0`); see below. For testing. |
 | `ANN_VK_PROFILE=1` | Time every GPU command with timestamp queries and print the GPU time by kernel at exit (count, total, average, share). For finding what to optimize; adds a little overhead. |
 | `ANN_VK_CONV_DIRECT=<n>` | Convolve layers with at most `n` filters (up to 16) directly instead of through im2col and GEMM; default 8. For tuning on other GPUs: compare `ANN_VK_PROFILE` totals. |
+| `ANN_VK_GEMM_SHAPE=<0..4>` | Force one GEMM tile shape: 64x64, 128x32, 32x128, 256x16, 16x256. For tuning; `ANN_VK_PROFILE` reports each GEMM by layout and shape. |
 
 `ann_gpu_init()` prints the device it chose and how data reaches it, e.g.
 `[Vulkan] Device 0: AMD Radeon HD 7700 Series (copies through staging memory)`.
@@ -79,9 +80,21 @@ optimizer, loss and activation, and for CNNs and conv autoencoders).
   through a host-visible staging buffer, as with CUDA. A buffer that no longer fits in mapped
   memory goes in plain device memory and uses the staging buffer, so the two can mix. CTest
   runs `test_vulkan` both ways (`test_vulkan_staging`, `test_vulkan_mapped`).
-- **GEMM.** There is no vendor BLAS for Vulkan; `gemm.comp` is a tiled SGEMM (64x64 tiles, a 4x4
-  block per invocation) with specialization constants for the three layouts training uses:
-  `Y = X·Wᵀ`, `dW += dZᵀ·A` and `dX = dZ·W`. Matrices are row-major, as libann's tensors are.
+- **GEMM.** There is no vendor BLAS for Vulkan; `gemm.comp` is a tiled SGEMM (a 4x4 block per
+  invocation, 256 invocations a workgroup) with specialization constants for the three layouts
+  training uses (`Y = X·Wᵀ`, `dW += dZᵀ·A` and `dX = dZ·W`) and for the tile shape: 64x64, or
+  128x32, 32x128, 256x16 or 16x256 for matrices with few rows or columns. Matrices are
+  row-major, as libann's tensors are.
+  - **Tile shape.** A thin shape is used only when it pads the result at least 3x less than
+    64x64 (a 16-filter conv's forward pass); on the Radeon HD 7700 thin tiles did less useful work
+    per invocation, and picking the least-padded shape every time made dense networks slower.
+    `ANN_VK_GEMM_SHAPE` forces one shape, for tuning.
+  - **Split-K.** A GEMM with few output tiles and a deep K (a forward pass at a small batch, a
+    conv weight gradient over every output position of the batch) would leave most of the GPU
+    idle, so K is split over about 128 workgroups, each at least 32 deep, which write partial sums
+    that `sum_partials.comp` adds into the result (an invocation per element for up to 32 slices,
+    else a workgroup per element). Most of the dense speedup came from this: the dense benchmark
+    at batch 32 went from 314 to 187 ms (the CPU takes 256 ms).
 - **Conv backward.** A conv layer's weight gradient sums over every output position of the batch
   (`batch·OH·OW` rows) into only `F x C·K·K` outputs, too few tiles to keep a GPU busy, so its
   GEMM is split over K: about 128 workgroups each sum a slice into their own block, and

@@ -97,6 +97,11 @@ optimizer, loss and activation, and for CNNs and conv autoencoders).
   windows tile the input (size == stride) writes each window from its output in the backward
   pass rather than gathering. On the Radeon HD 7700 these cut fashion_cnn's GPU time per epoch
   from 4.0 s to 3.0 s at batch 32 and from 2.8 s to 1.8 s at batch 256.
+- **im2col.** GPUs have no fast integer divide (AMD and Intel emulate it in dozens of
+  instructions), so `conv_im2col.comp` avoids one per element: each invocation keeps one column
+  and steps through 16 rows, tracking each row's (sample, row, column) by adding with carries.
+  That made it about 3x faster than dividing per element, taking fashion_cnn's GPU time per
+  epoch on the Radeon HD 7700 to 2.8 s at batch 32 and 1.55 s at batch 256.
 - **Work buffers.** Each conv layer keeps its im2col columns, GEMM rows, column gradients and
   partial sums, and each max pool layer its argmax, between a batch's forward and backward
   passes. They grow to the largest batch seen and are freed with `ann_gpu_free_network()`.

@@ -377,7 +377,13 @@ static void pool_init(void)
 	pool_cond_init(&g_pool.work_done);
 	g_pool.threads = pool_resolve_threads();
 	g_pool.initialized = 1;
+#ifndef _WIN32
+	// On Windows, a DLL's atexit handlers run in DLL_PROCESS_DETACH under the
+	// loader lock, where joining a worker deadlocks (thread exit needs that
+	// lock). pool_start() pins the module instead, and the workers end with
+	// the process.
 	atexit(pool_stop);
+#endif
 }
 
 //------------------------------
@@ -385,6 +391,17 @@ static void pool_init(void)
 //------------------------------
 static void pool_start(void)
 {
+#ifdef _WIN32
+	// Keep this module loaded once workers exist: FreeLibrary would unmap the
+	// code they are waiting in (pyann's cffi unloads libann at interpreter exit)
+	if (g_pool.workers < g_pool.threads - 1)
+	{
+		HMODULE self;
+		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+			(LPCSTR)pool_worker, &self);
+	}
+#endif
+
 	while (g_pool.workers < g_pool.threads - 1)
 	{
 #ifdef _WIN32

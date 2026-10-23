@@ -131,6 +131,26 @@ static int gc_nets_close(PNetwork a, PNetwork b, real tol, int with_state)
     return 1;
 }
 
+// Train the same network on the CPU and the GPU with weight decay (l2) and L1
+// regularization and compare the weights
+static int gc_regularized_matches_cpu(real l2, real l1)
+{
+    PNetwork cpu_net = gc_make_net(0.0f), gpu_net = gc_make_net(0.0f);
+    ann_set_weight_decay(cpu_net, l2);
+    ann_set_weight_decay(gpu_net, l2);
+    ann_set_l1_regularization(cpu_net, l1);
+    ann_set_l1_regularization(gpu_net, l1);
+    ann_gpu_upload_network(gpu_net);
+    srand(31);
+    gc_train(cpu_net);
+    srand(31);
+    gc_train(gpu_net);
+    int ok = gpu_net->layers[1].t_weights->gpu_buf != NULL && gc_nets_close(cpu_net, gpu_net, 1e-3f, 0);
+    ann_free_network(cpu_net);
+    ann_free_network(gpu_net);
+    return ok;
+}
+
 static void gc_online_steps(PNetwork net)
 {
     srand(99);
@@ -214,6 +234,15 @@ static void run_gpu_consistency_tests(void)
            gc_gpu_matches_cpu(gpu_net));
     ann_free_network(cpu_net);
     ann_free_network(gpu_net);
+
+    // ========================================================================
+    SUITE("GPU L2 and L1 Regularization");
+    // ========================================================================
+
+    // L2 multiplies the weights by 1 - lr * lambda each step, L1 subtracts lr * lambda * sign(W)
+    TESTEX("GPU L2 training matches the CPU", gc_regularized_matches_cpu(1e-3f, 0.0f));
+    TESTEX("GPU L1 training matches the CPU", gc_regularized_matches_cpu(0.0f, 1e-4f));
+    TESTEX("GPU L2 + L1 training matches the CPU", gc_regularized_matches_cpu(1e-3f, 1e-4f));
 
     // Validation on flipped targets gets worse as training fits XOR, so
     // early stopping triggers and restores an earlier epoch's weights

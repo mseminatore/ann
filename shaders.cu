@@ -268,7 +268,7 @@ extern "C" __global__ void cuda_l2_regularize(float *weights, float decay, int n
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n)
-        weights[i] *= (1.0f - decay);
+        weights[i] *= decay;
 }
 
 extern "C" __global__ void cuda_l1_regularize(float *weights, float l1_scale, int n)

@@ -2863,6 +2863,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	pnet->es_min_delta		= (real)0.0;
 	pnet->es_restore_best	= 0;
 	pnet->best_epoch		= 0;
+	pnet->epochs_trained	= 0;
 
 	// Input noise (disabled by default)
 	pnet->noise_type		= NOISE_NONE;
@@ -3020,6 +3021,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	time_t time_start = time(NULL);
 
 	pnet->train_iteration = 0;
+	pnet->epochs_trained = 0;
 	
 	// Enable training mode (for dropout)
 	pnet->is_training = 1;
@@ -3252,6 +3254,8 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 			converged = 1;
 		}
 	}
+
+	pnet->epochs_trained = epoch;
 
 	// free up batch tensors
 	tensor_free(batch_targets);
@@ -3744,6 +3748,14 @@ void ann_set_early_stopping(PNetwork pnet, unsigned patience, real min_delta, in
 unsigned ann_get_best_epoch(const PNetwork pnet)
 {
 	return pnet ? pnet->best_epoch : 0;
+}
+
+//------------------------------
+// epochs run by the last training run
+//------------------------------
+unsigned ann_get_epochs_trained(const PNetwork pnet)
+{
+	return pnet ? pnet->epochs_trained : 0;
 }
 
 //------------------------------

@@ -145,6 +145,7 @@ ann_set_epoch_limit | set the maximum number of epochs
 ann_set_validation_data | set a validation set evaluated after each epoch
 ann_set_early_stopping | stop when the monitored loss stops improving
 ann_get_best_epoch | get the best epoch of the last training run
+ann_get_epochs_trained | get the number of epochs the last training run trained
 ann_set_lr_scheduler | set learning rate scheduler callback
 ann_set_gradient_clip | set gradient clipping threshold
 ann_set_weight_decay | set L2 regularization (weight decay) coefficient

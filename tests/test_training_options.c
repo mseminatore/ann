@@ -337,6 +337,7 @@ void test_main(int argc, char *argv[])
         ann_set_early_stopping(net, 3, 0.0f, 0);
         ann_train_network(net, x, y, 4);
         TESTEX("Stops after patience epochs without improvement", net->history_count == 4);
+        TESTEX("Epochs trained counts the stopped run", ann_get_epochs_trained(net) == 4);
         TESTEX("Best epoch is the first", ann_get_best_epoch(net) == 1);
         ann_free_network(net);
 

@@ -29,6 +29,7 @@ cmake --build . --config Release
 cmake -DUSE_BLAS=1 ..             # OpenBLAS, expects /opt/OpenBLAS
 cmake -DUSE_CBLAS=1 ..            # CBLAS, expects /opt/cblas (requires C11 atomics)
 cmake -DUSE_MKL=1 ..              # Intel MKL, uses $ONEAPI_ROOT env var
+cmake -DUSE_ACCELERATE=1 ..       # Apple Accelerate (macOS), headers from the SDK via xcrun
 
 # GPU backends (see docs/GPU_*.md)
 cmake -DUSE_CUDA=1 ..             # NVIDIA, CUDA Toolkit

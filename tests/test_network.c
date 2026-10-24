@@ -486,10 +486,10 @@ void test_main(int argc, char *argv[]) {
     if (f)
     {
         char line[256];
-        fgets(line, sizeof(line), f);  // Read header
-        TESTEX("CSV has header", (strstr(line, "epoch") != NULL && strstr(line, "loss") != NULL));
-        fgets(line, sizeof(line), f);  // Read first data line
-        TESTEX("CSV has data", (strlen(line) > 0));
+        int got_header = fgets(line, sizeof(line), f) != NULL;  // Read header
+        TESTEX("CSV has header", (got_header && strstr(line, "epoch") != NULL && strstr(line, "loss") != NULL));
+        int got_data = fgets(line, sizeof(line), f) != NULL;  // Read first data line
+        TESTEX("CSV has data", (got_data && strlen(line) > 0));
         fclose(f);
         remove(curve_file);
     }

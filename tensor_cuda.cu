@@ -931,7 +931,10 @@ static int cuda_train_finish(PNetwork pnet, real *loss_sum)
     return 1;
 }
 
-extern "C" GpuBackend cuda_backend = {
+// C linkage so ann.c can find it; the braced form defines it without the "initialized and declared
+// 'extern'" warning
+extern "C" {
+GpuBackend cuda_backend = {
     "CUDA",
     cuda_backend_init,
     cuda_upload_network,
@@ -943,5 +946,6 @@ extern "C" GpuBackend cuda_backend = {
     cuda_train_batch,
     cuda_train_finish,
 };
+}
 
 #endif /* USE_CUDA */

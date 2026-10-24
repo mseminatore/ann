@@ -417,6 +417,7 @@ static void pool_start(void)
 	}
 }
 
+#ifndef USE_BLAS	// only the scalar GEMMs use it
 //------------------------------
 // 1 if ann_parallel_for() could split [0, count) across threads, so hot loops
 // can call their range function directly (and let it inline) otherwise
@@ -426,6 +427,7 @@ static int parallel_may_split(int count, int grain)
 	pool_init();
 	return g_pool.threads > 1 && count >= 2 * (grain < 1 ? 1 : grain);
 }
+#endif
 
 static void parallel_run(int count, int grain, ann_range_func fn, void *ctx)
 {
@@ -517,12 +519,14 @@ int ann_parallel_get_threads(void)
 
 #else	// ANN_NO_THREADS: every loop runs on the calling thread
 
+#ifndef USE_BLAS
 static int parallel_may_split(int count, int grain)
 {
 	(void)count;
 	(void)grain;
 	return 0;
 }
+#endif
 
 void ann_parallel_for(int count, int grain, ann_range_func fn, void *ctx)
 {
@@ -1080,12 +1084,11 @@ PTensor tensor_mul_scalar(PTensor t, real alpha)
 		return NULL;
 
 	int limit = t->rows * t->cols;
-	int i = 0;
 
 #ifdef USE_BLAS
 	cblas_sscal(limit, alpha, t->values, 1);
 #else
-	for (; i < limit; i++)
+	for (int i = 0; i < limit; i++)
 		t->values[i] *= alpha;
 #endif
 

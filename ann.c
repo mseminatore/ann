@@ -4172,10 +4172,18 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 	*rows = 0;
 
 	dbuf = malloc(size * sizeof(real));
+	if (!dbuf)
+	{
+		fclose(f);
+		invoke_error_callback(ERR_ALLOC, "ann_load_csv");
+		return ERR_ALLOC;
+	}
 
 	// skip header if present
 	if (has_header && !fgets(buf, DEFAULT_BUFFER_SIZE, f))
 	{
+		free(dbuf);
+		fclose(f);
 		invoke_error_callback(ERR_FAIL, "ann_load_csv");
 		return ERR_FAIL;
 	}
@@ -4205,11 +4213,12 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 				real *newbuf = realloc(dbuf, size * sizeof(real));
 				
 				// check for OOM
-				if (!dbuf)
+				if (!newbuf)
 				{
 					free(dbuf);
-					invoke_error_callback(ERR_FAIL, "ann_load_csv");
-					return ERR_FAIL;
+					fclose(f);
+					invoke_error_callback(ERR_ALLOC, "ann_load_csv");
+					return ERR_ALLOC;
 				}
 
 				dbuf = newbuf;

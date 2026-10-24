@@ -541,6 +541,7 @@ used with ML training and inference.
 | [CBLAS](https://github.com/mseminatore/cblas) | `-DUSE_CBLAS=1` | Windows, macOS, Linux (x64, ARM64) | Recommended, cross-platform |
 | [OpenBLAS](https://openblas.net) | `-DUSE_BLAS=1` | macOS, Linux | Well-established, good performance |
 | [Intel MKL](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) | `-DUSE_MKL=1` | macOS, Linux (x64) | Highest performance on Intel CPUs |
+| [Apple Accelerate](https://developer.apple.com/documentation/accelerate) | `-DUSE_ACCELERATE=1` | macOS | Ships with macOS, nothing to install |
 
 ## Building with BLAS Support
 
@@ -557,6 +558,10 @@ cmake --build . --config Release
 
 # Intel MKL (requires oneAPI toolkit; uses ONEAPI_ROOT env var)
 cmake -DUSE_MKL=1 ..
+cmake --build . --config Release
+
+# Apple Accelerate (macOS; uses the SDK's copy, found with xcrun)
+cmake -DUSE_ACCELERATE=1 ..
 cmake --build . --config Release
 ```
 

@@ -84,6 +84,26 @@ jobs:
       continue-on-error: true
       run: ctest --test-dir build --output-on-failure --timeout 300 -C Release -R test_metal
 
+  # Apple Accelerate as the BLAS library. On macOS 15+ libann's worker threads call it
+  # single-threaded, so test_threads checks that results stay identical for any thread count
+  accelerate:
+    name: macOS (ARM, Accelerate BLAS)
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_ACCELERATE=1
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Test
+      run: ctest --test-dir build --output-on-failure --timeout 180 -C Release
+
   # The CUDA backend in NVIDIA's CUDA container. Hosted runners have no NVIDIA GPU, so this
   # job guarantees the CUDA build compiles and the CPU tests pass in it; test_cuda needs a
   # GPU and is left out

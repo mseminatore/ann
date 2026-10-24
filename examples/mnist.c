@@ -197,6 +197,8 @@ int main(int argc, char *argv[])
 		printf("  Cores/Threads: %d/%d\n", cblas_get_num_procs(), cblas_get_num_threads());
 	#elif defined(USE_MKL)
 		printf("Intel MKL BLAS\n");
+	#elif defined(USE_ACCELERATE)
+		printf("Apple Accelerate BLAS\n");
 	#else
 		if (threads != -1)
 			openblas_set_num_threads(threads);

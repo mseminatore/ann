@@ -69,10 +69,27 @@ if ( LINUX )
 endif()
 
 # build with or without BLAS library
-if ( USE_BLAS OR USE_CBLAS OR USE_MKL)
+if ( USE_BLAS OR USE_CBLAS OR USE_MKL OR USE_ACCELERATE )
     message("BLAS library build requested...")
     add_compile_options(-DUSE_BLAS)
-    if ( USE_MKL )
+    if ( USE_ACCELERATE )
+        if ( NOT APPLE )
+            message(FATAL_ERROR "USE_ACCELERATE is only supported on macOS")
+        endif()
+        # libann includes <cblas.h>; point it at Accelerate's copy
+        execute_process(COMMAND xcrun --show-sdk-path OUTPUT_VARIABLE MACOS_SDK
+                        OUTPUT_STRIP_TRAILING_WHITESPACE)
+        set(VECLIB_HEADERS "${MACOS_SDK}/System/Library/Frameworks/Accelerate.framework/Frameworks/vecLib.framework/Headers")
+        if (NOT EXISTS "${VECLIB_HEADERS}/cblas.h")
+            message(FATAL_ERROR "Accelerate cblas.h not found at ${VECLIB_HEADERS}")
+        endif()
+        message("Apple Accelerate library used")
+        include_directories("${VECLIB_HEADERS}")
+        # Accelerate names cblas_saxpby catlas_saxpby (same signature); its legacy CBLAS
+        # header is marked deprecated on macOS 13.3+
+        add_compile_options(-DUSE_ACCELERATE -Dcblas_saxpby=catlas_saxpby -Wno-deprecated-declarations)
+        set(BLAS_LIB "-framework Accelerate")
+    elseif ( USE_MKL )
         if (NOT DEFINED ENV{ONEAPI_ROOT})
             message(FATAL_ERROR "USE_MKL requires ONEAPI_ROOT environment variable (set by Intel oneAPI installer)")
         endif()
@@ -211,7 +228,7 @@ if ( USE_VULKAN )
 endif()
 # ann_parallel_for's worker threads (pthreads; nothing extra on Windows)
 find_package(Threads REQUIRED)
-target_link_libraries(libann ${METAL_LIB} ${CUDA_LIBS} ${VULKAN_LIBS} Threads::Threads)
+target_link_libraries(libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB} ${CUDA_LIBS} ${VULKAN_LIBS} Threads::Threads)
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
 
 # install rules

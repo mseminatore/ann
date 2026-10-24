@@ -101,6 +101,7 @@ space.hidden_activations[0] = ACTIVATION_RELU;
 space.hidden_activation_count = 1;
 
 space.epoch_limit = 500;
+space.early_stopping_patience = 10;  // stop a trial when val loss stalls (default 10, 0 = off)
 
 // Configure options
 HypertuneOptions options;

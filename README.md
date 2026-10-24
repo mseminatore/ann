@@ -171,6 +171,8 @@ ann_import_onnx | import network from ONNX JSON file
 ann_export_pikchr | export network architecture as PIKCHR diagram
 ann_export_learning_curve | export training history as CSV
 ann_clear_history | clear training history
+ann_get_history_count | number of epochs in the training history
+ann_get_history | copy per-epoch loss, learning rate and validation loss
 ann_confusion_matrix | compute binary confusion matrix and MCC
 ann_print_confusion_matrix | print formatted confusion matrix
 ann_class_prediction | determine predicted class from output activations

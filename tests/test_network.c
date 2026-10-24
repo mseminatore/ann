@@ -455,6 +455,25 @@ void test_main(int argc, char *argv[]) {
     
     TESTEX("History recorded during training", (net_curve->history_count > 0));
     TESTEX("History count matches epochs or less", (net_curve->history_count <= 50));
+
+    // History accessors
+    unsigned hist_count = ann_get_history_count(net_curve);
+    TESTEX("ann_get_history_count matches history", (hist_count == net_curve->history_count));
+    TESTEX("ann_get_history_count of NULL is 0", (ann_get_history_count(NULL) == 0));
+
+    real hist_loss[50], hist_lr[50], hist_val[50];
+    unsigned copied = ann_get_history(net_curve, hist_loss, hist_lr, hist_val, 50);
+    TESTEX("ann_get_history copies every epoch", (copied == hist_count));
+    TESTEX("ann_get_history copies losses", (copied > 0 && hist_loss[0] == net_curve->loss_history[0]
+        && hist_loss[copied - 1] == net_curve->loss_history[copied - 1]));
+    TESTEX("ann_get_history copies learning rates", (copied > 0 && hist_lr[0] == net_curve->lr_history[0]));
+    TESTEX("ann_get_history val_loss is -1 without validation", (copied > 0 && hist_val[0] == (real)-1.0));
+
+    real hist_short[2] = {0, 0};
+    TESTEX("ann_get_history honors max_count",
+        (hist_count < 2 || ann_get_history(net_curve, hist_short, NULL, NULL, 2) == 2));
+    TESTEX("ann_get_history accepts NULL arrays", (ann_get_history(net_curve, NULL, NULL, NULL, 50) == hist_count));
+    TESTEX("ann_get_history of NULL is 0", (ann_get_history(NULL, hist_loss, NULL, NULL, 50) == 0));
     
     // Export learning curve
     const char *curve_file = "test_learning_curve.csv";

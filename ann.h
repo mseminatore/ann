@@ -695,6 +695,38 @@ ANN_API int ann_export_learning_curve(const PNetwork pnet, const char *filename)
 ANN_API void ann_clear_history(PNetwork pnet);
 
 /**
+ * Get the number of epochs in the training history.
+ *
+ * ann_train_network() appends one entry per epoch; the history accumulates
+ * across runs until ann_clear_history() is called.
+ *
+ * @param pnet Network to query
+ * @return Number of recorded epochs, or 0 if pnet is NULL or untrained
+ *
+ * @see ann_get_history()
+ */
+ANN_API unsigned ann_get_history_count(const PNetwork pnet);
+
+/**
+ * Copy the training history into caller-provided arrays.
+ *
+ * Copies the first min(max_count, ann_get_history_count()) epochs. Any of the
+ * array pointers may be NULL to skip that series. val_loss entries are -1 for
+ * epochs trained without validation data.
+ *
+ * @param pnet Network to query
+ * @param loss Training loss per epoch, or NULL
+ * @param lr Learning rate per epoch, or NULL
+ * @param val_loss Validation loss per epoch, or NULL
+ * @param max_count Capacity of each non-NULL array
+ * @return Number of epochs copied (0 if pnet is NULL)
+ *
+ * @see ann_get_history_count(), ann_export_learning_curve()
+ */
+ANN_API unsigned ann_get_history(const PNetwork pnet, real *loss, real *lr,
+								 real *val_loss, unsigned max_count);
+
+/**
  * Load trained network from text file.
  * 
  * @param filename Path to network file (saved with ann_save_network())

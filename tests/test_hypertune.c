@@ -226,6 +226,23 @@ void test_main(int argc, char *argv[]) {
     TESTEX("Best result has valid score", (best.score >= 0.0f));
     TESTEX("Best result has trial_id=1", (best.trial_id == 1));
 
+    SUITE("Early Stopping in Trials");
+    COMMENT("Testing that trials honor early_stopping_patience...");
+
+    // No convergence stop, so only the epoch limit or early stopping ends a trial
+    mini_space.convergence_epsilon = 0.0f;
+    mini_space.epoch_limit = 2000;
+
+    mini_space.early_stopping_patience = 0;
+    hypertune_grid_search(&mini_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &opts, results, 10, &best);
+    TESTEX("Patience 0 trains to the epoch limit", (best.epochs_used == 2000));
+
+    mini_space.early_stopping_patience = 3;
+    hypertune_grid_search(&mini_space, 2, 1, ACTIVATION_SIGMOID, LOSS_MSE,
+        &xor_split, &opts, results, 10, &best);
+    TESTEX("Patience 3 stops before the epoch limit", (best.epochs_used > 0 && best.epochs_used < 2000));
+
     hypertune_free_split(&xor_split);
     tensor_free(xor_in);
     tensor_free(xor_out);

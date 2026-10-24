@@ -6350,6 +6350,36 @@ void ann_clear_history(PNetwork pnet)
 }
 
 //------------------------------
+// Number of epochs in the training history
+//------------------------------
+unsigned ann_get_history_count(const PNetwork pnet)
+{
+	return pnet ? pnet->history_count : 0;
+}
+
+//------------------------------
+// Copy the training history out
+//------------------------------
+unsigned ann_get_history(const PNetwork pnet, real *loss, real *lr, real *val_loss, unsigned max_count)
+{
+	if (!pnet)
+		return 0;
+
+	unsigned count = pnet->history_count < max_count ? pnet->history_count : max_count;
+	if (count == 0)
+		return 0;
+
+	if (loss)
+		memcpy(loss, pnet->loss_history, count * sizeof(real));
+	if (lr)
+		memcpy(lr, pnet->lr_history, count * sizeof(real));
+	if (val_loss)
+		memcpy(val_loss, pnet->val_loss_history, count * sizeof(real));
+
+	return count;
+}
+
+//------------------------------
 // Export learning curve as CSV
 //------------------------------
 int ann_export_learning_curve(const PNetwork pnet, const char *filename)

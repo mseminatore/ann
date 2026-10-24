@@ -609,6 +609,12 @@ static void evaluate_trial(
     ann_set_epoch_limit(net, space->epoch_limit);
     ann_set_convergence(net, space->convergence_epsilon);
 
+    // Stop once the validation loss stalls and score the best epoch's weights
+    if (space->early_stopping_patience > 0) {
+        ann_set_validation_data(net, split->val_inputs, split->val_outputs);
+        ann_set_early_stopping(net, (unsigned)space->early_stopping_patience, (real)0.0001, 1);
+    }
+
     // Training re-uploads the weights it initializes
     if (options->use_gpu)
         ann_gpu_upload_network(net);
@@ -618,7 +624,7 @@ static void evaluate_trial(
     double end_time = get_time_ms();
 
     trial->training_time_ms = (real)(end_time - start_time);
-    trial->epochs_used = (int)net->history_count;
+    trial->epochs_used = (int)ann_get_history_count(net);
     trial->score = options->score_func(net, split->val_inputs, split->val_outputs,
                                        options->user_data);
 

@@ -474,6 +474,24 @@ void test_main(int argc, char *argv[]) {
         (hist_count < 2 || ann_get_history(net_curve, hist_short, NULL, NULL, 2) == 2));
     TESTEX("ann_get_history accepts NULL arrays", (ann_get_history(net_curve, NULL, NULL, NULL, 50) == hist_count));
     TESTEX("ann_get_history of NULL is 0", (ann_get_history(NULL, hist_loss, NULL, NULL, 50) == 0));
+
+    // Epochs trained covers only the last run; the history accumulates
+    PNetwork net_runs = ann_make_network(OPT_ADAM, LOSS_MSE);
+    ann_add_layer(net_runs, 2, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_layer(net_runs, 4, LAYER_HIDDEN, ACTIVATION_SIGMOID);
+    ann_add_layer(net_runs, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+    ann_set_batch_size(net_runs, 4);
+    ann_set_convergence(net_runs, 0.0f);
+    TESTEX("ann_get_epochs_trained is 0 before training", (ann_get_epochs_trained(net_runs) == 0));
+    ann_set_epoch_limit(net_runs, 7);
+    ann_train_network(net_runs, xor_in, xor_out, 4);
+    TESTEX("ann_get_epochs_trained counts the run", (ann_get_epochs_trained(net_runs) == 7));
+    ann_set_epoch_limit(net_runs, 5);
+    ann_train_network(net_runs, xor_in, xor_out, 4);
+    TESTEX("ann_get_epochs_trained counts only the last run", (ann_get_epochs_trained(net_runs) == 5));
+    TESTEX("History spans both runs", (ann_get_history_count(net_runs) == 12));
+    TESTEX("ann_get_epochs_trained of NULL is 0", (ann_get_epochs_trained(NULL) == 0));
+    ann_free_network(net_runs);
     
     // Export learning curve
     const char *curve_file = "test_learning_curve.csv";

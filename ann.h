@@ -326,6 +326,7 @@ struct Network
 	real es_min_delta;					// minimum loss decrease that counts as an improvement
 	int es_restore_best;				// restore the best epoch's weights when training ends
 	unsigned best_epoch;				// epoch with the lowest monitored loss in the last run (0 = none)
+	unsigned epochs_trained;			// epochs run by the last ann_train_network() call
 
 	// Input noise for training batches (see ann_set_input_noise)
 	Noise_type noise_type;				// NOISE_NONE when disabled
@@ -1161,6 +1162,20 @@ ANN_API void ann_set_early_stopping(PNetwork pnet, unsigned patience, real min_d
  * @return 1-based epoch number, or 0 if early stopping was disabled or pnet is NULL
  */
 ANN_API unsigned ann_get_best_epoch(const PNetwork pnet);
+
+/**
+ * Get the number of epochs the last ann_train_network() run trained.
+ * 
+ * Counts every epoch run, including ones after the best epoch when early
+ * stopping restored earlier weights. Unlike ann_get_history_count(), it
+ * covers only the last run and is not capped by MAX_HISTORY_SIZE.
+ * 
+ * @param pnet Trained network
+ * @return Epochs trained, or 0 before training or if pnet is NULL
+ * 
+ * @see ann_get_best_epoch(), ann_get_history_count()
+ */
+ANN_API unsigned ann_get_epochs_trained(const PNetwork pnet);
 
 // ============================================================================
 // LEARNING RATE SCHEDULERS

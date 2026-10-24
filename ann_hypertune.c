@@ -624,7 +624,7 @@ static void evaluate_trial(
     double end_time = get_time_ms();
 
     trial->training_time_ms = (real)(end_time - start_time);
-    trial->epochs_used = (int)ann_get_history_count(net);
+    trial->epochs_used = (int)ann_get_epochs_trained(net);
     trial->score = options->score_func(net, split->val_inputs, split->val_outputs,
                                        options->user_data);
 

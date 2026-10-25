@@ -116,6 +116,11 @@ typedef struct {
     id<MTLComputePipelineState> pso_upsample_backward;
     id<MTLComputePipelineState> pso_global_avgpool_forward;
     id<MTLComputePipelineState> pso_global_avgpool_backward;
+    id<MTLComputePipelineState> pso_bn_stats;
+    id<MTLComputePipelineState> pso_bn_forward_train;
+    id<MTLComputePipelineState> pso_bn_forward_infer;
+    id<MTLComputePipelineState> pso_bn_grad;
+    id<MTLComputePipelineState> pso_bn_input_grad;
     id<MTLComputePipelineState> pso_copy_buffer;
     id<MTLComputePipelineState> pso_transpose;
     // Transposed copies of GEMM right-hand operands, by source buffer (see
@@ -894,7 +899,109 @@ int tensor_metal_init(void)
         "    device float *dx [[buffer(1)]],\n"
         "    constant WindowDims &d [[buffer(2)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
-        "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = dz[gid.z] / (float)(d.H * d.W); }\n";
+        "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = dz[gid.z] / (float)(d.H * d.W); }\n"
+        // ----------------------------------------------------------------
+        // Batch norm over [batch][C][area] (area = H*W, 1 after a dense
+        // layer). stats holds 4 rows of C: the batch mean, 1 / sqrt(var +
+        // eps), then mean(dz) and mean(dz * x_hat) for the input gradient.
+        // ----------------------------------------------------------------
+        "struct BnDims { uint C, area, batch; float momentum, eps; };\n"
+        "inline float bn_reduce(threadgroup float *part, float s, uint tid, uint tn) {\n"
+        "    part[tid] = s;\n"
+        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "    for (uint w = tn / 2; w > 0; w /= 2) {\n"
+        "        if (tid < w) part[tid] += part[tid + w];\n"
+        "        threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+        "    float r = part[0];\n"
+        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "    return r; }\n"
+        // The batch's mean and variance per channel (a threadgroup each),
+        // then the running statistics (unbiased variance, as the CPU's)
+        "kernel void bn_stats(\n"
+        "    device const float *x [[buffer(0)]],\n"
+        "    device float *stats [[buffer(1)]],\n"
+        "    device float *mean_run [[buffer(2)]],\n"
+        "    device float *var_run [[buffer(3)]],\n"
+        "    constant BnDims &d [[buffer(4)]],\n"
+        "    uint c [[threadgroup_position_in_grid]],\n"
+        "    uint tid [[thread_position_in_threadgroup]],\n"
+        "    uint tn [[threads_per_threadgroup]]) {\n"
+        "    threadgroup float part[256];\n"
+        "    uint n = d.batch * d.area, nodes = d.C * d.area;\n"
+        "    float s = 0.0f;\n"
+        "    for (uint j = tid; j < n; j += tn) s += x[(j / d.area) * nodes + c * d.area + j % d.area];\n"
+        "    float mean = bn_reduce(part, s, tid, tn) / (float)n;\n"
+        "    s = 0.0f;\n"
+        "    for (uint j = tid; j < n; j += tn) { float v = x[(j / d.area) * nodes + c * d.area + j % d.area] - mean; s += v * v; }\n"
+        "    float sq = bn_reduce(part, s, tid, tn);\n"
+        "    if (tid == 0) {\n"
+        "        float var = sq / (float)n;\n"
+        "        stats[c] = mean;\n"
+        "        stats[d.C + c] = 1.0f / sqrt(var + d.eps);\n"
+        "        mean_run[c] = (1.0f - d.momentum) * mean_run[c] + d.momentum * mean;\n"
+        "        var_run[c] = (1.0f - d.momentum) * var_run[c] + d.momentum * (n > 1 ? sq / (float)(n - 1) : var); } }\n"
+        // y = gamma * x_hat + beta with the batch's statistics; x_hat is kept for backward
+        "kernel void bn_forward_train(\n"
+        "    device const float *x [[buffer(0)]],\n"
+        "    device float *y [[buffer(1)]],\n"
+        "    device float *x_hat [[buffer(2)]],\n"
+        "    device const float *stats [[buffer(3)]],\n"
+        "    device const float *gamma [[buffer(4)]],\n"
+        "    device const float *beta [[buffer(5)]],\n"
+        "    constant BnDims &d [[buffer(6)]],\n"
+        "    uint i [[thread_position_in_grid]]) {\n"
+        "    uint c = (i / d.area) % d.C;\n"
+        "    float h = (x[i] - stats[c]) * stats[d.C + c];\n"
+        "    x_hat[i] = h;\n"
+        "    y[i] = gamma[c] * h + beta[c]; }\n"
+        // prediction: the running statistics
+        "kernel void bn_forward_infer(\n"
+        "    device const float *x [[buffer(0)]],\n"
+        "    device float *y [[buffer(1)]],\n"
+        "    device const float *gamma [[buffer(2)]],\n"
+        "    device const float *beta [[buffer(3)]],\n"
+        "    device const float *mean [[buffer(4)]],\n"
+        "    device const float *var [[buffer(5)]],\n"
+        "    constant BnDims &d [[buffer(6)]],\n"
+        "    uint i [[thread_position_in_grid]]) {\n"
+        "    uint c = (i / d.area) % d.C;\n"
+        "    y[i] = (x[i] - mean[c]) * (gamma[c] / sqrt(var[c] + d.eps)) + beta[c]; }\n"
+        // gamma and beta gradients per channel (a threadgroup each), and the
+        // means the input gradient needs
+        "kernel void bn_grad(\n"
+        "    device const float *dz [[buffer(0)]],\n"
+        "    device const float *x_hat [[buffer(1)]],\n"
+        "    device float *stats [[buffer(2)]],\n"
+        "    device float *d_gamma [[buffer(3)]],\n"
+        "    device float *d_beta [[buffer(4)]],\n"
+        "    constant BnDims &d [[buffer(5)]],\n"
+        "    uint c [[threadgroup_position_in_grid]],\n"
+        "    uint tid [[thread_position_in_threadgroup]],\n"
+        "    uint tn [[threads_per_threadgroup]]) {\n"
+        "    threadgroup float part[256];\n"
+        "    uint n = d.batch * d.area, nodes = d.C * d.area;\n"
+        "    float s = 0.0f, t = 0.0f;\n"
+        "    for (uint j = tid; j < n; j += tn) {\n"
+        "        uint i = (j / d.area) * nodes + c * d.area + j % d.area;\n"
+        "        s += dz[i]; t += dz[i] * x_hat[i]; }\n"
+        "    float sum = bn_reduce(part, s, tid, tn);\n"
+        "    float dot = bn_reduce(part, t, tid, tn);\n"
+        "    if (tid == 0) {\n"
+        "        d_gamma[c] += dot;\n"
+        "        d_beta[c] += sum;\n"
+        "        stats[2 * d.C + c] = sum / (float)n;\n"
+        "        stats[3 * d.C + c] = dot / (float)n; } }\n"
+        // dx = gamma * inv_std * (dz - mean(dz) - x_hat * mean(dz * x_hat))
+        "kernel void bn_input_grad(\n"
+        "    device const float *dz [[buffer(0)]],\n"
+        "    device const float *x_hat [[buffer(1)]],\n"
+        "    device const float *stats [[buffer(2)]],\n"
+        "    device const float *gamma [[buffer(3)]],\n"
+        "    device float *dx [[buffer(4)]],\n"
+        "    constant BnDims &d [[buffer(5)]],\n"
+        "    uint i [[thread_position_in_grid]]) {\n"
+        "    uint c = (i / d.area) % d.C;\n"
+        "    dx[i] = gamma[c] * stats[d.C + c] * (dz[i] - stats[2 * d.C + c] - x_hat[i] * stats[3 * d.C + c]); }\n";
 
     NSError *err = nil;
     NSString *src = [NSString stringWithFormat:
@@ -975,6 +1082,11 @@ int tensor_metal_init(void)
     g_metal.pso_upsample_backward = make_pso(g_metal.library, "upsample_backward");
     g_metal.pso_global_avgpool_forward = make_pso(g_metal.library, "global_avgpool_forward");
     g_metal.pso_global_avgpool_backward = make_pso(g_metal.library, "global_avgpool_backward");
+    g_metal.pso_bn_stats         = make_pso(g_metal.library, "bn_stats");
+    g_metal.pso_bn_forward_train = make_pso(g_metal.library, "bn_forward_train");
+    g_metal.pso_bn_forward_infer = make_pso(g_metal.library, "bn_forward_infer");
+    g_metal.pso_bn_grad          = make_pso(g_metal.library, "bn_grad");
+    g_metal.pso_bn_input_grad    = make_pso(g_metal.library, "bn_input_grad");
     g_metal.pso_copy_buffer      = make_pso(g_metal.library, "copy_buffer");
     g_metal.pso_transpose        = make_pso(g_metal.library, "transpose");
 
@@ -988,6 +1100,8 @@ int tensor_metal_init(void)
         !g_metal.pso_conv_direct_weight_grad || !g_metal.pso_copy_buffer ||
         !g_metal.pso_upsample_forward || !g_metal.pso_upsample_backward ||
         !g_metal.pso_global_avgpool_forward || !g_metal.pso_global_avgpool_backward ||
+        !g_metal.pso_bn_stats || !g_metal.pso_bn_forward_train || !g_metal.pso_bn_forward_infer ||
+        !g_metal.pso_bn_grad || !g_metal.pso_bn_input_grad ||
         !g_metal.pso_transpose)
         return 0;
 
@@ -1615,6 +1729,94 @@ static void encode_global_avgpool_backward(id<MTLCommandBuffer> cmd, PNetwork pn
 }
 
 //-----------------------------------------------------------
+// BatchNorm: params are gamma, beta, running mean, running variance.
+// Training keeps x_hat in SCRATCH_COLS and the per-channel statistics (4 rows
+// of C, see bn_stats) in SCRATCH_PARTIAL for the backward pass.
+//-----------------------------------------------------------
+typedef struct {
+    uint32_t C, area, batch;
+    float momentum, eps;
+} BnDims;
+
+static BnDims bn_dims(PNetwork pnet, int layer, int batch_size)
+{
+    PLayer l = &pnet->layers[layer];
+    BnDims d;
+    d.C = (uint32_t)l->shape.c;
+    d.area = (uint32_t)(l->shape.h * l->shape.w);
+    d.batch = (uint32_t)batch_size;
+    d.momentum = 0.1f;
+    d.eps = (float)ANN_BATCHNORM_EPSILON;
+    return d;
+}
+
+static id<MTLBuffer> param_buf(PLayer l, int p)
+{
+    return (__bridge id<MTLBuffer>)l->params[p].value->gpu_buf;
+}
+
+// a threadgroup per channel: the smallest power of two covering the channel's values, at most 256
+static void encode_bn_channels(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pso,
+                               id<MTLBuffer> __strong *bufs, int n_bufs, const BnDims *d)
+{
+    id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
+    [enc setComputePipelineState:pso];
+    for (int i = 0; i < n_bufs; i++)
+        [enc setBuffer:bufs[i] offset:0 atIndex:(NSUInteger)i];
+    [enc setBytes:d length:sizeof(*d) atIndex:(NSUInteger)n_bufs];
+    NSUInteger n = (NSUInteger)d->batch * d->area, tg = 1;
+    while (tg < n && tg < 256 && tg * 2 <= pso.maxTotalThreadsPerThreadgroup)
+        tg *= 2;
+    [enc dispatchThreadgroups:MTLSizeMake(d->C, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+}
+
+static int encode_batchnorm_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
+                                    id<MTLBuffer> X, id<MTLBuffer> Y, int training)
+{
+    PLayer l = &pnet->layers[layer];
+    BnDims d = bn_dims(pnet, layer, batch_size);
+    NSUInteger count = (NSUInteger)batch_size * l->node_count;
+
+    if (!training) {
+        id<MTLBuffer> bufs[6] = { X, Y, param_buf(l, 0), param_buf(l, 1), param_buf(l, 2), param_buf(l, 3) };
+        encode_grid(cmd, g_metal.pso_bn_forward_infer, bufs, 6, &d, sizeof(d), MTLSizeMake(count, 1, 1));
+        return 1;
+    }
+
+    id<MTLBuffer> x_hat = layer_scratch(layer, SCRATCH_COLS, count * sizeof(float));
+    id<MTLBuffer> stats = layer_scratch(layer, SCRATCH_PARTIAL, (size_t)4 * d.C * sizeof(float));
+    if (!x_hat || !stats)
+        return 0;
+    id<MTLBuffer> sbufs[4] = { X, stats, param_buf(l, 2), param_buf(l, 3) };
+    encode_bn_channels(cmd, g_metal.pso_bn_stats, sbufs, 4, &d);
+    id<MTLBuffer> bufs[6] = { X, Y, x_hat, stats, param_buf(l, 0), param_buf(l, 1) };
+    encode_grid(cmd, g_metal.pso_bn_forward_train, bufs, 6, &d, sizeof(d), MTLSizeMake(count, 1, 1));
+    return 1;
+}
+
+// gamma and beta gradients, then dX unless it is nil (layer 1)
+static int encode_batchnorm_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
+                                     id<MTLBuffer> dZ, id<MTLBuffer> dX)
+{
+    PLayer l = &pnet->layers[layer];
+    BnDims d = bn_dims(pnet, layer, batch_size);
+    NSUInteger count = (NSUInteger)batch_size * l->node_count;
+    id<MTLBuffer> x_hat = layer_scratch(layer, SCRATCH_COLS, count * sizeof(float));
+    id<MTLBuffer> stats = layer_scratch(layer, SCRATCH_PARTIAL, (size_t)4 * d.C * sizeof(float));
+    if (!x_hat || !stats)
+        return 0;
+
+    id<MTLBuffer> gbufs[5] = { dZ, x_hat, stats, (__bridge id<MTLBuffer>)l->params[0].grad->gpu_buf,
+                               (__bridge id<MTLBuffer>)l->params[1].grad->gpu_buf };
+    encode_bn_channels(cmd, g_metal.pso_bn_grad, gbufs, 5, &d);
+    if (dX) {
+        id<MTLBuffer> bufs[5] = { dZ, x_hat, stats, param_buf(l, 0), dX };
+        encode_grid(cmd, g_metal.pso_bn_input_grad, bufs, 5, &d, sizeof(d), MTLSizeMake(count, 1, 1));
+    }
+    return 1;
+}
+
+//-----------------------------------------------------------
 // 1 if every parameter of the layer is on the GPU
 //-----------------------------------------------------------
 static int layer_on_gpu(const Layer *l)
@@ -1639,10 +1841,11 @@ static int network_on_gpu(const PNetwork pnet)
 //-----------------------------------------------------------
 // Encode a layer's forward pass for a batch: the kind's linear part (dense:
 // Y = X * W^T + b), then (when Z is given) save the pre-activation, apply
-// the activation, and apply dropout when a mask is given.
+// the activation, and apply dropout when a mask is given. training selects
+// batch norm's batch statistics over its running ones.
 //-----------------------------------------------------------
 static int encode_layer_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
-                                id<MTLBuffer> X, id<MTLBuffer> Y, id<MTLBuffer> Z, id<MTLBuffer> mask)
+                                id<MTLBuffer> X, id<MTLBuffer> Y, id<MTLBuffer> Z, id<MTLBuffer> mask, int training)
 {
     PLayer dst = &pnet->layers[layer];
     int out_nodes = dst->node_count;
@@ -1683,6 +1886,9 @@ static int encode_layer_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
         break;
     case LAYER_KIND_GLOBAL_AVGPOOL2D:
         encode_global_avgpool_forward(cmd, pnet, layer, batch_size, X, Y);
+        break;
+    case LAYER_KIND_BATCHNORM:
+        if (!encode_batchnorm_forward(cmd, pnet, layer, batch_size, X, Y, training)) return 0;
         break;
     case LAYER_KIND_FLATTEN:
     case LAYER_KIND_RESHAPE:
@@ -1737,7 +1943,7 @@ static int metal_forward_pass(PNetwork pnet,
             if (!out) return 0;
         }
 
-        if (!encode_layer_forward(cmd, pnet, layer, batch_size, cur_buf, out, nil, nil))
+        if (!encode_layer_forward(cmd, pnet, layer, batch_size, cur_buf, out, nil, nil, 0))
             return 0;
         cur_buf = out;
     }
@@ -1761,7 +1967,7 @@ static int metal_upload_network(PNetwork pnet)
         Layer_kind kind = pnet->layers[layer].kind;
         if (kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D && kind != LAYER_KIND_MAXPOOL2D &&
             kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE &&
-            kind != LAYER_KIND_GLOBAL_AVGPOOL2D)
+            kind != LAYER_KIND_GLOBAL_AVGPOOL2D && kind != LAYER_KIND_BATCHNORM)
             return ERR_INVALID;
     }
 
@@ -2219,6 +2425,9 @@ static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_si
         case LAYER_KIND_GLOBAL_AVGPOOL2D:
             if (dX) encode_global_avgpool_backward(cmd, pnet, li, batch_size, dl_dz, dX);
             break;
+        case LAYER_KIND_BATCHNORM:
+            if (!encode_batchnorm_backward(cmd, pnet, li, batch_size, dl_dz, dX)) return 0;
+            break;
         case LAYER_KIND_FLATTEN:
         case LAYER_KIND_RESHAPE:
             if (dX) encode_copy(cmd, dl_dz, dX, count);
@@ -2250,6 +2459,8 @@ static void encode_optimizer(id<MTLCommandBuffer> cmd, PNetwork pnet)
         PLayer l = &pnet->layers[layer];
         for (int p = 0; p < l->param_count; p++) {
             Layer_param *param = &l->params[p];
+            if (param->state)
+                continue;	// running statistics, updated by their own kernels
             NSUInteger count = (NSUInteger)(param->value->rows * param->value->cols);
             id<MTLBuffer> w = (__bridge id<MTLBuffer>)param->value->gpu_buf;
             id<MTLBuffer> g = (__bridge id<MTLBuffer>)param->grad->gpu_buf;
@@ -2412,7 +2623,7 @@ static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_siz
         id<MTLBuffer> X = layer == 1 ? g_metal.slots[s].inputs
                                      : (__bridge id<MTLBuffer>)pnet->layers[layer - 1].t_batch_values->gpu_buf;
         if (!encode_layer_forward(cmd, pnet, layer, batch_size, X, (__bridge id<MTLBuffer>)dst->t_batch_values->gpu_buf,
-                                  (__bridge id<MTLBuffer>)dst->t_batch_z->gpu_buf, masks[@(layer)])) {
+                                  (__bridge id<MTLBuffer>)dst->t_batch_z->gpu_buf, masks[@(layer)], 1)) {
             end_compute();
             return 0;
         }

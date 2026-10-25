@@ -1515,6 +1515,211 @@ static void global_avgpool_backward(PLayer layer, const PTensor X, const PTensor
 }
 
 //------------------------------
+// BatchNorm: per channel (each node of a flat layer) gamma, beta, then the
+// running mean and variance, which are state (saved, never trained).
+// Training normalizes with the batch's statistics and keeps x_hat in
+// t_scratch[0] (one row per sample) and 1 / sqrt(var + eps) in t_scratch[1]
+// for the backward pass; prediction uses the running statistics.
+//------------------------------
+#define BN_EPSILON	((real)ANN_BATCHNORM_EPSILON)
+#define BN_MOMENTUM	((real)0.1)	// weight of each batch in the running statistics
+enum { BN_GAMMA, BN_BETA, BN_MEAN, BN_VAR };
+
+static int batchnorm_setup(PNetwork pnet, int layer)
+{
+	PLayer cur = &pnet->layers[layer];
+	int channels = cur->shape.c;
+
+	if (cur->shape.c != cur->in_shape.c || cur->shape.h != cur->in_shape.h || cur->shape.w != cur->in_shape.w)
+		return ERR_INVALID;
+
+	for (int p = 0; p < 4; p++)
+	{
+		if (add_param(cur, 1, channels, 0) != ERR_OK)
+		{
+			free_layer_params(cur);
+			return ERR_ALLOC;
+		}
+	}
+	cur->params[BN_MEAN].state = 1;
+	cur->params[BN_VAR].state = 1;
+	tensor_fill(cur->params[BN_GAMMA].value, (real)1.0);
+	tensor_fill(cur->params[BN_VAR].value, (real)1.0);
+	return ERR_OK;
+}
+
+// identity: gamma 1, beta 0, mean 0, variance 1
+static void batchnorm_init_weights(PNetwork pnet, int layer, Weight_init_type init_type)
+{
+	PLayer cur = &pnet->layers[layer];
+	(void)init_type;
+
+	tensor_fill(cur->params[BN_GAMMA].value, (real)1.0);
+	tensor_fill(cur->params[BN_BETA].value, (real)0.0);
+	tensor_fill(cur->params[BN_MEAN].value, (real)0.0);
+	tensor_fill(cur->params[BN_VAR].value, (real)1.0);
+}
+
+//------------------------------
+// BatchNorm work split across threads: by sample for prediction, by channel
+// (each over the whole batch, in serial order) for training
+//------------------------------
+typedef struct {
+	PLayer layer;
+	const real *x;		// input (forward) or dZ (backward)
+	real *y;			// output (forward) or dX (backward)
+	int rows;
+} batchnorm_job;
+
+static void batchnorm_predict_samples(void *arg, int begin, int end)
+{
+	const batchnorm_job *job = (const batchnorm_job *)arg;
+	PLayer layer = job->layer;
+	int area = layer->shape.h * layer->shape.w;
+	const real *gamma = layer->params[BN_GAMMA].value->values, *beta = layer->params[BN_BETA].value->values;
+	const real *mean = layer->params[BN_MEAN].value->values, *var = layer->params[BN_VAR].value->values;
+
+	for (int b = begin; b < end; b++)
+	{
+		const real *x = job->x + (size_t)b * layer->node_count;
+		real *y = job->y + (size_t)b * layer->node_count;
+
+		for (int c = 0; c < layer->shape.c; c++, x += area, y += area)
+		{
+			real scale = gamma[c] / (real)sqrt(var[c] + BN_EPSILON);
+			for (int i = 0; i < area; i++)
+				y[i] = (x[i] - mean[c]) * scale + beta[c];
+		}
+	}
+}
+
+static void batchnorm_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	batchnorm_job job;
+
+	job.layer = layer;
+	job.x = X->values;
+	job.y = Y->values;
+	job.rows = rows;
+	ann_parallel_for(rows, 1, batchnorm_predict_samples, &job);
+}
+
+static void batchnorm_train_channels(void *arg, int begin, int end)
+{
+	const batchnorm_job *job = (const batchnorm_job *)arg;
+	PLayer layer = job->layer;
+	int area = layer->shape.h * layer->shape.w, nodes = layer->node_count;
+	double n = (double)job->rows * area;
+	real *x_hat = layer->t_scratch[0]->values, *inv_std = layer->t_scratch[1]->values;
+	const real *gamma = layer->params[BN_GAMMA].value->values, *beta = layer->params[BN_BETA].value->values;
+	real *mean_run = layer->params[BN_MEAN].value->values, *var_run = layer->params[BN_VAR].value->values;
+
+	for (int c = begin; c < end; c++)
+	{
+		double sum = 0.0, sq = 0.0;
+		for (int b = 0; b < job->rows; b++)
+		{
+			const real *x = job->x + (size_t)b * nodes + c * area;
+			for (int i = 0; i < area; i++)
+				sum += x[i];
+		}
+		double mean = sum / n;
+		for (int b = 0; b < job->rows; b++)
+		{
+			const real *x = job->x + (size_t)b * nodes + c * area;
+			for (int i = 0; i < area; i++)
+				sq += (x[i] - mean) * (x[i] - mean);
+		}
+		double var = sq / n;
+		real inv = (real)(1.0 / sqrt(var + BN_EPSILON));
+
+		inv_std[c] = inv;
+		for (int b = 0; b < job->rows; b++)
+		{
+			size_t at = (size_t)b * nodes + c * area;
+			for (int i = 0; i < area; i++)
+			{
+				real h = (job->x[at + i] - (real)mean) * inv;
+				x_hat[at + i] = h;
+				job->y[at + i] = gamma[c] * h + beta[c];
+			}
+		}
+
+		// the running variance is unbiased, as PyTorch keeps it
+		mean_run[c] = ((real)1.0 - BN_MOMENTUM) * mean_run[c] + BN_MOMENTUM * (real)mean;
+		var_run[c] = ((real)1.0 - BN_MOMENTUM) * var_run[c] + BN_MOMENTUM * (real)(n > 1.0 ? sq / (n - 1.0) : var);
+	}
+}
+
+static void batchnorm_forward_train(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	batchnorm_job job;
+
+	if (ensure_rows(&layer->t_scratch[0], rows, layer->node_count) != ERR_OK ||
+		ensure_rows(&layer->t_scratch[1], 1, layer->shape.c) != ERR_OK)
+		return;
+
+	job.layer = layer;
+	job.x = X->values;
+	job.y = Y->values;
+	job.rows = rows;
+	ann_parallel_for(layer->shape.c, 1, batchnorm_train_channels, &job);
+}
+
+//------------------------------
+// BatchNorm backward, by channel: gamma and beta gradients, then
+// dx = gamma * inv_std * (dz - mean(dz) - x_hat * mean(dz * x_hat))
+//------------------------------
+static void batchnorm_backward_channels(void *arg, int begin, int end)
+{
+	const batchnorm_job *job = (const batchnorm_job *)arg;
+	PLayer layer = job->layer;
+	int area = layer->shape.h * layer->shape.w, nodes = layer->node_count;
+	double n = (double)job->rows * area;
+	const real *x_hat = layer->t_scratch[0]->values, *inv_std = layer->t_scratch[1]->values;
+	const real *gamma = layer->params[BN_GAMMA].value->values;
+	real *d_gamma = layer->params[BN_GAMMA].grad->values, *d_beta = layer->params[BN_BETA].grad->values;
+
+	for (int c = begin; c < end; c++)
+	{
+		double sum = 0.0, dot = 0.0;
+		for (int b = 0; b < job->rows; b++)
+		{
+			size_t at = (size_t)b * nodes + c * area;
+			for (int i = 0; i < area; i++)
+			{
+				sum += job->x[at + i];
+				dot += job->x[at + i] * x_hat[at + i];
+			}
+		}
+		d_gamma[c] += (real)dot;
+		d_beta[c] += (real)sum;
+
+		if (!job->y)
+			continue;
+		real k = gamma[c] * inv_std[c], mean_dz = (real)(sum / n), mean_dot = (real)(dot / n);
+		for (int b = 0; b < job->rows; b++)
+		{
+			size_t at = (size_t)b * nodes + c * area;
+			for (int i = 0; i < area; i++)
+				job->y[at + i] = k * (job->x[at + i] - mean_dz - x_hat[at + i] * mean_dot);
+		}
+	}
+}
+
+static void batchnorm_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
+{
+	batchnorm_job job;
+	(void)X;
+
+	job.layer = layer;
+	job.x = dZ->values;
+	job.y = dX ? dX->values : NULL;
+	job.rows = rows;
+	ann_parallel_for(layer->shape.c, 1, batchnorm_backward_channels, &job);
+}
+
+//------------------------------
 // Operations every layer kind provides
 //------------------------------
 typedef struct {
@@ -1538,6 +1743,9 @@ typedef struct {
 	void (*onnx_initializers)(FILE *fptr, const PNetwork pnet, int layer, int *first);
 	void (*onnx_nodes)(FILE *fptr, const PNetwork pnet, int layer, const char *input,
 	                   char *output, size_t output_size, int *first);
+	// forward pass while training, for kinds that differ then (batch norm's
+	// batch statistics); NULL means use forward()
+	void (*forward_train)(PLayer layer, const PTensor X, PTensor Y, int rows);
 } Layer_ops;
 
 // ONNX hooks live with the rest of the ONNX export code
@@ -1560,23 +1768,28 @@ static void reshape_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const
                                char *output, size_t output_size, int *first);
 static void global_avgpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
                                       char *output, size_t output_size, int *first);
+static void batchnorm_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
+static void batchnorm_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                                 char *output, size_t output_size, int *first);
 
 // indexed by Layer_kind
 static const Layer_ops g_layer_ops[] = {
 	{ "Dense", 0, dense_setup, dense_init_weights, dense_forward, dense_forward_single, dense_backward,
-	  dense_onnx_initializers, dense_onnx_nodes },
+	  dense_onnx_initializers, dense_onnx_nodes, NULL },
 	{ "Conv2D", CONV_CONFIG_COUNT, conv_setup, conv_init_weights, conv_forward, NULL, conv_backward,
-	  conv_onnx_initializers, conv_onnx_nodes },
+	  conv_onnx_initializers, conv_onnx_nodes, NULL },
 	{ "MaxPool2D", POOL_CONFIG_COUNT, maxpool_setup, NULL, maxpool_forward, NULL, maxpool_backward,
-	  no_onnx_initializers, maxpool_onnx_nodes },
+	  no_onnx_initializers, maxpool_onnx_nodes, NULL },
 	{ "Flatten", 0, flatten_setup, NULL, flatten_forward, NULL, flatten_backward,
-	  no_onnx_initializers, flatten_onnx_nodes },
+	  no_onnx_initializers, flatten_onnx_nodes, NULL },
 	{ "Upsample2D", UPSAMPLE_CONFIG_COUNT, upsample_setup, NULL, upsample_forward, NULL, upsample_backward,
-	  upsample_onnx_initializers, upsample_onnx_nodes },
+	  upsample_onnx_initializers, upsample_onnx_nodes, NULL },
 	{ "Reshape", 0, reshape_setup, NULL, flatten_forward, NULL, flatten_backward,
-	  reshape_onnx_initializers, reshape_onnx_nodes },
+	  reshape_onnx_initializers, reshape_onnx_nodes, NULL },
 	{ "GlobalAvgPool2D", 0, global_avgpool_setup, NULL, global_avgpool_forward, NULL, global_avgpool_backward,
-	  no_onnx_initializers, global_avgpool_onnx_nodes },
+	  no_onnx_initializers, global_avgpool_onnx_nodes, NULL },
+	{ "BatchNorm", 0, batchnorm_setup, batchnorm_init_weights, batchnorm_forward, NULL, batchnorm_backward,
+	  batchnorm_onnx_initializers, batchnorm_onnx_nodes, batchnorm_forward_train },
 };
 
 static const Layer_ops *layer_ops(const Layer *layer)
@@ -1956,7 +2169,11 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 		PTensor Z = cur->t_batch_z;                          // [batch × out_nodes]
 
 		// Linear part (e.g. Y = X * W^T + b), then save the pre-activation Z
-		layer_ops(cur)->forward(cur, X, Y, batch_size);
+		const Layer_ops *ops = layer_ops(cur);
+		if (pnet->is_training && ops->forward_train)
+			ops->forward_train(cur, X, Y, batch_size);
+		else
+			ops->forward(cur, X, Y, batch_size);
 
 		Activation_type act_type = cur->activation;
 		int total = batch_size * cur->node_count;
@@ -2336,7 +2553,10 @@ static void clip_gradients(PNetwork pnet)
 	{
 		PLayer cur = &pnet->layers[layer];
 		for (int p = 0; p < cur->param_count; p++)
-			tensor_clip(cur->params[p].grad, -pnet->max_gradient, pnet->max_gradient);
+		{
+			if (!cur->params[p].state)
+				tensor_clip(cur->params[p].grad, -pnet->max_gradient, pnet->max_gradient);
+		}
 	}
 }
 
@@ -2478,7 +2698,8 @@ static void optimize_sgd(PNetwork pnet)
 		for (int p = 0; p < cur->param_count; p++)
 		{
 			// W = W + n * gradients
-			tensor_axpy(pnet->learning_rate, cur->params[p].grad, cur->params[p].value);
+			if (!cur->params[p].state)
+				tensor_axpy(pnet->learning_rate, cur->params[p].grad, cur->params[p].value);
 		}
 	}
 
@@ -2507,6 +2728,8 @@ static void optimize_momentum(PNetwork pnet)
 		for (int p = 0; p < cur->param_count; p++)
 		{
 			Layer_param *param = &cur->params[p];
+			if (param->state)
+				continue;
 
 			// momentum = beta * m + one_minus_beta * gradients
 			tensor_axpby(one_minus_beta, param->grad, beta, param->m);
@@ -2537,6 +2760,8 @@ static void optimize_adagrad(PNetwork pnet)
 		PLayer cur = &pnet->layers[layer];
 		for (int p = 0; p < cur->param_count; p++)
 		{
+			if (cur->params[p].state)
+				continue;
 			optimizer_job job = { &cur->params[p], pnet->learning_rate, (real)0.0, (real)0.0, epsilon, (real)0.0, (real)0.0 };
 			PTensor g = cur->params[p].grad;
 			ann_parallel_for(g->rows * g->cols, ANN_ELEMENT_GRAIN, adagrad_range, &job);
@@ -2565,6 +2790,8 @@ static void optimize_rmsprop(PNetwork pnet)
 		PLayer cur = &pnet->layers[layer];
 		for (int p = 0; p < cur->param_count; p++)
 		{
+			if (cur->params[p].state)
+				continue;
 			optimizer_job job = { &cur->params[p], pnet->learning_rate, beta, one_minus_beta, epsilon, (real)0.0, (real)0.0 };
 			PTensor g = cur->params[p].grad;
 			ann_parallel_for(g->rows * g->cols, ANN_ELEMENT_GRAIN, rmsprop_range, &job);
@@ -2598,6 +2825,8 @@ static void optimize_adam(PNetwork pnet)
 		PLayer cur = &pnet->layers[layer];
 		for (int p = 0; p < cur->param_count; p++)
 		{
+			if (cur->params[p].state)
+				continue;
 			optimizer_job job = { &cur->params[p], pnet->learning_rate, beta1, beta2, epsilon,
 			                      bias_correction1, bias_correction2 };
 			PTensor g = cur->params[p].grad;
@@ -2883,6 +3112,20 @@ int ann_add_global_avgpool2d(PNetwork pnet)
 	shape.h = 1;
 	shape.w = 1;
 	return add_layer(pnet, LAYER_KIND_GLOBAL_AVGPOOL2D, shape, NULL, 0, LAYER_HIDDEN, ACTIVATION_NULL);
+}
+
+//------------------------------
+// add a batch normalization layer
+//------------------------------
+int ann_add_batchnorm(PNetwork pnet, Activation_type activation)
+{
+	const Layer_shape *in = last_shape(pnet);
+	Layer_shape shape;
+
+	shape.c = in ? in->c : 1;
+	shape.h = in ? in->h : 1;
+	shape.w = in ? in->w : 1;
+	return add_layer(pnet, LAYER_KIND_BATCHNORM, shape, NULL, 0, LAYER_HIDDEN, activation);
 }
 
 //------------------------------
@@ -5199,6 +5442,60 @@ static void maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const
 }
 
 //-----------------------------------------------
+// BatchNorm ONNX initializers: bn_N_scale, bn_N_bias, bn_N_mean, bn_N_var, each [C]
+//-----------------------------------------------
+static void batchnorm_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first)
+{
+	static const char *names[4] = { "scale", "bias", "mean", "var" };
+	PLayer cur = &pnet->layers[layer];
+	int dims[1];
+	dims[0] = cur->shape.c;
+
+	for (int p = 0; p < 4; p++)
+	{
+		if (!*first) fprintf(fptr, ",\n");
+		*first = 0;
+
+		fprintf(fptr, "      {\n");
+		fprintf(fptr, "        \"name\": \"bn_%d_%s\",\n", layer - 1, names[p]);
+		fprintf(fptr, "        \"data_type\": 1,\n");
+		fprintf(fptr, "        \"dims\": ");
+		write_json_int_array(fptr, dims, 1);
+		fprintf(fptr, ",\n");
+		fprintf(fptr, "        \"float_data\": ");
+		write_json_float_array(fptr, cur->params[p].value->values, dims[0]);
+		fprintf(fptr, "\n");
+		fprintf(fptr, "      }");
+	}
+}
+
+//-----------------------------------------------
+// BatchNormalization ONNX node (inference form) on [batch, C] or [batch, C, H, W];
+// ONNX's momentum is the weight of the running value, 1 - libann's
+//-----------------------------------------------
+static void batchnorm_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                                 char *output, size_t output_size, int *first)
+{
+	char name[32], params[4][40], attributes[160];
+	const char *inputs[5];
+	static const char *names[4] = { "scale", "bias", "mean", "var" };
+	(void)pnet;
+
+	snprintf(name, sizeof(name), "batchnorm_%d", layer - 1);
+	snprintf(output, output_size, "batchnorm_%d_out", layer - 1);
+	inputs[0] = input;
+	for (int p = 0; p < 4; p++)
+	{
+		snprintf(params[p], sizeof(params[p]), "bn_%d_%s", layer - 1, names[p]);
+		inputs[p + 1] = params[p];
+	}
+	snprintf(attributes, sizeof(attributes),
+	         "[{\"name\": \"epsilon\", \"type\": 1, \"f\": %g}, {\"name\": \"momentum\", \"type\": 1, \"f\": %g}]",
+	         (double)BN_EPSILON, 1.0 - (double)BN_MOMENTUM);
+	write_onnx_node_inputs(fptr, "BatchNormalization", name, inputs, 5, output, attributes, first);
+}
+
+//-----------------------------------------------
 // GlobalAveragePool ONNX node: [batch, C, H, W] -> [batch, C, 1, 1]
 //-----------------------------------------------
 static void global_avgpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
@@ -5343,7 +5640,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 			invoke_error_callback(ERR_INVALID, "ann_export_onnx");
 			return ERR_INVALID;
 		}
-		image = onnx_makes_image(cur->kind);
+		if (cur->kind != LAYER_KIND_BATCHNORM)	// keeps its input's form
+			image = onnx_makes_image(cur->kind);
 	}
 
 	FILE *fptr = fopen(filename, "wt");
@@ -5401,7 +5699,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 			                "[{\"name\": \"axis\", \"type\": 2, \"i\": 1}]", &first_node);
 			snprintf(prev_output, sizeof(prev_output), "%s", flat_out);
 		}
-		image = onnx_makes_image(kind);
+		if (kind != LAYER_KIND_BATCHNORM)
+			image = onnx_makes_image(kind);
 
 		// The layer's own nodes (e.g. MatMul + Add), then its activation
 		layer_ops(&pnet->layers[layer])->onnx_nodes(fptr, pnet, layer, prev_output,
@@ -5969,6 +6268,8 @@ PNetwork ann_import_onnx(const char *filename)
 		int dims4[4] = {0, 0, 0, 0};	// Reshape's [batch, C, H, W]
 		int transpose = 0;	// dense weights stored [in, out] (MatMul layout)
 		JsonValue *weight = NULL, *bias = NULL;
+		JsonValue *bn_mean = NULL, *bn_var = NULL;	// BatchNormalization's statistics
+		double bn_epsilon = 1e-5;
 
 		if (strcmp(op, "MatMul") == 0)
 		{
@@ -6072,6 +6373,29 @@ PNetwork ann_import_onnx(const char *filename)
 				goto fail;
 			}
 			kind = LAYER_KIND_MAXPOOL2D;
+		}
+		else if (strcmp(op, "BatchNormalization") == 0)
+		{
+			// inference form: Y = scale * (X - mean) / sqrt(var + epsilon) + B per channel
+			int dims[1], training = 0, spatial = 1, channels = image ? prev->shape.c : prev->node_count;
+			JsonValue *attr;
+			if ((attr = onnx_attribute(node, "epsilon")) && !onnx_number(onnx_get(attr, "f"), &bn_epsilon)) bn_epsilon = -1.0;
+			if ((attr = onnx_attribute(node, "training_mode")) && !onnx_int(onnx_get(attr, "i"), &training)) training = 1;
+			if ((attr = onnx_attribute(node, "spatial")) && !onnx_int(onnx_get(attr, "i"), &spatial)) spatial = 0;
+
+			weight = onnx_initializer(graph, onnx_io(node, "input", 1));
+			bias = onnx_initializer(graph, onnx_io(node, "input", 2));
+			bn_mean = onnx_initializer(graph, onnx_io(node, "input", 3));
+			bn_var = onnx_initializer(graph, onnx_io(node, "input", 4));
+			if (json_array_length(onnx_get(node, "input")) != 5 || json_array_length(onnx_get(node, "output")) != 1 ||
+				training != 0 || spatial != 1 || !(bn_epsilon > 0.0) ||
+				onnx_dims(weight, dims, 1) != 1 || dims[0] != channels || onnx_dims(bias, dims, 1) != 1 || dims[0] != channels ||
+				onnx_dims(bn_mean, dims, 1) != 1 || dims[0] != channels || onnx_dims(bn_var, dims, 1) != 1 || dims[0] != channels)
+			{
+				error = "ann_import_onnx: unsupported BatchNormalization (needs constant [C] scale, bias, mean and var)";
+				goto fail;
+			}
+			kind = LAYER_KIND_BATCHNORM;
 		}
 		else if (strcmp(op, "GlobalAveragePool") == 0)
 		{
@@ -6216,7 +6540,8 @@ PNetwork ann_import_onnx(const char *filename)
 		{
 			int ok;
 			Activation_type next_act = onnx_node_activation(next, &ok);
-			if (!ok || (next_act != ACTIVATION_NULL && kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D))
+			if (!ok || (next_act != ACTIVATION_NULL && kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D &&
+				kind != LAYER_KIND_BATCHNORM))
 			{
 				error = "ann_import_onnx: unsupported activation";
 				goto fail;
@@ -6237,6 +6562,7 @@ PNetwork ann_import_onnx(const char *filename)
 		case LAYER_KIND_UPSAMPLE2D:	err = ann_add_upsample2d(pnet, kernel); break;
 		case LAYER_KIND_RESHAPE:	err = ann_add_reshape(pnet, dims4[1], dims4[2], dims4[3]); break;
 		case LAYER_KIND_GLOBAL_AVGPOOL2D: err = ann_add_global_avgpool2d(pnet); break;
+		case LAYER_KIND_BATCHNORM:	err = ann_add_batchnorm(pnet, act); break;
 		default:					err = ann_add_flatten(pnet); break;
 		}
 		if (err != ERR_OK)
@@ -6253,6 +6579,19 @@ PNetwork ann_import_onnx(const char *filename)
 		{
 			error = "ann_import_onnx: bias data does not match its dims";
 			goto fail;
+		}
+		if (kind == LAYER_KIND_BATCHNORM)
+		{
+			PTensor var = cur->params[BN_VAR].value;
+			if (!onnx_load_values(bn_mean, cur->params[BN_MEAN].value, 0) || !onnx_load_values(bn_var, var, 0))
+			{
+				error = "ann_import_onnx: batch norm statistics do not match their dims";
+				goto fail;
+			}
+			// libann's epsilon is fixed: move the difference into the variance,
+			// so var + epsilon (all that inference uses) is unchanged
+			for (int c = 0; c < var->cols; c++)
+				var->values[c] = (real)((double)var->values[c] + bn_epsilon - (double)BN_EPSILON);
 		}
 
 		if (onnx_makes_image(kind))

@@ -115,7 +115,8 @@ typedef enum {
 	LAYER_KIND_FLATTEN,					// reshape (C, H, W) to (C*H*W, 1, 1)
 	LAYER_KIND_UPSAMPLE2D,				// nearest-neighbour upsampling by an integer scale, per channel
 	LAYER_KIND_RESHAPE,					// give the same values a new (C, H, W) shape
-	LAYER_KIND_GLOBAL_AVGPOOL2D			// each channel's mean: (C, H, W) to (C, 1, 1)
+	LAYER_KIND_GLOBAL_AVGPOOL2D,		// each channel's mean: (C, H, W) to (C, 1, 1)
+	LAYER_KIND_BATCHNORM				// normalize each channel over the batch, then scale and shift
 } Layer_kind;
 
 //------------------------------
@@ -128,6 +129,7 @@ typedef struct {
 
 #define ANN_LAYER_MAX_PARAMS	4		// trainable tensors per layer (dense uses 2: W, b)
 #define ANN_LAYER_CONFIG_MAX	8		// kind-specific settings (kernel size, stride, ...)
+#define ANN_BATCHNORM_EPSILON	1e-5	// batch norm's epsilon: y = gamma * (x - mean) / sqrt(var + epsilon) + beta
 
 //------------------------------
 // One trainable tensor of a layer with its gradient and optimizer state.
@@ -139,6 +141,8 @@ typedef struct {
 	PTensor m;							// first moment (Momentum, Adam)
 	PTensor v;							// second moment (AdaGrad, RMSProp, Adam)
 	int regularize;						// 1 if L1/L2 apply (weights, not biases)
+	int state;							// 1 for a running statistic (batch norm mean, variance):
+										// saved, uploaded and restored like the others, never trained
 } Layer_param;
 
 //------------------------------
@@ -479,6 +483,29 @@ ANN_API int ann_add_reshape(PNetwork pnet, int channels, int height, int width);
  * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (first layer) or ERR_ALLOC
  */
 ANN_API int ann_add_global_avgpool2d(PNetwork pnet);
+
+/**
+ * Add a batch normalization layer, then an optional activation.
+ * 
+ * Normalizes each channel (each node after a dense layer) to zero mean and
+ * unit variance, then scales and shifts it by learned gamma and beta:
+ * y = act(gamma * (x - mean) / sqrt(var + 1e-5) + beta). Training uses the
+ * batch's mean and variance and updates running averages of them (momentum
+ * 0.1, as PyTorch's default); prediction and evaluation use the running
+ * averages. The output has the input's shape.
+ * 
+ * Put it between a layer and its activation, e.g.
+ * ann_add_conv2d(net, 16, 3, 1, 1, ACTIVATION_NULL); ann_add_batchnorm(net, ACTIVATION_RELU);
+ * so deeper networks train faster and accept higher learning rates. Train
+ * with batches of more than one sample. Maps to an ONNX BatchNormalization
+ * node; int8 quantization and C export fold it into the dense or conv layer
+ * before it.
+ * 
+ * @param pnet Network to add the layer to
+ * @param activation Activation applied after normalizing (ACTIVATION_NULL for none)
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (first layer or bad activation) or ERR_ALLOC
+ */
+ANN_API int ann_add_batchnorm(PNetwork pnet, Activation_type activation);
 
 /**
  * Free all memory associated with a network.

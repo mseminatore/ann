@@ -3,8 +3,8 @@
 //
 // Trains a small dense network and a small CNN, quantizes them, and writes
 // into the output directory:
-//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h   int8 headers (ann_export_c_header with the int8 model)
-//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h   float32 headers (ann_export_c_header without it)
+//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h, bn_q.h   int8 headers (ann_export_c_header with the int8 model)
+//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h, bn_f.h   float32 headers (ann_export_c_header without it)
 //   expected.h           test inputs and libann's outputs for them:
 //                        ann_quantized_predict_int8, ann_quantized_predict and
 //                        ann_predict
@@ -208,6 +208,18 @@ int main(int argc, char *argv[])
 	ann_add_layer(gap, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 	err |= export_model(gap, argv[1], "gap", expected, 4);
 	ann_free_network(gap);
+
+	// batch norm after a conv and a dense layer (folded into them), with its running statistics trained
+	PNetwork bn = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+	ann_add_input(bn, 2, 7, 7);
+	ann_add_conv2d(bn, 4, 3, 1, 1, ACTIVATION_NULL);
+	ann_add_batchnorm(bn, ACTIVATION_RELU);
+	ann_add_maxpool2d(bn, 2, 2);
+	ann_add_layer(bn, 6, LAYER_HIDDEN, ACTIVATION_NULL);
+	ann_add_batchnorm(bn, ACTIVATION_GELU);
+	ann_add_layer(bn, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+	err |= export_model(bn, argv[1], "bn", expected, 5);
+	ann_free_network(bn);
 
 	if (fclose(expected) != 0 || err != ERR_OK)
 	{

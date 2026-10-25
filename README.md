@@ -357,6 +357,7 @@ ann_add_flatten | reshape an image to a vector (optional: dense layers flatten t
 ann_add_upsample2d | nearest-neighbour upsampling by an integer scale, per channel
 ann_add_reshape | give the previous layer's values a (channels, height, width) shape
 ann_add_global_avgpool2d | each channel's mean: (C, H, W) to (C, 1, 1)
+ann_add_batchnorm | batch normalization per channel (per node after a dense layer), then an optional activation
 
 Output sizes are `(H + 2*padding - kernel) / stride + 1` for convolutions,
 `(H - pool) / stride + 1` for pooling and `H * scale` for upsampling. Settings
@@ -373,6 +374,22 @@ ann_add_conv2d(net, 32, 3, 1, 1, ACTIVATION_RELU);  // 32x14x14
 ann_add_global_avgpool2d(net);                      // 32 (no flatten needed)
 ann_add_layer(net, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 ```
+
+Batch normalization goes between a layer and its activation: the conv or
+dense layer has no activation, and the batch norm layer applies it. It lets
+deeper networks train faster and with higher learning rates:
+
+```c
+ann_add_conv2d(net, 32, 3, 1, 1, ACTIVATION_NULL);  // no activation here...
+ann_add_batchnorm(net, ACTIVATION_RELU);            // ...it comes after normalizing
+```
+
+Training normalizes with each batch's mean and variance (so use batches of
+more than one sample) and keeps running averages of them (momentum 0.1, as
+PyTorch); `ann_predict` and evaluation use the running averages. They are
+saved with the model. A layer's bias before a batch norm is redundant, since
+the batch norm subtracts the mean. Quantization and C export fold each batch
+norm into the conv or dense layer before it, which must have no activation.
 
 Upsampling and reshape layers build decoders, e.g. a convolutional
 autoencoder trained to reproduce (or denoise) its input:
@@ -394,11 +411,11 @@ ann_train_network(net, x_train, x_train, x_train->rows);  // targets are the inp
 A dense bottleneck turns back into an image with `ann_add_reshape`, e.g.
 `... -> ann_add_layer(net, 392, ...) -> ann_add_reshape(net, 8, 7, 7) -> ann_add_upsample2d(net, 2) -> ...`.
 
-Convolutional networks, including ones with upsample, reshape and global
-average pooling layers, train and run on the GPU with the Metal and Vulkan backends (the CUDA backend returns
+Convolutional networks, including ones with upsample, reshape, global
+average pooling and batch norm layers, train and run on the GPU with the Metal and Vulkan backends (the CUDA backend returns
 `ERR_INVALID` from `ann_gpu_upload_network()` for them, so they stay on the
 CPU there), save in model format v2, and export to and import
-from ONNX as `Conv`, `MaxPool`, `GlobalAveragePool`, `Flatten`, `Resize` (nearest) and `Reshape`
+from ONNX as `Conv`, `MaxPool`, `GlobalAveragePool`, `BatchNormalization`, `Flatten`, `Resize` (nearest) and `Reshape`
 with a `[batch, C, H, W]` input.
 The importer also reads simple CNNs and MLPs exported by other tools, such as
 PyTorch (see [ONNX Export & Import](docs/ONNX_EXPORT.md)). The `fashion_cnn`

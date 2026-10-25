@@ -9,7 +9,11 @@ is also available for targets with an FPU.
 Supported layers: dense, conv2d (any kernel, stride, padding), maxpool2d, global average
 pooling, flatten, upsample2d and reshape, with every activation (softmax only on the output
 layer). Global average pooling keeps its input's int8 quantization and rounds each mean half
-away from the zero point.
+away from the zero point. Batch norm layers are folded into the dense or conv layer before them
+(`W' = s * W`, `b' = s * (b - mean) + beta` with `s = gamma / sqrt(var + 1e-5)`, the batch
+norm's activation becoming that layer's), so a header has no batch norm layers; a batch norm
+anywhere else (on the input, after pooling, or after a layer with an activation) makes
+`ann_quantize()` and `ann_export_c_header()` fail with `ERR_INVALID`.
 
 A generated header checks for the `ann_rt.h` version it needs: 1 for most models, 2 for models
 with upsampling layers, 3 for models with global average pooling. Copy `ann_rt.h` from the libann that exported the model. Headers

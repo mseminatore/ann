@@ -114,7 +114,7 @@ static int weight_count(const ann_rt_layer *l)
 	if (l->kind == ANN_RT_DENSE)
 		return l->out_c * l->in_c * l->in_h * l->in_w;
 	if (l->kind == ANN_RT_CONV2D)
-		return l->out_c * ann_rt_group_channels(l) * l->size * l->size;
+		return l->out_c * ann_rt_group_channels(l) * l->size * ann_rt_size_w(l);
 	return 0;
 }
 
@@ -212,7 +212,8 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 		}
 
 		ann_rt_layer *l = &layers[n++];
-		ann_get_layer_settings(pnet, k, &size, &stride, &pad);
+		int size_w, stride_w, pad_w;
+		ann_get_layer_window(pnet, k, &size, &size_w, &stride, &stride_w, &pad, &pad_w);
 		l->act = rt_activation(src->activation);
 		l->in_c = src->in_shape.c;
 		l->in_h = src->in_shape.h;
@@ -224,6 +225,9 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 		l->stride = stride;
 		l->pad = pad;
 		l->groups = ann_get_layer_groups(pnet, k);
+		l->size_w = size_w;
+		l->stride_w = stride_w;
+		l->pad_w = pad_w;
 
 		switch (src->kind)
 		{
@@ -853,9 +857,10 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 		else
 			fprintf(f, "\t  NULL, NULL, NULL, NULL, %d, %d, %d, NULL,\n", (int)l->in_zp, (int)l->zp, (int)l->act_min);
 		if (!quantized && w)
-			fprintf(f, "\t  %s_w%d, %s_b%d, %d },\n", prefix, n, prefix, n, (int)l->groups);
+			fprintf(f, "\t  %s_w%d, %s_b%d,", prefix, n, prefix, n);
 		else
-			fprintf(f, "\t  NULL, NULL, %d },\n", (int)l->groups);
+			fprintf(f, "\t  NULL, NULL,");
+		fprintf(f, " %d, %d, %d, %d },\n", (int)l->groups, (int)l->size_w, (int)l->stride_w, (int)l->pad_w);
 	}
 	fprintf(f, "};\n\n");
 

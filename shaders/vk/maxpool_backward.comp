@@ -2,7 +2,7 @@
 #include "common.glsl"
 // MaxPool backward. In general (tiled == 0), dx = sum of dz over the outputs
 // that took this input, a gather over the windows covering it, one invocation
-// per input (no atomics). When K == S (tiled), the windows tile the input, so
+// per input (no atomics). When K == S and KW == SW (tiled), the windows tile the input, so
 // one invocation per output writes its window instead: dz at the input it
 // took, zero elsewhere; the last row and column of outputs also zero the inputs
 // no window covers.
@@ -30,8 +30,8 @@ void main()
             uint plane = t / d.OH;
             uint best = arg[out_i] - (plane % d.C) * d.H * d.W;
             float g = dz[out_i];
-            uint h0 = oh * d.S, w0 = ow * d.S;
-            uint h1 = oh + 1 == d.OH ? d.H : h0 + d.K, w1 = ow + 1 == d.OW ? d.W : w0 + d.K;
+            uint h0 = oh * d.S, w0 = ow * d.SW;
+            uint h1 = oh + 1 == d.OH ? d.H : h0 + d.K, w1 = ow + 1 == d.OW ? d.W : w0 + d.KW;
             uint base = plane * d.H * d.W;
             for (uint h = h0; h < h1; h++)
                 for (uint w = w0; w < w1; w++)
@@ -49,8 +49,8 @@ void main()
 
         // the outputs whose windows [o*S, o*S + K) contain ih and iw
         uint oh0 = ih + 1 > d.K ? (ih + 1 - d.K + d.S - 1) / d.S : 0;
-        uint ow0 = iw + 1 > d.K ? (iw + 1 - d.K + d.S - 1) / d.S : 0;
-        uint oh1 = min(ih / d.S + 1, d.OH), ow1 = min(iw / d.S + 1, d.OW);
+        uint ow0 = iw + 1 > d.KW ? (iw + 1 - d.KW + d.SW - 1) / d.SW : 0;
+        uint oh1 = min(ih / d.S + 1, d.OH), ow1 = min(iw / d.SW + 1, d.OW);
         float s = 0.0;
         for (uint oh = oh0; oh < oh1; oh++)
             for (uint ow = ow0; ow < ow1; ow++)

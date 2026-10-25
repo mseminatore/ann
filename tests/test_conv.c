@@ -12,6 +12,7 @@
 //-----------------------------------------------------------
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "ann.h"
@@ -177,18 +178,97 @@ static PNetwork net_conv_pool(int pool, int stride)
 // weights; with G groups (config[3]), filter f reads its group's C/G channels
 static double ref_conv(const Layer *l, const real *x, int f, int oh, int ow)
 {
-    int k = l->config[0], s = l->config[1], p = l->config[2], groups = l->config[3] > 0 ? l->config[3] : 1;
+    int kh = l->config[0], sh = l->config[1], ph = l->config[2], kw, sw, pw;
+    kw = l->config[4] > 0 ? l->config[4] : kh, sw = l->config[4] > 0 ? l->config[5] : sh;
+    pw = l->config[4] > 0 ? l->config[6] : ph;
+    int groups = l->config[3] > 0 ? l->config[3] : 1;
     int cg = l->in_shape.c / groups, c0 = f / (l->shape.c / groups) * cg;
     const real *w = l->params[0].value->values;
     double sum = l->params[1].value->values[f];
     for (int c = 0; c < cg; c++)
-        for (int i = 0; i < k; i++)
-            for (int j = 0; j < k; j++) {
-                int ih = oh * s - p + i, iw = ow * s - p + j;
+        for (int i = 0; i < kh; i++)
+            for (int j = 0; j < kw; j++) {
+                int ih = oh * sh - ph + i, iw = ow * sw - pw + j;
                 if (ih < 0 || ih >= l->in_shape.h || iw < 0 || iw >= l->in_shape.w) continue;
-                sum += w[((f * cg + c) * k + i) * k + j] * x[((c0 + c) * l->in_shape.h + ih) * l->in_shape.w + iw];
+                sum += w[((f * cg + c) * kh + i) * kw + j] * x[((c0 + c) * l->in_shape.h + ih) * l->in_shape.w + iw];
             }
     return sum;
+}
+
+// 2x5x6 -> conv(3, 2x3 kernel, strides (1, 2), padding (1, 0), tanh): 3x6x2
+// -> max pool (3x1, strides (2, 1)): 3x2x2 -> dense(2), MSE
+static PNetwork net_rect(void)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_input(net, 2, 5, 6);
+    ann_add_conv2d_ex(net, 3, 2, 3, 1, 2, 1, 0, 1, ACTIVATION_TANH);
+    ann_add_maxpool2d_ex(net, 3, 1, 2, 1);
+    ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_NULL);
+    return net;
+}
+
+// a sequence of 3 features x 12 steps (3x1x12) -> conv1d(4, k3, padding 1, sigmoid)
+// -> max pool 1d (2) -> grouped 1-D conv (4, k3, 2 groups, gelu) -> dense(3, softmax).
+// (With a stride of 2 after the pool, a near-tie in a pool window puts the
+// finite differences across the max's kink; the same net down the height
+// instead of along the width gives the very same errors.)
+static PNetwork net_conv1d(void)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_CATEGORICAL_CROSS_ENTROPY);
+    ann_add_input(net, 3, 1, 12);
+    ann_add_conv1d(net, 4, 3, 1, 1, ACTIVATION_SIGMOID);              // 4x1x12
+    ann_add_maxpool1d(net, 2, 2);                                     // 4x1x6
+    ann_add_conv2d_ex(net, 4, 1, 3, 1, 1, 0, 0, 2, ACTIVATION_GELU);  // 4x1x4
+    ann_add_layer(net, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    return net;
+}
+
+// 2-channel sequences of 24 steps: class 0 rises then falls, class 1 falls
+// then rises, at varying speeds and offsets, with a little noise; channel 1
+// is the first's square
+static void make_waves(real *x, real *y, int count)
+{
+    for (int n = 0; n < count; n++) {
+        int cls = n % 2;
+        double speed = 0.15 + 0.03 * (n % 5), offset = 0.3 * (n % 7);
+        for (int t = 0; t < 24; t++) {
+            double v = sin(speed * t + offset) * (cls ? -1.0 : 1.0) + 0.05 * sin(7.1 * t + n);
+            x[n * 48 + t] = (real)v;
+            x[n * 48 + 24 + t] = (real)(v * v);
+        }
+        y[n * 2 + 0] = (real)!cls;
+        y[n * 2 + 1] = (real)cls;
+    }
+}
+
+// a time-series classifier: conv1d -> batch norm -> pool -> conv1d -> global average pool
+static PNetwork make_wave_net(void)
+{
+    PNetwork net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+    net->print_func = quiet;
+    ann_add_input(net, 2, 1, 24);
+    ann_add_conv1d(net, 8, 5, 1, 2, ACTIVATION_NULL);    // 8x1x24
+    ann_add_batchnorm(net, ACTIVATION_RELU);
+    ann_add_maxpool1d(net, 2, 2);                        // 8x1x12
+    ann_add_conv1d(net, 8, 3, 1, 1, ACTIVATION_RELU);    // 8x1x12
+    ann_add_global_avgpool2d(net);
+    ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    ann_set_learning_rate(net, 0.02f);
+    ann_set_convergence(net, 0.0f);
+    ann_set_batch_size(net, 8);
+    return net;
+}
+
+// the n-th int in a text model file, or -1
+static int file_int(const char *path, int n)
+{
+    FILE *f = fopen(path, "rt");
+    double v = -1.0;
+    if (!f) return -1;
+    for (int i = 0; i <= n; i++)
+        if (fscanf(f, "%lf", &v) != 1) { v = -1.0; break; }
+    fclose(f);
+    return (int)v;
 }
 
 // 4x4x4 -> grouped conv(6, k3, padding 1, 2 groups, tanh) -> conv(2, k2) -> dense(2), MSE
@@ -1220,6 +1300,212 @@ void test_main(int argc, char *argv[])
             close = fabs(out[0] - expected) < 1e-5;
         }
         TESTEX("External model with a grouped Conv imports and matches a reference", close);
+        ann_free_network(back);
+        remove(onnx);
+    }
+    SUITE("Non-square Windows and Conv1D");
+    {
+        PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 2, 5, 9);
+        TESTEX("Conv 2x3, strides (1, 2), padding (1, 0): 3x6x4", ann_add_conv2d_ex(net, 3, 2, 3, 1, 2, 1, 0, 1,
+               ACTIVATION_RELU) == ERR_OK && net->layers[1].shape.c == 3 && net->layers[1].shape.h == 6 &&
+               net->layers[1].shape.w == 4 && net->layers[1].params[0].value->cols == 12);
+        int kh, kw, sh, sw, ph, pw, k, st, p;
+        TESTEX("ann_get_layer_window reports both axes", ann_get_layer_window(net, 1, &kh, &kw, &sh, &sw, &ph, &pw) ==
+               ERR_OK && kh == 2 && kw == 3 && sh == 1 && sw == 2 && ph == 1 && pw == 0);
+        TESTEX("and ann_get_layer_settings the height's", ann_get_layer_settings(net, 1, &k, &st, &p) == ERR_OK &&
+               k == 2 && st == 1 && p == 1);
+        TESTEX("Max pool 3x2, strides (3, 2): 3x2x2", ann_add_maxpool2d_ex(net, 3, 2, 3, 2) == ERR_OK &&
+               net->layers[2].shape.h == 2 && net->layers[2].shape.w == 2 &&
+               ann_get_layer_window(net, 2, &kh, &kw, &sh, &sw, &ph, &pw) == ERR_OK && kh == 3 && kw == 2 &&
+               sh == 3 && sw == 2 && ph == 0 && pw == 0);
+        TESTEX("A square conv reports equal axes", ann_add_conv2d(net, 2, 1, 1, 0, ACTIVATION_NULL) == ERR_OK &&
+               ann_get_layer_window(net, 3, &kh, &kw, &sh, &sw, &ph, &pw) == ERR_OK && kh == 1 && kw == 1 &&
+               sh == 1 && sw == 1);
+        TESTEX("A zero kernel width is rejected", ann_add_conv2d_ex(net, 2, 1, 0, 1, 1, 0, 0, 1, ACTIVATION_NULL) == ERR_INVALID);
+        TESTEX("A zero stride width is rejected", ann_add_conv2d_ex(net, 2, 1, 1, 1, 0, 0, 0, 1, ACTIVATION_NULL) == ERR_INVALID);
+        TESTEX("A pool wider than the input is rejected", ann_add_maxpool2d_ex(net, 1, 3, 1, 1) == ERR_INVALID);
+        TESTEX("ann_get_layer_window checks its arguments",
+               ann_get_layer_window(net, 9, &kh, &kw, &sh, &sw, &ph, &pw) == ERR_INVALID &&
+               ann_get_layer_window(net, 1, NULL, &kw, &sh, &sw, &ph, &pw) == ERR_NULL_PTR);
+        ann_free_network(net);
+
+        net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 3, 1, 20);
+        TESTEX("Conv1d k5, stride 2, padding 2 on 3x1x20: 4x1x10", ann_add_conv1d(net, 4, 5, 2, 2, ACTIVATION_RELU) ==
+               ERR_OK && net->layers[1].shape.c == 4 && net->layers[1].shape.h == 1 && net->layers[1].shape.w == 10 &&
+               net->layers[1].params[0].value->cols == 15);
+        TESTEX("Max pool 1d (3, stride 2): 4x1x4", ann_add_maxpool1d(net, 3, 2) == ERR_OK &&
+               net->layers[2].shape.h == 1 && net->layers[2].shape.w == 4);
+        ann_free_network(net);
+
+        // forward against the reference loop, and a pool against brute force
+        net = ann_make_network(OPT_SGD, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 4, 5, 7);
+        ann_add_conv2d_ex(net, 6, 3, 2, 2, 1, 1, 1, 2, ACTIVATION_NULL);   // 6x3x8
+        ann_add_maxpool2d_ex(net, 2, 3, 1, 2);                             // 6x2x3
+        ann_train_begin(net);
+        set_params(net);
+        ann_train_end(net);
+        real x[140], y[36];
+        for (int i = 0; i < 140; i++) x[i] = (real)cos(0.37 * i) * 1.5f;
+        ann_predict(net, x, y);
+        const Layer *cv = &net->layers[1];
+        double worst = 0.0;
+        int pooled = 1;
+        for (int f = 0; f < 6; f++) {
+            for (int oh = 0; oh < 3; oh++)
+                for (int ow = 0; ow < 8; ow++) {
+                    double d = fabs(cv->t_values->values[(f * 3 + oh) * 8 + ow] - ref_conv(cv, x, f, oh, ow));
+                    if (d > worst) worst = d;
+                }
+            for (int oh = 0; oh < 2; oh++)
+                for (int ow = 0; ow < 3; ow++) {
+                    real best = -1e30f;
+                    for (int i = 0; i < 2; i++)
+                        for (int j = 0; j < 3; j++) {
+                            real v = cv->t_values->values[(f * 3 + oh + i) * 8 + ow * 2 + j];
+                            if (v > best) best = v;
+                        }
+                    pooled &= y[(f * 2 + oh) * 3 + ow] == best;
+                }
+        }
+        TESTEX("A non-square grouped conv matches the reference loop", worst < 1e-5);
+        TESTEX("and a non-square max pool takes each window's largest", pooled);
+        ann_free_network(net);
+    }
+    TESTEX("Gradients: 2x3 conv (strides 1, 2) -> 3x1 pool -> dense", grad_check(net_rect(), 0) <= 1.0f);
+    TESTEX("Gradients: conv1d -> max pool 1d -> grouped 1-D conv -> softmax", grad_check(net_conv1d(), 1) <= 1.0f);
+    {
+        // a time-series classifier learns rising-then-falling from falling-then-rising
+        enum { N = 48 };
+        real x[N * 48], labels[N * 2];
+        make_waves(x, labels, N);
+        PTensor tx = tensor_create_from_array(N, 48, x);
+        PTensor ty = tensor_create_from_array(N, 2, labels);
+        PNetwork net = make_wave_net();
+        ann_set_epoch_limit(net, 60);
+        ann_train_network(net, tx, ty, N);
+        real acc = ann_evaluate_accuracy(net, tx, ty);
+        printf("\t  sequences with conv1d: accuracy %.2f\n", acc);
+        TESTEX("A conv1d time-series classifier learns the sequences", acc >= 0.95f);
+
+        TESTEX("Text and binary saves succeed", ann_save_network(net, "test_c1d.nna") == ERR_OK &&
+               ann_save_network_binary(net, "test_c1d.nnb") == ERR_OK);
+        // version optimizer loss count, then per layer kind type act c h w count config...: the
+        // input has no settings, then the 1x5 conv writes all 7
+        TESTEX("A non-square conv writes its width settings", file_int("test_c1d.nna", 10) == 0 &&
+               file_int("test_c1d.nna", 17) == 7 && file_int("test_c1d.nna", 22) == 5);
+        PNetwork text = ann_load_network("test_c1d.nna");
+        PNetwork bin = ann_load_network_binary("test_c1d.nnb");
+        int kh, kw, sh, sw, ph, pw;
+        TESTEX("Loaded networks keep the windows", same_structure(net, text) && same_structure(net, bin) &&
+               ann_get_layer_window(bin, 3, &kh, &kw, &sh, &sw, &ph, &pw) == ERR_OK && kh == 1 && kw == 2 && sw == 2);
+        TESTEX("Binary load predicts identically", bin && max_output_diff(net, bin, x, N) == 0.0f);
+        TESTEX("Text load predicts the same (6 decimals)", text && max_output_diff(net, text, x, N) < 1e-3f);
+        ann_free_network(text);
+        ann_free_network(bin);
+        remove("test_c1d.nna");
+        remove("test_c1d.nnb");
+
+        // square layers still write only the settings older libann reads
+        PNetwork sq = ann_make_network(OPT_ADAM, LOSS_MSE);
+        sq->print_func = quiet;
+        ann_add_input(sq, 1, 4, 4);
+        ann_add_conv2d(sq, 2, 3, 1, 1, ACTIVATION_RELU);
+        ann_add_maxpool2d(sq, 2, 2);
+        ann_add_layer(sq, 2, LAYER_OUTPUT, ACTIVATION_NULL);
+        ann_train_begin(sq);
+        ann_train_end(sq);
+        ann_save_network(sq, "test_sq.nna");
+        TESTEX("Square conv and pool layers write 3 and 2 settings", file_int("test_sq.nna", 17) == 3 &&
+               file_int("test_sq.nna", 21 + 6) == 2);
+        remove("test_sq.nna");
+        ann_free_network(sq);
+
+        const char *onnx = "test_c1d.onnx.json";
+        TESTEX("It exports to ONNX", ann_export_onnx(net, onnx) == ERR_OK);
+        TESTEX("with 1x5 kernels, width-only padding and a 1x2 pool",
+               file_contains(onnx, "{\"name\": \"kernel_shape\", \"type\": 7, \"ints\": [1, 5]}") &&
+               file_contains(onnx, "{\"name\": \"pads\", \"type\": 7, \"ints\": [0, 2, 0, 2]}") &&
+               file_contains(onnx, "{\"name\": \"kernel_shape\", \"type\": 7, \"ints\": [1, 2]}, "
+                                   "{\"name\": \"strides\", \"type\": 7, \"ints\": [1, 2]}"));
+        PNetwork back = ann_import_onnx(onnx);
+        TESTEX("and imports with the same structure", same_structure(net, back));
+        TESTEX("and predicts identically", back && max_output_diff(net, back, x, N) == 0.0f);
+        ann_free_network(back);
+        remove(onnx);
+        tensor_free(tx);
+        tensor_free(ty);
+        ann_free_network(net);
+
+        // a PyTorch-style nn.Conv1d model (protobuf JSON) on [N, 2, 6]:
+        // Conv(3, k3, pads [1, 1]), Relu, MaxPool(k2, s2), Flatten, Gemm
+        static const char *model =
+            "{\"irVersion\":\"8\",\"producerName\":\"pytorch\",\"graph\":{\"node\":["
+            "{\"input\":[\"x\",\"c.w\",\"c.b\"],\"output\":[\"c\"],\"opType\":\"Conv\",\"attribute\":[{\"name\":\"kernel_shape\",\"ints\":[\"3\"],\"type\":\"INTS\"},{\"name\":\"pads\",\"ints\":[\"1\",\"1\"],\"type\":\"INTS\"},{\"name\":\"strides\",\"ints\":[\"1\"],\"type\":\"INTS\"}]},"
+            "{\"input\":[\"c\"],\"output\":[\"r\"],\"opType\":\"Relu\"},"
+            "{\"input\":[\"r\"],\"output\":[\"p\"],\"opType\":\"MaxPool\",\"attribute\":[{\"name\":\"kernel_shape\",\"ints\":[\"2\"],\"type\":\"INTS\"},{\"name\":\"strides\",\"ints\":[\"2\"],\"type\":\"INTS\"}]},"
+            "{\"input\":[\"p\"],\"output\":[\"f\"],\"name\":\"/Flatten\",\"opType\":\"Flatten\",\"attribute\":[{\"name\":\"axis\",\"i\":\"1\",\"type\":\"INT\"}]},"
+            "{\"input\":[\"f\",\"fc.w\",\"fc.b\"],\"output\":[\"y\"],\"opType\":\"Gemm\",\"attribute\":[{\"name\":\"transB\",\"i\":\"1\",\"type\":\"INT\"}]}],"
+            "\"name\":\"g\",\"initializer\":["
+            "{\"dims\":[\"3\",\"2\",\"3\"],\"dataType\":1,\"name\":\"c.w\",\"floatData\":[0.5,-0.25,0.75,0.125,-0.5,1,0.25,-0.75,1.5,0.5,-1,0.25,0.3,-0.6,0.9,0.1,0.2,-0.4]},"
+            "{\"dims\":[\"3\"],\"dataType\":1,\"name\":\"c.b\",\"floatData\":[0.1,-0.2,0.05]},"
+            "{\"dims\":[\"1\",\"9\"],\"dataType\":1,\"name\":\"fc.w\",\"floatData\":[1,-1,0.5,2,-1.5,0.25,0.75,-0.5,1]},"
+            "{\"dims\":[\"1\"],\"dataType\":1,\"name\":\"fc.b\",\"floatData\":[0.5]}],"
+            "\"input\":[{\"name\":\"x\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"2\"},{\"dimValue\":\"6\"}]}}}}],"
+            "\"output\":[{\"name\":\"y\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"1\"}]}}}}]},"
+            "\"opsetImport\":[{\"domain\":\"\",\"version\":\"17\"}]}";
+        static const double cw[18] = { 0.5, -0.25, 0.75, 0.125, -0.5, 1, 0.25, -0.75, 1.5, 0.5, -1, 0.25, 0.3, -0.6, 0.9, 0.1, 0.2, -0.4 };
+        static const double cb[3] = { 0.1, -0.2, 0.05 }, fw[9] = { 1, -1, 0.5, 2, -1.5, 0.25, 0.75, -0.5, 1 };
+        FILE *f = fopen(onnx, "w");
+        if (f) {
+            fputs(model, f);
+            fclose(f);
+        }
+        back = ann_import_onnx(onnx);
+        real in[12], out[1];
+        for (int i = 0; i < 12; i++) in[i] = (real)sin(1.3 * i + 0.2);
+        double conv[3][6], expected = 0.5;
+        for (int fi = 0; fi < 3; fi++)
+            for (int t = 0; t < 6; t++) {
+                double v = cb[fi];
+                for (int c = 0; c < 2; c++)
+                    for (int j = 0; j < 3; j++)
+                        if (t - 1 + j >= 0 && t - 1 + j < 6)
+                            v += cw[(fi * 2 + c) * 3 + j] * in[c * 6 + t - 1 + j];
+                conv[fi][t] = v > 0.0 ? v : 0.0;
+            }
+        for (int fi = 0; fi < 3; fi++)
+            for (int t = 0; t < 3; t++)
+                expected += fw[fi * 3 + t] * (conv[fi][2 * t] > conv[fi][2 * t + 1] ? conv[fi][2 * t] : conv[fi][2 * t + 1]);
+        int close = back != NULL && back->layers[0].shape.c == 2 && back->layers[0].shape.h == 1 &&
+                    back->layers[0].shape.w == 6;
+        if (close) {
+            ann_predict(back, in, out);
+            close = fabs(out[0] - expected) < 1e-5;
+        }
+        TESTEX("External nn.Conv1d model ([N, C, L] input) imports and matches a reference", close);
+        ann_free_network(back);
+
+        // padding that differs between the two ends of an axis is rejected
+        char *uneven = (char *)malloc(strlen(model) + 1);
+        if (uneven) {
+            strcpy(uneven, model);
+            char *pads = strstr(uneven, "\"ints\":[\"1\",\"1\"]");
+            if (pads) pads[13] = '2';
+            f = fopen(onnx, "w");
+            if (f) {
+                fputs(uneven, f);
+                fclose(f);
+            }
+            free(uneven);
+        }
+        back = ann_import_onnx(onnx);
+        TESTEX("Uneven padding is rejected", back == NULL);
         ann_free_network(back);
         remove(onnx);
     }

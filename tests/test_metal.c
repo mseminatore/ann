@@ -733,6 +733,56 @@ void test_main(int argc, char *argv[])
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 
+        // non-square windows: a 2x3 conv with strides (1, 2) and padding (1, 0),
+        // a 3x1 pool, 1-D convs along the width (one grouped) and a 1-D pool
+        cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        gpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        PNetwork rect[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(rect[i], 2, 9, 9);
+            ann_add_conv2d_ex(rect[i], 6, 2, 3, 1, 2, 1, 0, 1, ACTIVATION_RELU);   // 6x10x4
+            ann_add_maxpool2d_ex(rect[i], 3, 1, 3, 1);                             // 6x3x4
+            ann_add_conv1d(rect[i], 4, 3, 1, 1, ACTIVATION_TANH);                   // 4x3x4
+            ann_add_conv2d_ex(rect[i], 4, 1, 3, 1, 2, 0, 1, 2, ACTIVATION_GELU);   // grouped: 4x3x2
+            ann_add_maxpool1d(rect[i], 2, 1);                                       // 4x3x1
+            ann_add_layer(rect[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(rect[i], 0.01f);
+            ann_set_convergence(rect[i], 0.0f);
+            ann_set_epoch_limit(rect[i], 3);
+            ann_set_batch_size(rect[i], 8);
+        }
+        TESTEX("A network with non-square windows uploads", ann_gpu_upload_network(gpu_net) == ERR_OK);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU non-square and 1-D conv training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        TESTEX("and its inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
+        // a wider conv (8 filters, past the direct-conv cutoffs) with a 1x5 window
+        // and a 3x2 pool whose windows tile the input
+        cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        gpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        PNetwork wide_rect[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(wide_rect[i], 2, 9, 9);
+            ann_add_conv2d_ex(wide_rect[i], 20, 1, 5, 1, 1, 0, 2, 1, ACTIVATION_RELU);  // 20x9x9
+            ann_add_maxpool2d_ex(wide_rect[i], 3, 2, 3, 2);                             // 20x3x4
+            ann_add_conv2d_ex(wide_rect[i], 12, 3, 2, 1, 1, 1, 0, 1, ACTIVATION_TANH);  // 12x3x3
+            ann_add_layer(wide_rect[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(wide_rect[i], 0.01f);
+            ann_set_convergence(wide_rect[i], 0.0f);
+            ann_set_epoch_limit(wide_rect[i], 3);
+            ann_set_batch_size(wide_rect[i], 8);
+        }
+        ann_gpu_upload_network(gpu_net);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU non-square im2col convs and a tiled 3x2 pool match CPU training",
+               cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1) && cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
         // pooling straight off the input: the first layer has no parameters
         PNetwork pool_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
         ann_add_input(pool_net, 2, 9, 9);

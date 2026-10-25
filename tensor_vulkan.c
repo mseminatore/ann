@@ -173,7 +173,7 @@ static const char *const g_kernel_names[K_COUNT + 1] = {
 enum { VK_OPT_SGD, VK_OPT_MOMENTUM, VK_OPT_ADAGRAD, VK_OPT_RMSPROP, VK_OPT_ADAM };
 
 #define VK_MAX_BINDINGS     8       // storage buffers a kernel binds
-#define VK_PUSH_BYTES       64      // push constant space a kernel uses
+#define VK_PUSH_BYTES       128     // push constant space a kernel uses (the minimum Vulkan guarantees)
 #define VK_POOL_SETS        256     // descriptor sets per pool
 #define VK_MAX_POOLS        256     // pools a command buffer may use
 // gemm.comp's tile shapes (rows x columns of the result), each 256 invocations of 4 x 4 results:
@@ -1407,18 +1407,20 @@ static void k_bias_act(VkBuf *Y, VkBuf *b, VkBuf *Z, size_t count, uint32_t cols
 //-----------------------------------------------------------
 typedef struct {
     uint32_t C, H, W, F, OH, OW, K, S, P, batch;
+    uint32_t KW, SW, PW;    // the window's width settings (K, S and P are the height's)
 } WindowDims;
 
 static WindowDims window_dims(PNetwork pnet, int layer, int batch_size)
 {
     PLayer l = &pnet->layers[layer];
-    int size = 0, stride = 1, padding = 0;
-    ann_get_layer_settings(pnet, layer, &size, &stride, &padding);
+    int kh = 0, kw = 0, sh = 1, sw = 1, ph = 0, pw = 0;
+    ann_get_layer_window(pnet, layer, &kh, &kw, &sh, &sw, &ph, &pw);
 
     WindowDims d;
     d.C = (uint32_t)l->in_shape.c; d.H = (uint32_t)l->in_shape.h; d.W = (uint32_t)l->in_shape.w;
     d.F = (uint32_t)l->shape.c;    d.OH = (uint32_t)l->shape.h;   d.OW = (uint32_t)l->shape.w;
-    d.K = (uint32_t)size; d.S = (uint32_t)stride; d.P = (uint32_t)padding;
+    d.K = (uint32_t)kh; d.S = (uint32_t)sh; d.P = (uint32_t)ph;
+    d.KW = (uint32_t)kw; d.SW = (uint32_t)sw; d.PW = (uint32_t)pw;
     d.batch = (uint32_t)batch_size;
     return d;
 }
@@ -1496,7 +1498,7 @@ static int conv_direct(const WindowDims *d)
 // of two, at most 128 so a workgroup has at least two rows at a time
 static uint32_t direct_lanes(const WindowDims *d)
 {
-    uint32_t columns = d->C * d->K * d->K + 1, px = 1;
+    uint32_t columns = d->C * d->K * d->KW + 1, px = 1;
     while (px < columns && px < 128)
         px *= 2;
     return px;
@@ -1507,7 +1509,7 @@ static uint32_t direct_lanes(const WindowDims *d)
 static uint32_t direct_chunks(const WindowDims *d, uint32_t rows)
 {
     uint32_t px = direct_lanes(d), ys = 256 / px;
-    uint32_t blocks = (d->C * d->K * d->K + 1 + px - 1) / px;
+    uint32_t blocks = (d->C * d->K * d->KW + 1 + px - 1) / px;
     uint32_t chunks = blocks >= CONV_DIRECT_GROUPS ? 1 : CONV_DIRECT_GROUPS / blocks;
     if (chunks > rows / ys)
         chunks = rows / ys;
@@ -1531,7 +1533,7 @@ static int ensure_layer_scratch(PNetwork pnet, int rows, int training)
         if (l->kind == LAYER_KIND_CONV2D)
         {
             WindowDims d = window_dims(pnet, layer, rows);
-            size_t out_rows = (size_t)rows * d.OH * d.OW, patch = (size_t)d.C * d.K * d.K;
+            size_t out_rows = (size_t)rows * d.OH * d.OW, patch = (size_t)d.C * d.K * d.KW;
             // a grouped conv needs only gradient rows (conv_grouped.comp)
             if (ann_get_layer_groups(pnet, layer) > 1)
             {
@@ -1597,7 +1599,7 @@ static void encode_conv_forward(PNetwork pnet, int layer, int batch_size, VkBuf 
 {
     PLayer l = &pnet->layers[layer];
     WindowDims d = window_dims(pnet, layer, batch_size);
-    uint32_t out_rows = (uint32_t)batch_size * d.OH * d.OW, patch = d.C * d.K * d.K;
+    uint32_t out_rows = (uint32_t)batch_size * d.OH * d.OW, patch = d.C * d.K * d.KW;
     struct { WindowDims d; uint32_t act, save_z; } p = { d, (uint32_t)l->activation, Z != NULL };
 
     uint32_t groups = (uint32_t)ann_get_layer_groups(pnet, layer);
@@ -1646,7 +1648,7 @@ static void encode_conv_backward(PNetwork pnet, int layer, int batch_size, VkBuf
 {
     PLayer l = &pnet->layers[layer];
     WindowDims d = window_dims(pnet, layer, batch_size);
-    uint32_t out_rows = (uint32_t)batch_size * d.OH * d.OW, patch = d.C * d.K * d.K;
+    uint32_t out_rows = (uint32_t)batch_size * d.OH * d.OW, patch = d.C * d.K * d.KW;
     VkBuf *W = (VkBuf *)l->params[0].value->gpu_buf;
     VkBuf *dW = (VkBuf *)l->params[0].grad->gpu_buf, *db = (VkBuf *)l->params[1].grad->gpu_buf;
     VkBuf *dz_rows = scratch_of(layer, SCRATCH_ROWS);
@@ -1734,7 +1736,7 @@ static void encode_maxpool_backward(PNetwork pnet, int layer, int batch_size, Vk
     WindowDims d = window_dims(pnet, layer, batch_size);
     // when the windows tile the input, each output writes its window; else each input
     // gathers from the windows covering it
-    struct { WindowDims d; uint32_t tiled; } p = { d, d.K == d.S };
+    struct { WindowDims d; uint32_t tiled; } p = { d, d.K == d.S && d.KW == d.SW };
     VkBuf *bufs[3] = { dZ, dX, scratch_of(layer, SCRATCH_COLS) };
     size_t count = (size_t)batch_size * d.C * (p.tiled ? d.OH * d.OW : d.H * d.W);
     cmd_dispatch(K_MAXPOOL_BACKWARD, bufs, 3, &p, sizeof(p), groups_for(count, 256), 1);

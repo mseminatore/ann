@@ -23,7 +23,7 @@ layout(push_constant) uniform Params {
 void main()
 {
     WindowDims d = pc.d;
-    uint kk = d.K * d.K;
+    uint kk = d.K * d.KW;
     GRID_LOOP(o, d.batch * d.F * d.OH * d.OW)
     {
         uint ow = o % d.OW, t = o / d.OW;
@@ -31,7 +31,7 @@ void main()
         t /= d.OH;
         uint f = t % d.F, b = t / d.F;
 
-        int ih0 = int(oh * d.S) - int(d.P), iw0 = int(ow * d.S) - int(d.P);
+        int ih0 = int(oh * d.S) - int(d.P), iw0 = int(ow * d.SW) - int(d.PW);
         float s = 0.0;
         for (uint c = 0; c < d.C; c++)
         {
@@ -42,11 +42,11 @@ void main()
                 int ih = ih0 + int(i);
                 if (ih < 0 || ih >= int(d.H))
                     continue;
-                for (uint j = 0; j < d.K; j++)
+                for (uint j = 0; j < d.KW; j++)
                 {
                     int iw = iw0 + int(j);
                     if (iw >= 0 && iw < int(d.W))
-                        s += x[xs + uint(ih) * d.W + uint(iw)] * w[wf + i * d.K + j];
+                        s += x[xs + uint(ih) * d.W + uint(iw)] * w[wf + i * d.KW + j];
                 }
             }
         }

@@ -118,6 +118,31 @@
 
 #include "ann_parallel.h"
 
+// CBLAS (github.com/mseminatore/cblas) picks its kernels and starts its thread
+// server in cblas_init(), which must run before any other call; libann makes
+// it on first use, so programs need not. A second cblas_init is harmless.
+#if defined(USE_CBLAS)
+#	include <stdatomic.h>
+static atomic_int g_cblas_ready;	// 0 not started, 1 starting, 2 ready
+
+static void blas_ready(void)
+{
+	int expected = 0;
+	if (atomic_load_explicit(&g_cblas_ready, memory_order_acquire) == 2)
+		return;
+	if (atomic_compare_exchange_strong(&g_cblas_ready, &expected, 1))
+	{
+		cblas_init(CBLAS_DEFAULT_THREADS);
+		atomic_store_explicit(&g_cblas_ready, 2, memory_order_release);
+	}
+	else
+		while (atomic_load_explicit(&g_cblas_ready, memory_order_acquire) != 2)
+			;	// another thread is initializing
+}
+#else
+#	define blas_ready() ((void)0)
+#endif
+
 // Accelerate's BLAS threading can be set per thread (macOS 15+): range
 // functions run with it single-threaded (see ann_parallel.h)
 #if defined(USE_BLAS) && defined(__APPLE__) && defined(CBLAS_ENUM_DEFINED_H) && defined(__has_include)
@@ -895,6 +920,7 @@ PTensor tensor_axpy(real alpha, const PTensor x, PTensor y)
 	int limit = x->rows * x->cols;
 
 #ifdef USE_BLAS
+	blas_ready();
 	cblas_saxpy(limit, alpha, x->values, 1, y->values, 1);
 #else
 
@@ -928,6 +954,7 @@ PTensor tensor_axpby(real alpha, const PTensor x, real beta, PTensor y)
 	int limit = x->rows * x->cols;
 
 #ifdef USE_BLAS
+	blas_ready();
 	cblas_saxpby(limit, alpha, x->values, 1, beta, y->values, 1);
 #else
 
@@ -1086,6 +1113,7 @@ PTensor tensor_mul_scalar(PTensor t, real alpha)
 	int limit = t->rows * t->cols;
 
 #ifdef USE_BLAS
+	blas_ready();
 	cblas_sscal(limit, alpha, t->values, 1);
 #else
 	for (int i = 0; i < limit; i++)
@@ -1329,6 +1357,7 @@ real tensor_sum(const PTensor t)
 	int limit = t->rows * t->cols;
 
 #ifdef USE_BLAS
+	blas_ready();
 	sum = cblas_sasum(limit, t->values, 1);
 #else
 	sum = (real)0.0;
@@ -1460,6 +1489,7 @@ PTensor tensor_matvec(TENSOR_TRANSPOSE trans, real alpha, const PTensor mtx, rea
 	int n = mtx->cols;
 	int lda = n;
 	
+	blas_ready();
 	cblas_sgemv(CblasRowMajor, (trans == Tensor_NoTranspose) ? CblasNoTrans : CblasTrans, m, n, alpha, mtx->values, lda, v->values, 1, beta, dest->values, 1);
 #else
 
@@ -1584,6 +1614,7 @@ PTensor tensor_outer(real alpha, const PTensor a, const PTensor b, PTensor dest)
 #ifdef USE_BLAS
 	// BLAS requires lda >= max(1, cols) for row-major
 	int lda = dest->cols > 0 ? dest->cols : 1;
+	blas_ready();
 	cblas_sger(CblasRowMajor, dest->rows, dest->cols, alpha, a->values, 1, b->values, 1, dest->values, lda);
 #else
 	int b_cols = b->cols;
@@ -1858,6 +1889,7 @@ PTensor tensor_gemm(real alpha, const PTensor A, const PTensor B, real beta, PTe
 		return C;
 
 #ifdef USE_BLAS
+	blas_ready();
 	cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
 		M, N, K,
 		alpha, A->values, K,
@@ -1905,6 +1937,7 @@ PTensor tensor_gemm_transB(real alpha, const PTensor A, const PTensor B, real be
 
 #ifdef USE_BLAS
 	// Row-major C(M×N) = A(M×K) * B^T(K×N) where B is stored as N×K
+	blas_ready();
 	cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
 		M, N, K,
 		alpha, A->values, K,     // lda = K (row stride of A)
@@ -1951,6 +1984,7 @@ PTensor tensor_gemm_transA(real alpha, const PTensor A, const PTensor B, real be
 
 #ifdef USE_BLAS
 	// Row-major C(M×N) = A^T(M×K) * B(K×N) where A is stored as K×M
+	blas_ready();
 	cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
 		M, N, K,
 		alpha, A->values, M,     // lda = M (row stride of A, which has M cols)

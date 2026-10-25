@@ -15,10 +15,15 @@ norm's activation becoming that layer's), so a header has no batch norm layers; 
 anywhere else (on the input, after pooling, or after a layer with an activation) makes
 `ann_quantize()` and `ann_export_c_header()` fail with `ERR_INVALID`.
 
-A generated header checks for the `ann_rt.h` version it needs: 1 for most models, 2 for models
-with upsampling layers, 3 for models with global average pooling. Copy `ann_rt.h` from the libann that exported the model. Headers
-exported by libann 0.7 (pyann 0.7.0) require exactly version 1; re-export them to use the
-newer runtime.
+Conv layers may be grouped or depthwise (`ann_add_conv2d_grouped`, `ann_add_depthwise_conv2d`).
+
+A generated header initializes every `ann_rt_layer` field, so it builds without
+missing-initializer warnings, and checks that `ann_rt.h` is at least the version that wrote it
+(4: version 2 added upsampling, 3 global average pooling, 4 grouped convolutions). Copy
+`ann_rt.h` from the libann that exported the model. Headers written by older versions still
+build with the newer runtime (the fields they leave out read as 0, which means one group), but
+compilers warn about the missing initializers with `-Wextra`. Headers exported by libann 0.7
+(pyann 0.7.0) require exactly version 1; re-export them to use the newer runtime.
 
 ## Quick start
 

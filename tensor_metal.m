@@ -112,6 +112,9 @@ typedef struct {
     id<MTLComputePipelineState> pso_conv_direct_forward;
     id<MTLComputePipelineState> pso_conv_direct_input_grad;
     id<MTLComputePipelineState> pso_conv_direct_weight_grad;
+    id<MTLComputePipelineState> pso_conv_grouped_forward;
+    id<MTLComputePipelineState> pso_conv_grouped_input_grad;
+    id<MTLComputePipelineState> pso_conv_grouped_weight_grad;
     id<MTLComputePipelineState> pso_upsample_forward;
     id<MTLComputePipelineState> pso_upsample_backward;
     id<MTLComputePipelineState> pso_global_avgpool_forward;
@@ -1001,7 +1004,98 @@ int tensor_metal_init(void)
         "    constant BnDims &d [[buffer(5)]],\n"
         "    uint i [[thread_position_in_grid]]) {\n"
         "    uint c = (i / d.area) % d.C;\n"
-        "    dx[i] = gamma[c] * stats[d.C + c] * (dz[i] - stats[2 * d.C + c] - x_hat[i] * stats[3 * d.C + c]); }\n";
+        "    dx[i] = gamma[c] * stats[d.C + c] * (dz[i] - stats[2 * d.C + c] - x_hat[i] * stats[3 * d.C + c]); }\n"
+        // ----------------------------------------------------------------
+        // Grouped convolution (G groups; depthwise when G = C), computed
+        // directly: filter f reads channels [g*C/G, (g+1)*C/G) for
+        // g = f / (F/G), and W is [F][C/G][K][K].
+        // ----------------------------------------------------------------
+        // one thread per output sums its window, adds the bias and
+        // activates; grid (OW, OH, batch*F)
+        "kernel void conv_grouped_forward(\n"
+        "    device const float *x [[buffer(0)]],\n"
+        "    device const float *w [[buffer(1)]],\n"
+        "    device const float *bias [[buffer(2)]],\n"
+        "    device float *y [[buffer(3)]],\n"
+        "    device float *z [[buffer(4)]],\n"
+        "    constant WindowDims &d [[buffer(5)]],\n"
+        "    constant uint2 &act_save_z [[buffer(6)]],\n"
+        "    constant uint &groups [[buffer(7)]],\n"
+        "    uint3 gid [[thread_position_in_grid]]) {\n"
+        "    uint b = gid.z / d.F, f = gid.z % d.F, kk = d.K * d.K, cg = d.C / groups;\n"
+        "    uint c0 = f / (d.F / groups) * cg;\n"
+        "    int ih0 = int(gid.y * d.S) - int(d.P), iw0 = int(gid.x * d.S) - int(d.P);\n"
+        "    float s = 0.0f;\n"
+        "    for (uint c = 0; c < cg; c++) {\n"
+        "        device const float *xs = x + (b * d.C + c0 + c) * d.H * d.W;\n"
+        "        device const float *wf = w + (f * cg + c) * kk;\n"
+        "        for (uint i = 0; i < d.K; i++) {\n"
+        "            int ih = ih0 + int(i);\n"
+        "            if (ih < 0 || ih >= int(d.H)) continue;\n"
+        "            for (uint j = 0; j < d.K; j++) {\n"
+        "                int iw = iw0 + int(j);\n"
+        "                if (iw >= 0 && iw < int(d.W)) s += xs[ih * int(d.W) + iw] * wf[i * d.K + j]; } } }\n"
+        "    uint o = (gid.z * d.OH + gid.y) * d.OW + gid.x;\n"
+        "    float v = s + bias[f];\n"
+        "    if (act_save_z.y) z[o] = v;\n"
+        "    y[o] = activate(v, act_save_z.x); }\n"
+        // dx[b][c][ih][iw] = sum of dz_rows * W over the group's filters and
+        // the outputs whose windows read it; grid (W, H, batch*C)
+        "kernel void conv_grouped_input_grad(\n"
+        "    device const float *dz_rows [[buffer(0)]],\n"
+        "    device const float *w [[buffer(1)]],\n"
+        "    device float *dx [[buffer(2)]],\n"
+        "    constant WindowDims &d [[buffer(3)]],\n"
+        "    constant uint &groups [[buffer(4)]],\n"
+        "    uint3 gid [[thread_position_in_grid]]) {\n"
+        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.K, cg = d.C / groups, fg = d.F / groups;\n"
+        "    uint f0 = c / cg * fg, ci = c % cg;\n"
+        "    float s = 0.0f;\n"
+        "    for (uint i = 0; i < d.K; i++) {\n"
+        "        int ty = int(gid.y + d.P) - int(i);\n"
+        "        if (ty < 0) continue;\n"
+        "        uint oh = uint(ty);\n"
+        "        if (d.S > 1) { if (oh % d.S) continue; oh /= d.S; }\n"
+        "        if (oh >= d.OH) continue;\n"
+        "        for (uint j = 0; j < d.K; j++) {\n"
+        "            int tx = int(gid.x + d.P) - int(j);\n"
+        "            if (tx < 0) continue;\n"
+        "            uint ow = uint(tx);\n"
+        "            if (d.S > 1) { if (ow % d.S) continue; ow /= d.S; }\n"
+        "            if (ow >= d.OW) continue;\n"
+        "            device const float *g = dz_rows + ((b * d.OH + oh) * d.OW + ow) * d.F;\n"
+        "            for (uint f = f0; f < f0 + fg; f++) s += g[f] * w[(f * cg + ci) * kk + i * d.K + j]; } }\n"
+        "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
+        // dW[f][p] += sum over rows of dz_rows[r][f] * the input p reads for
+        // row r (p = (c, i, j) of the filter's group; p = C/G*K*K is the bias,
+        // all ones); one threadgroup (a power of two, at most 256 threads)
+        // per (p, f), its threads taking every T-th row
+        "kernel void conv_grouped_weight_grad(\n"
+        "    device const float *dz_rows [[buffer(0)]],\n"
+        "    device const float *x [[buffer(1)]],\n"
+        "    device float *dw [[buffer(2)]],\n"
+        "    device float *db [[buffer(3)]],\n"
+        "    constant WindowDims &d [[buffer(4)]],\n"
+        "    constant uint &groups [[buffer(5)]],\n"
+        "    uint2 tg [[threadgroup_position_in_grid]],\n"
+        "    uint2 tid [[thread_position_in_threadgroup]],\n"
+        "    uint2 tpg [[threads_per_threadgroup]]) {\n"
+        "    threadgroup float part[256];\n"
+        "    uint t = tid.x, T = tpg.x;\n"
+        "    uint kk = d.K * d.K, cg = d.C / groups, P = cg * kk, p = tg.x, f = tg.y;\n"
+        "    uint c = f / (d.F / groups) * cg + p / kk, ki = p % kk / d.K, kj = p % d.K;\n"
+        "    uint rows = d.batch * d.OH * d.OW;\n"
+        "    ColWalk walk = col_walk_start(t, d);\n"
+        "    float s = 0.0f;\n"
+        "    for (uint r = t; r < rows; r += T) {\n"
+        "        s += dz_rows[r * d.F + f] * (p < P ? col_input(x, d, walk, c, ki, kj) : 1.0f);\n"
+        "        col_walk_advance(walk, T, d); }\n"
+        "    part[t] = s;\n"
+        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "    for (uint w = T / 2; w > 0; w /= 2) {\n"
+        "        if (t < w) part[t] += part[t + w];\n"
+        "        threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+        "    if (t == 0) { if (p < P) dw[f * P + p] += part[0]; else db[f] += part[0]; } }\n";
 
     NSError *err = nil;
     NSString *src = [NSString stringWithFormat:
@@ -1078,6 +1172,9 @@ int tensor_metal_init(void)
     g_metal.pso_conv_direct_forward = make_pso(g_metal.library, "conv_direct_forward");
     g_metal.pso_conv_direct_input_grad = make_pso(g_metal.library, "conv_direct_input_grad");
     g_metal.pso_conv_direct_weight_grad = make_pso(g_metal.library, "conv_direct_weight_grad");
+    g_metal.pso_conv_grouped_forward = make_pso(g_metal.library, "conv_grouped_forward");
+    g_metal.pso_conv_grouped_input_grad = make_pso(g_metal.library, "conv_grouped_input_grad");
+    g_metal.pso_conv_grouped_weight_grad = make_pso(g_metal.library, "conv_grouped_weight_grad");
     g_metal.pso_upsample_forward = make_pso(g_metal.library, "upsample_forward");
     g_metal.pso_upsample_backward = make_pso(g_metal.library, "upsample_backward");
     g_metal.pso_global_avgpool_forward = make_pso(g_metal.library, "global_avgpool_forward");
@@ -1098,6 +1195,8 @@ int tensor_metal_init(void)
         !g_metal.pso_maxpool_backward_tiled ||
         !g_metal.pso_conv_direct_forward || !g_metal.pso_conv_direct_input_grad ||
         !g_metal.pso_conv_direct_weight_grad || !g_metal.pso_copy_buffer ||
+        !g_metal.pso_conv_grouped_forward || !g_metal.pso_conv_grouped_input_grad ||
+        !g_metal.pso_conv_grouped_weight_grad ||
         !g_metal.pso_upsample_forward || !g_metal.pso_upsample_backward ||
         !g_metal.pso_global_avgpool_forward || !g_metal.pso_global_avgpool_backward ||
         !g_metal.pso_bn_stats || !g_metal.pso_bn_forward_train || !g_metal.pso_bn_forward_infer ||
@@ -1480,9 +1579,10 @@ static int encode_conv_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int laye
     WindowDims d = window_dims(pnet, layer, batch_size);
     NSUInteger positions = d.OH * d.OW, rows = (NSUInteger)batch_size * positions, patch = d.C * d.K * d.K;
     uint32_t act_save_z[2] = { (uint32_t)l->activation, Z != nil };
-    if (conv_direct(&d)) {
+    uint32_t groups = (uint32_t)ann_get_layer_groups(pnet, layer);
+    if (groups > 1 || conv_direct(&d)) {
         id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
-        id<MTLComputePipelineState> pso = g_metal.pso_conv_direct_forward;
+        id<MTLComputePipelineState> pso = groups > 1 ? g_metal.pso_conv_grouped_forward : g_metal.pso_conv_direct_forward;
         [enc setComputePipelineState:pso];
         [enc setBuffer:X offset:0 atIndex:0];
         [enc setBuffer:(__bridge id<MTLBuffer>)l->params[0].value->gpu_buf offset:0 atIndex:1];
@@ -1491,6 +1591,8 @@ static int encode_conv_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int laye
         [enc setBuffer:Z ? Z : Y offset:0 atIndex:4];
         [enc setBytes:&d length:sizeof(d) atIndex:5];
         [enc setBytes:act_save_z length:sizeof(act_save_z) atIndex:6];
+        if (groups > 1)
+            [enc setBytes:&groups length:sizeof(groups) atIndex:7];
         NSUInteger tw = MIN(pso.threadExecutionWidth, (NSUInteger)d.OW);
         NSUInteger th = MIN(pso.maxTotalThreadsPerThreadgroup / tw, (NSUInteger)d.OH);
         [enc dispatchThreads:MTLSizeMake(d.OW, d.OH, (NSUInteger)batch_size * d.F) threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
@@ -1539,6 +1641,46 @@ static int encode_conv_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
     id<MTLBuffer> dz_rows = layer_scratch(layer, SCRATCH_ROWS, rows * d.F * sizeof(float));
     if (!dz_rows)
         return 0;
+
+    // A grouped conv works from the input and dz_rows directly: a
+    // threadgroup per weight (and bias) sums its rows, and each input
+    // gathers its gradient from its group's filters
+    uint32_t groups = (uint32_t)ann_get_layer_groups(pnet, layer);
+    if (groups > 1) {
+        uint32_t act_code = (uint32_t)act;
+        id<MTLBuffer> av = (__bridge id<MTLBuffer>)(act == ACTIVATION_GELU ? l->t_batch_z : l->t_batch_values)->gpu_buf;
+        id<MTLBuffer> row_bufs[3] = { dZ, dz_rows, av };
+        encode_grid(cmd, g_metal.pso_conv_grad_rows, row_bufs, 3, &act_code, sizeof(act_code),
+                    MTLSizeMake(positions, d.F, (NSUInteger)batch_size));
+
+        NSUInteger tg = 1;
+        while (tg < rows && tg < 256 && tg * 2 <= g_metal.pso_conv_grouped_weight_grad.maxTotalThreadsPerThreadgroup)
+            tg *= 2;
+        id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
+        [enc setComputePipelineState:g_metal.pso_conv_grouped_weight_grad];
+        [enc setBuffer:dz_rows offset:0 atIndex:0];
+        [enc setBuffer:X offset:0 atIndex:1];
+        [enc setBuffer:(__bridge id<MTLBuffer>)l->params[0].grad->gpu_buf offset:0 atIndex:2];
+        [enc setBuffer:(__bridge id<MTLBuffer>)l->params[1].grad->gpu_buf offset:0 atIndex:3];
+        [enc setBytes:&d length:sizeof(d) atIndex:4];
+        [enc setBytes:&groups length:sizeof(groups) atIndex:5];
+        [enc dispatchThreadgroups:MTLSizeMake(patch / groups + 1, d.F, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+
+        if (dX) {
+            id<MTLComputePipelineState> pso = g_metal.pso_conv_grouped_input_grad;
+            enc = compute_encoder(cmd);
+            [enc setComputePipelineState:pso];
+            [enc setBuffer:dz_rows offset:0 atIndex:0];
+            [enc setBuffer:W offset:0 atIndex:1];
+            [enc setBuffer:dX offset:0 atIndex:2];
+            [enc setBytes:&d length:sizeof(d) atIndex:3];
+            [enc setBytes:&groups length:sizeof(groups) atIndex:4];
+            NSUInteger tw = MIN(pso.threadExecutionWidth, (NSUInteger)d.W);
+            NSUInteger th = MIN(pso.maxTotalThreadsPerThreadgroup / tw, (NSUInteger)d.H);
+            [enc dispatchThreads:MTLSizeMake(d.W, d.H, (NSUInteger)batch_size * d.C) threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+        }
+        return 1;
+    }
 
     // A direct conv has no columns from the forward pass: its weight
     // gradient reads the input instead, unless it is big enough for the GEMM

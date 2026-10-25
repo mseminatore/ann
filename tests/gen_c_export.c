@@ -3,8 +3,8 @@
 //
 // Trains a small dense network and a small CNN, quantizes them, and writes
 // into the output directory:
-//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h, bn_q.h   int8 headers (ann_export_c_header with the int8 model)
-//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h, bn_f.h   float32 headers (ann_export_c_header without it)
+//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h, bn_q.h, dw_q.h   int8 headers (ann_export_c_header with the int8 model)
+//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h, bn_f.h, dw_f.h   float32 headers (ann_export_c_header without it)
 //   expected.h           test inputs and libann's outputs for them:
 //                        ann_quantized_predict_int8, ann_quantized_predict and
 //                        ann_predict
@@ -220,6 +220,18 @@ int main(int argc, char *argv[])
 	ann_add_layer(bn, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 	err |= export_model(bn, argv[1], "bn", expected, 5);
 	ann_free_network(bn);
+
+	// a depthwise separable block (MobileNet) after a grouped conv
+	PNetwork dw = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+	ann_add_input(dw, 2, 7, 7);
+	ann_add_conv2d_grouped(dw, 4, 3, 1, 1, 2, ACTIVATION_RELU);
+	ann_add_depthwise_conv2d(dw, 2, 3, 2, 1, ACTIVATION_NULL);
+	ann_add_batchnorm(dw, ACTIVATION_RELU);
+	ann_add_conv2d(dw, 6, 1, 1, 0, ACTIVATION_SIGMOID);
+	ann_add_global_avgpool2d(dw);
+	ann_add_layer(dw, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+	err |= export_model(dw, argv[1], "dw", expected, 6);
+	ann_free_network(dw);
 
 	if (fclose(expected) != 0 || err != ERR_OK)
 	{

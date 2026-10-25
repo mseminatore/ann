@@ -114,7 +114,7 @@ static int weight_count(const ann_rt_layer *l)
 	if (l->kind == ANN_RT_DENSE)
 		return l->out_c * l->in_c * l->in_h * l->in_w;
 	if (l->kind == ANN_RT_CONV2D)
-		return l->out_c * l->in_c * l->size * l->size;
+		return l->out_c * ann_rt_group_channels(l) * l->size * l->size;
 	return 0;
 }
 
@@ -223,6 +223,7 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 		l->size = size;
 		l->stride = stride;
 		l->pad = pad;
+		l->groups = ann_get_layer_groups(pnet, k);
 
 		switch (src->kind)
 		{
@@ -455,7 +456,7 @@ void ann_free_quantized(PQuantizedNetwork q)
 static int quantize_layer(ann_rt_layer *l, const ann_rt_layer *f, float x_scale, int32_t x_zp,
                           Range z, Range y, float *y_scale, int32_t *y_zp)
 {
-	int n_in = f->kind == ANN_RT_DENSE ? f->in_c * f->in_h * f->in_w : f->in_c * f->size * f->size;
+	int n_in = weight_count(f) / f->out_c;
 	float t_scale;				// scale and zero point the sums are rescaled to
 	int32_t t_zp;
 	int8_t *w_q = malloc((size_t)f->out_c * n_in);
@@ -791,15 +792,10 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 	fprintf(f, " *   class = %s_argmax(output);\n */\n\n", prefix);
 
 	fprintf(f, "#ifndef %s_H\n#define %s_H\n\n#include \"ann_rt.h\"\n\n", upper, upper);
-	// the oldest runtime that has every layer kind the model uses
-	int rt_version = 1;
-	for (int n = 0; n < m->layer_count; n++)
-		if (m->layers[n].kind == ANN_RT_GLOBAL_AVGPOOL2D)
-			rt_version = 3;
-		else if (m->layers[n].kind == ANN_RT_UPSAMPLE2D && rt_version < 2)
-			rt_version = 2;
+	// the header initializes every ann_rt_layer field (so it builds without
+	// missing-initializer warnings), so it needs the runtime that has them all
 	fprintf(f, "#if !defined(ANN_RT_VERSION) || ANN_RT_VERSION < %d\n#error \"%s.h needs ann_rt.h version %d or later\"\n#endif\n\n",
-	        rt_version, prefix, rt_version);
+	        ANN_RT_VERSION, prefix, ANN_RT_VERSION);
 	fprintf(f, "#define %s_INPUT_SIZE %d\n", upper, (int)m->input_size);
 	fprintf(f, "#define %s_OUTPUT_SIZE %d\n", upper, (int)m->output_size);
 	fprintf(f, "#define %s_WORKSPACE_SIZE %d\n", upper, ws);
@@ -857,9 +853,9 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 		else
 			fprintf(f, "\t  NULL, NULL, NULL, NULL, %d, %d, %d, NULL,\n", (int)l->in_zp, (int)l->zp, (int)l->act_min);
 		if (!quantized && w)
-			fprintf(f, "\t  %s_w%d, %s_b%d },\n", prefix, n, prefix, n);
+			fprintf(f, "\t  %s_w%d, %s_b%d, %d },\n", prefix, n, prefix, n, (int)l->groups);
 		else
-			fprintf(f, "\t  NULL, NULL },\n");
+			fprintf(f, "\t  NULL, NULL, %d },\n", (int)l->groups);
 	}
 	fprintf(f, "};\n\n");
 

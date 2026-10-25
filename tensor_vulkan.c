@@ -117,7 +117,7 @@ typedef enum {
     K_BIAS_GRAD_SUM, K_OPTIMIZER, K_DROPOUT,
     K_CONV_IM2COL, K_CONV_OUTPUT, K_CONV_GRAD_ROWS, K_CONV_COL2IM,
     K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_GLOBAL_AVGPOOL, K_BATCHNORM, K_SUM_PARTIALS,
-    K_CONV_DIRECT_FORWARD, K_CONV_DIRECT_INPUT_GRAD, K_CONV_DIRECT_WEIGHT_GRAD,
+    K_CONV_DIRECT_FORWARD, K_CONV_DIRECT_INPUT_GRAD, K_CONV_DIRECT_WEIGHT_GRAD, K_CONV_GROUPED,
     K_COUNT
 } Kernel;
 
@@ -151,6 +151,7 @@ static const struct {
     { SPV(conv_direct_forward), 0, 0 },
     { SPV(conv_direct_input_grad), 0, 0 },
     { SPV(conv_direct_weight_grad), 0, 0 },
+    { SPV(conv_grouped), 0, 0 },
 };
 
 // Kernel names for the ANN_VK_PROFILE report; the last is the copies and fills
@@ -160,7 +161,7 @@ static const char *const g_kernel_names[K_COUNT + 1] = {
     "bias_grad_sum", "optimizer", "dropout",
     "conv_im2col", "conv_output", "conv_grad_rows", "conv_col2im",
     "maxpool_forward", "maxpool_backward", "upsample", "global_avgpool", "batchnorm", "sum_partials",
-    "conv_direct_forward", "conv_direct_input_grad", "conv_direct_weight_grad",
+    "conv_direct_forward", "conv_direct_input_grad", "conv_direct_weight_grad", "conv_grouped",
     "copy / fill",
 };
 #define K_TRANSFER K_COUNT
@@ -1472,6 +1473,12 @@ static void free_scratch(void)
 // The direct weight gradient aims for about this many workgroups
 #define CONV_DIRECT_GROUPS  256
 
+// push constants of conv_grouped.comp
+typedef struct {
+    WindowDims d;
+    uint32_t groups, mode, act, save_z;
+} GroupedParams;
+
 static int conv_direct(const WindowDims *d)
 {
     static int limit = -1;
@@ -1525,6 +1532,13 @@ static int ensure_layer_scratch(PNetwork pnet, int rows, int training)
         {
             WindowDims d = window_dims(pnet, layer, rows);
             size_t out_rows = (size_t)rows * d.OH * d.OW, patch = (size_t)d.C * d.K * d.K;
+            // a grouped conv needs only gradient rows (conv_grouped.comp)
+            if (ann_get_layer_groups(pnet, layer) > 1)
+            {
+                if (training && !layer_scratch(layer, SCRATCH_ROWS, out_rows * d.F * sizeof(float)))
+                    return 0;
+                continue;
+            }
             if (conv_direct(&d))
             {
                 if (training &&
@@ -1565,7 +1579,7 @@ static size_t forward_bytes_per_sample(const PNetwork pnet)
         const Layer *l = &pnet->layers[layer];
         if ((size_t)l->node_count > max_nodes)
             max_nodes = (size_t)l->node_count;
-        if (l->kind == LAYER_KIND_CONV2D && l->shape.c > CONV_DIRECT_FILTERS)
+        if (l->kind == LAYER_KIND_CONV2D && l->shape.c > CONV_DIRECT_FILTERS && ann_get_layer_groups(pnet, layer) == 1)
             floats += (size_t)l->shape.h * l->shape.w * (l->params[0].value->cols + l->shape.c);
         else if (l->kind == LAYER_KIND_MAXPOOL2D)
             floats += (size_t)l->node_count;
@@ -1585,6 +1599,16 @@ static void encode_conv_forward(PNetwork pnet, int layer, int batch_size, VkBuf 
     WindowDims d = window_dims(pnet, layer, batch_size);
     uint32_t out_rows = (uint32_t)batch_size * d.OH * d.OW, patch = d.C * d.K * d.K;
     struct { WindowDims d; uint32_t act, save_z; } p = { d, (uint32_t)l->activation, Z != NULL };
+
+    uint32_t groups = (uint32_t)ann_get_layer_groups(pnet, layer);
+    if (groups > 1)
+    {
+        GroupedParams gp = { d, groups, 0, (uint32_t)l->activation, Z != NULL };
+        VkBuf *bufs[5] = { X, (VkBuf *)l->params[0].value->gpu_buf, (VkBuf *)l->params[1].value->gpu_buf,
+                           Y, Z ? Z : Y };
+        cmd_dispatch(K_CONV_GROUPED, bufs, 5, &gp, sizeof(gp), groups_for((size_t)l->node_count * batch_size, 256), 1);
+        return;
+    }
 
     if (conv_direct(&d))
     {
@@ -1631,6 +1655,24 @@ static void encode_conv_backward(PNetwork pnet, int layer, int batch_size, VkBuf
     struct { WindowDims d; uint32_t act; } p = { d, (uint32_t)act };
     VkBuf *row_bufs[3] = { dZ, dz_rows, (VkBuf *)(act == ACTIVATION_GELU ? l->t_batch_z : l->t_batch_values)->gpu_buf };
     cmd_dispatch(K_CONV_GRAD_ROWS, row_bufs, 3, &p, sizeof(p), groups_for((size_t)l->node_count * batch_size, 256), 1);
+
+    // a grouped conv: a workgroup per weight (and bias) sums its rows, and each input
+    // gathers its gradient from its group's filters
+    uint32_t groups = (uint32_t)ann_get_layer_groups(pnet, layer);
+    if (groups > 1)
+    {
+        GroupedParams wp = { d, groups, 2, 0, 0 };
+        VkBuf *grad_bufs[4] = { dz_rows, X, dW, db };
+        cmd_dispatch(K_CONV_GROUPED, grad_bufs, 4, &wp, sizeof(wp), patch / groups + 1, d.F);
+        if (dX)
+        {
+            GroupedParams ip = { d, groups, 1, 0, 0 };
+            VkBuf *dx_bufs[3] = { dz_rows, W, dX };
+            cmd_dispatch(K_CONV_GROUPED, dx_bufs, 3, &ip, sizeof(ip),
+                         groups_for((size_t)batch_size * d.C * d.H * d.W, 256), 1);
+        }
+        return;
+    }
 
     if (conv_direct(&d))
     {

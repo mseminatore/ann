@@ -6,11 +6,13 @@ runtime. The int8 path is integer-only, so it runs on cores without an FPU. It n
 beyond `<stddef.h>` and `<stdint.h>`, never calls `malloc`, and never recurses. A float32 export
 is also available for targets with an FPU.
 
-Supported layers: dense, conv2d (any kernel, stride, padding), maxpool2d, flatten, upsample2d
-and reshape, with every activation (softmax only on the output layer).
+Supported layers: dense, conv2d (any kernel, stride, padding), maxpool2d, global average
+pooling, flatten, upsample2d and reshape, with every activation (softmax only on the output
+layer). Global average pooling keeps its input's int8 quantization and rounds each mean half
+away from the zero point.
 
 A generated header checks for the `ann_rt.h` version it needs: 1 for most models, 2 for models
-with upsampling layers. Copy `ann_rt.h` from the libann that exported the model. Headers
+with upsampling layers, 3 for models with global average pooling. Copy `ann_rt.h` from the libann that exported the model. Headers
 exported by libann 0.7 (pyann 0.7.0) require exactly version 1; re-export them to use the
 newer runtime.
 

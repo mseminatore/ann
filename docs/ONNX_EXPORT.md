@@ -18,7 +18,9 @@ ann_export_onnx(pnet, "model.onnx.json");
 - Upsampling layers export `Resize` (`mode = nearest`, `asymmetric`
   coordinates, `floor` rounding, as PyTorch writes `nn.Upsample`) with a
   `scales` initializer `[1, 1, s, s]`; reshape layers export `Reshape` with a
-  shape initializer `[-1, C, H, W]`. A model that starts with dense layers
+  shape initializer `[-1, C, H, W]`. Global average pooling layers export
+  `GlobalAveragePool` (output `[batch, C, 1, 1]`, flattened before a dense
+  layer). A model that starts with dense layers
   keeps a `[batch, n]` input.
 - `weight_N` has dims `[in_nodes, out_nodes]`, the layout ONNX `MatMul` expects
   (libann stores weights as `[out, in]` internally and transposes them on export)
@@ -55,6 +57,7 @@ ONNX node | libann layer
 `Gemm` | dense layer (`transB = 1` as written by PyTorch's `Linear`, or `transB = 0`; `alpha = beta = 1`)
 `Conv` | conv layer (square kernel, equal strides and pads, no dilation or groups; bias optional)
 `MaxPool` | max pooling layer (square window, equal strides, no padding, `ceil_mode = 0`)
+`GlobalAveragePool` | global average pooling layer (as PyTorch writes `nn.AdaptiveAvgPool2d(1)`)
 `Flatten` (axis 1) | flatten layer (libann's own `flatten_input_N` nodes are skipped)
 `Resize`, `Upsample` | upsampling layer (`nearest` mode, one integer scale on H and W from `scales` or output `sizes`; `asymmetric` coordinates with `floor` rounding, or `half_pixel` with rounding)
 `Reshape` | reshape layer to a constant `[batch, C, H, W]` shape (`0` copies a dimension, one `-1` is inferred); a `[batch, n]` shape is a flatten

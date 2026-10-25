@@ -183,7 +183,7 @@ if ( USE_VULKAN )
     set(VULKAN_SHADERS gemm bias_act softmax act_deriv softmax_jacobian output_delta_loss
                        bias_grad_sum optimizer dropout
                        conv_im2col conv_output conv_grad_rows conv_col2im
-                       maxpool_forward maxpool_backward upsample sum_partials
+                       maxpool_forward maxpool_backward upsample global_avgpool sum_partials
                        conv_direct_forward conv_direct_input_grad conv_direct_weight_grad)
     set(VULKAN_SPV_DIR ${CMAKE_CURRENT_BINARY_DIR}/vk_spv)
     file(MAKE_DIRECTORY ${VULKAN_SPV_DIR})
@@ -406,7 +406,7 @@ target_link_libraries(gen_c_export libann ${BLAS_LIB} ${MATH_LIB})
 set(C_EXPORT_DIR ${CMAKE_CURRENT_BINARY_DIR}/c_export)
 set(C_EXPORT_FILES ${C_EXPORT_DIR}/ann_rt.h ${C_EXPORT_DIR}/expected.h
     ${C_EXPORT_DIR}/dense_q.h ${C_EXPORT_DIR}/dense_f.h ${C_EXPORT_DIR}/cnn_q.h ${C_EXPORT_DIR}/cnn_f.h
-    ${C_EXPORT_DIR}/ae_q.h ${C_EXPORT_DIR}/ae_f.h)
+    ${C_EXPORT_DIR}/ae_q.h ${C_EXPORT_DIR}/ae_f.h ${C_EXPORT_DIR}/gap_q.h ${C_EXPORT_DIR}/gap_f.h)
 add_custom_command(OUTPUT ${C_EXPORT_FILES}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${C_EXPORT_DIR}
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/ann_rt.h ${C_EXPORT_DIR}/ann_rt.h

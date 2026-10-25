@@ -114,6 +114,8 @@ typedef struct {
     id<MTLComputePipelineState> pso_conv_direct_weight_grad;
     id<MTLComputePipelineState> pso_upsample_forward;
     id<MTLComputePipelineState> pso_upsample_backward;
+    id<MTLComputePipelineState> pso_global_avgpool_forward;
+    id<MTLComputePipelineState> pso_global_avgpool_backward;
     id<MTLComputePipelineState> pso_copy_buffer;
     id<MTLComputePipelineState> pso_transpose;
     // Transposed copies of GEMM right-hand operands, by source buffer (see
@@ -873,7 +875,26 @@ int tensor_metal_init(void)
         "    float s = 0.0f;\n"
         "    for (uint i = 0; i < d.K; i++)\n"
         "        for (uint j = 0; j < d.K; j++) s += block[i * d.OW + j];\n"
-        "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n";
+        "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
+        // Global average pooling: each channel's mean, summed in the CPU's
+        // order; grid (batch*C)
+        "kernel void global_avgpool_forward(\n"
+        "    device const float *x [[buffer(0)]],\n"
+        "    device float *y [[buffer(1)]],\n"
+        "    constant WindowDims &d [[buffer(2)]],\n"
+        "    uint gid [[thread_position_in_grid]]) {\n"
+        "    uint area = d.H * d.W;\n"
+        "    device const float *plane = x + gid * area;\n"
+        "    float s = 0.0f;\n"
+        "    for (uint i = 0; i < area; i++) s += plane[i];\n"
+        "    y[gid] = s / (float)area; }\n"
+        // dx = the channel's dz / (H*W); grid (W, H, batch*C)
+        "kernel void global_avgpool_backward(\n"
+        "    device const float *dz [[buffer(0)]],\n"
+        "    device float *dx [[buffer(1)]],\n"
+        "    constant WindowDims &d [[buffer(2)]],\n"
+        "    uint3 gid [[thread_position_in_grid]]) {\n"
+        "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = dz[gid.z] / (float)(d.H * d.W); }\n";
 
     NSError *err = nil;
     NSString *src = [NSString stringWithFormat:
@@ -952,6 +973,8 @@ int tensor_metal_init(void)
     g_metal.pso_conv_direct_weight_grad = make_pso(g_metal.library, "conv_direct_weight_grad");
     g_metal.pso_upsample_forward = make_pso(g_metal.library, "upsample_forward");
     g_metal.pso_upsample_backward = make_pso(g_metal.library, "upsample_backward");
+    g_metal.pso_global_avgpool_forward = make_pso(g_metal.library, "global_avgpool_forward");
+    g_metal.pso_global_avgpool_backward = make_pso(g_metal.library, "global_avgpool_backward");
     g_metal.pso_copy_buffer      = make_pso(g_metal.library, "copy_buffer");
     g_metal.pso_transpose        = make_pso(g_metal.library, "transpose");
 
@@ -964,6 +987,7 @@ int tensor_metal_init(void)
         !g_metal.pso_conv_direct_forward || !g_metal.pso_conv_direct_input_grad ||
         !g_metal.pso_conv_direct_weight_grad || !g_metal.pso_copy_buffer ||
         !g_metal.pso_upsample_forward || !g_metal.pso_upsample_backward ||
+        !g_metal.pso_global_avgpool_forward || !g_metal.pso_global_avgpool_backward ||
         !g_metal.pso_transpose)
         return 0;
 
@@ -1572,6 +1596,25 @@ static void encode_upsample_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, in
 }
 
 //-----------------------------------------------------------
+// GlobalAvgPool2D forward and backward: one thread per output, no atomics
+//-----------------------------------------------------------
+static void encode_global_avgpool_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
+                                          id<MTLBuffer> X, id<MTLBuffer> Y)
+{
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    id<MTLBuffer> bufs[2] = { X, Y };
+    encode_grid(cmd, g_metal.pso_global_avgpool_forward, bufs, 2, &d, sizeof(d), MTLSizeMake((NSUInteger)batch_size * d.C, 1, 1));
+}
+
+static void encode_global_avgpool_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
+                                           id<MTLBuffer> dZ, id<MTLBuffer> dX)
+{
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    id<MTLBuffer> bufs[2] = { dZ, dX };
+    encode_grid(cmd, g_metal.pso_global_avgpool_backward, bufs, 2, &d, sizeof(d), MTLSizeMake(d.W, d.H, (NSUInteger)batch_size * d.C));
+}
+
+//-----------------------------------------------------------
 // 1 if every parameter of the layer is on the GPU
 //-----------------------------------------------------------
 static int layer_on_gpu(const Layer *l)
@@ -1637,6 +1680,9 @@ static int encode_layer_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
         break;
     case LAYER_KIND_UPSAMPLE2D:
         encode_upsample_forward(cmd, pnet, layer, batch_size, X, Y);
+        break;
+    case LAYER_KIND_GLOBAL_AVGPOOL2D:
+        encode_global_avgpool_forward(cmd, pnet, layer, batch_size, X, Y);
         break;
     case LAYER_KIND_FLATTEN:
     case LAYER_KIND_RESHAPE:
@@ -1714,7 +1760,8 @@ static int metal_upload_network(PNetwork pnet)
     for (int layer = 0; layer < pnet->layer_count; layer++) {
         Layer_kind kind = pnet->layers[layer].kind;
         if (kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D && kind != LAYER_KIND_MAXPOOL2D &&
-            kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE)
+            kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE &&
+            kind != LAYER_KIND_GLOBAL_AVGPOOL2D)
             return ERR_INVALID;
     }
 
@@ -2168,6 +2215,9 @@ static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_si
             break;
         case LAYER_KIND_UPSAMPLE2D:
             if (dX) encode_upsample_backward(cmd, pnet, li, batch_size, dl_dz, dX);
+            break;
+        case LAYER_KIND_GLOBAL_AVGPOOL2D:
+            if (dX) encode_global_avgpool_backward(cmd, pnet, li, batch_size, dl_dz, dX);
             break;
         case LAYER_KIND_FLATTEN:
         case LAYER_KIND_RESHAPE:

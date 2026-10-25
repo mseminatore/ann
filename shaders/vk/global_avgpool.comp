@@ -1,0 +1,36 @@
+#version 450
+#include "common.glsl"
+// Global average pooling: each channel's mean over H x W. Forward: one thread
+// per (sample, channel) sums its plane in the CPU's order. Backward: each
+// input gets its channel's dz / (H*W). Both are gathers (no atomics).
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufSrc { float src[]; };
+layout(std430, binding = 1) writeonly buffer BufDst { float dst[]; };
+
+layout(push_constant) uniform Params {
+    WindowDims d;
+    uint backward;
+} pc;
+
+void main()
+{
+    WindowDims d = pc.d;
+    uint area = d.H * d.W;
+    if (pc.backward == 0)
+    {
+        GRID_LOOP(plane, d.batch * d.C)
+        {
+            float s = 0.0;
+            for (uint i = 0; i < area; i++)
+                s += src[plane * area + i];
+            dst[plane] = s / float(area);
+        }
+    }
+    else
+    {
+        GRID_LOOP(idx, d.batch * d.C * area)
+            dst[idx] = src[idx / area] / float(area);
+    }
+}

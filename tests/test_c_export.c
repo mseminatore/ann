@@ -14,10 +14,12 @@
 #include "dense_q.h"
 #include "cnn_q.h"
 #include "ae_q.h"
+#include "gap_q.h"
 #ifndef ANN_RT_NO_FLOAT
 #	include "dense_f.h"
 #	include "cnn_f.h"
 #	include "ae_f.h"
+#	include "gap_f.h"
 #endif
 #include "expected.h"
 
@@ -36,7 +38,7 @@ static float absf(float v) { return v < 0.0f ? -v : v; }
 
 int main(void)
 {
-	static int8_t ws_q[DENSE_Q_WORKSPACE_SIZE + CNN_Q_WORKSPACE_SIZE + AE_Q_WORKSPACE_SIZE];
+	static int8_t ws_q[DENSE_Q_WORKSPACE_SIZE + CNN_Q_WORKSPACE_SIZE + AE_Q_WORKSPACE_SIZE + GAP_Q_WORKSPACE_SIZE];
 	int8_t out_q[8];
 	int same, argmax;
 	int r;
@@ -71,9 +73,15 @@ int main(void)
 		        memcmp(out_q, ae_y_int8[r], AE_Q_OUTPUT_SIZE) == 0;
 	check("reshape/upsample int8 header matches libann bit for bit", same);
 
+	same = 1;
+	for (r = 0; r < ROWS; r++)
+		same &= gap_q_predict(gap_x_q[r], out_q, ws_q) == 0 &&
+		        memcmp(out_q, gap_y_int8[r], GAP_Q_OUTPUT_SIZE) == 0;
+	check("global avg pool int8 header matches libann bit for bit", same);
+
 #ifndef ANN_RT_NO_FLOAT
 	{
-		static float ws_f[DENSE_F_WORKSPACE_SIZE + CNN_F_WORKSPACE_SIZE + AE_F_WORKSPACE_SIZE];
+		static float ws_f[DENSE_F_WORKSPACE_SIZE + CNN_F_WORKSPACE_SIZE + AE_F_WORKSPACE_SIZE + GAP_F_WORKSPACE_SIZE];
 		float out_f[8], worst;
 		int k;
 
@@ -95,6 +103,12 @@ int main(void)
 			same &= ae_q_predict_float(ae_x[r], out_f, ws_q) == 0 &&
 			        memcmp(out_f, ae_y_q[r], sizeof(float) * AE_Q_OUTPUT_SIZE) == 0;
 		check("reshape/upsample int8 header with float I/O matches libann exactly", same);
+
+		same = 1;
+		for (r = 0; r < ROWS; r++)
+			same &= gap_q_predict_float(gap_x[r], out_f, ws_q) == 0 &&
+			        memcmp(out_f, gap_y_q[r], sizeof(float) * GAP_Q_OUTPUT_SIZE) == 0;
+		check("global avg pool int8 header with float I/O matches libann exactly", same);
 
 		// the float headers: ann_predict up to float summation order
 		worst = 0.0f;
@@ -129,6 +143,16 @@ int main(void)
 					worst = absf(out_f[k] - ae_y_float[r][k]);
 		}
 		check("reshape/upsample float header matches ann_predict (1e-5)", worst <= 1e-5f);
+
+		worst = 0.0f;
+		for (r = 0; r < ROWS; r++)
+		{
+			gap_f_predict(gap_x[r], out_f, ws_f);
+			for (k = 0; k < GAP_F_OUTPUT_SIZE; k++)
+				if (absf(out_f[k] - gap_y_float[r][k]) > worst)
+					worst = absf(out_f[k] - gap_y_float[r][k]);
+		}
+		check("global avg pool float header matches ann_predict (1e-5)", worst <= 1e-5f);
 	}
 #endif
 

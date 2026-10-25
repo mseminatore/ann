@@ -23,7 +23,8 @@
 
 //================================================================================================
 // Vulkan GPU backend: inference and training on any Vulkan 1.1 GPU (AMD, Intel, NVIDIA) on
-// Windows and Linux, for every layer kind (dense, conv, max pool, upsample, flatten, reshape).
+// Windows and Linux, for every layer kind (dense, conv, max pool, upsample, flatten, reshape,
+// global average pool).
 // See docs/GPU_VULKAN.md.
 //
 // - The Vulkan loader is opened at run time (vulkan-1.dll / libvulkan.so.1), so a build with
@@ -115,7 +116,7 @@ typedef enum {
     K_BIAS_ACT, K_SOFTMAX, K_ACT_DERIV, K_SOFTMAX_JACOBIAN, K_OUTPUT_DELTA_LOSS,
     K_BIAS_GRAD_SUM, K_OPTIMIZER, K_DROPOUT,
     K_CONV_IM2COL, K_CONV_OUTPUT, K_CONV_GRAD_ROWS, K_CONV_COL2IM,
-    K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_SUM_PARTIALS,
+    K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_GLOBAL_AVGPOOL, K_SUM_PARTIALS,
     K_CONV_DIRECT_FORWARD, K_CONV_DIRECT_INPUT_GRAD, K_CONV_DIRECT_WEIGHT_GRAD,
     K_COUNT
 } Kernel;
@@ -144,6 +145,7 @@ static const struct {
     { SPV(maxpool_forward), 0, 0 },
     { SPV(maxpool_backward), 0, 0 },
     { SPV(upsample), 0, 0 },
+    { SPV(global_avgpool), 0, 0 },
     { SPV(sum_partials), 0, 0 },
     { SPV(conv_direct_forward), 0, 0 },
     { SPV(conv_direct_input_grad), 0, 0 },
@@ -156,7 +158,7 @@ static const char *const g_kernel_names[K_COUNT + 1] = {
     "bias_act", "softmax", "act_deriv", "softmax_jacobian", "output_delta_loss",
     "bias_grad_sum", "optimizer", "dropout",
     "conv_im2col", "conv_output", "conv_grad_rows", "conv_col2im",
-    "maxpool_forward", "maxpool_backward", "upsample", "sum_partials",
+    "maxpool_forward", "maxpool_backward", "upsample", "global_avgpool", "sum_partials",
     "conv_direct_forward", "conv_direct_input_grad", "conv_direct_weight_grad",
     "copy / fill",
 };
@@ -1698,6 +1700,16 @@ static void encode_upsample(PNetwork pnet, int layer, int batch_size, VkBuf *src
     cmd_dispatch(K_UPSAMPLE, bufs, 2, &p, sizeof(p), groups_for(count, 256), 1);
 }
 
+// GlobalAvgPool2D forward (src = X, dst = Y) or backward (src = dZ, dst = dX)
+static void encode_global_avgpool(PNetwork pnet, int layer, int batch_size, VkBuf *src, VkBuf *dst, int backward)
+{
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    struct { WindowDims d; uint32_t backward; } p = { d, (uint32_t)backward };
+    VkBuf *bufs[2] = { src, dst };
+    size_t count = (size_t)batch_size * d.C * (backward ? d.H * d.W : 1);
+    cmd_dispatch(K_GLOBAL_AVGPOOL, bufs, 2, &p, sizeof(p), groups_for(count, 256), 1);
+}
+
 //-----------------------------------------------------------
 // Encode a layer's forward pass for a batch: the kind's linear part (dense:
 // Y = X * W^T + b), then (when Z is given) save the values before activation (GELU only
@@ -1733,6 +1745,9 @@ static void encode_layer_forward(PNetwork pnet, int layer, int rows, VkBuf *X, V
         break;
     case LAYER_KIND_UPSAMPLE2D:
         encode_upsample(pnet, layer, rows, X, Y, 0);
+        break;
+    case LAYER_KIND_GLOBAL_AVGPOOL2D:
+        encode_global_avgpool(pnet, layer, rows, X, Y, 0);
         break;
     case LAYER_KIND_FLATTEN:
     case LAYER_KIND_RESHAPE:
@@ -1825,7 +1840,8 @@ static int vk_upload_network(PNetwork pnet)
     {
         Layer_kind kind = pnet->layers[layer].kind;
         if (kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D && kind != LAYER_KIND_MAXPOOL2D &&
-            kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE)
+            kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE &&
+            kind != LAYER_KIND_GLOBAL_AVGPOOL2D)
             return ERR_INVALID;
     }
 
@@ -2142,6 +2158,10 @@ static void encode_backward(PNetwork pnet, int batch_size, VkSlot *slot)
         case LAYER_KIND_UPSAMPLE2D:
             if (dX)
                 encode_upsample(pnet, li, batch_size, dl_dz, dX, 1);
+            break;
+        case LAYER_KIND_GLOBAL_AVGPOOL2D:
+            if (dX)
+                encode_global_avgpool(pnet, li, batch_size, dl_dz, dX, 1);
             break;
         case LAYER_KIND_FLATTEN:
         case LAYER_KIND_RESHAPE:

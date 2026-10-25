@@ -781,6 +781,29 @@ void test_main(int argc, char *argv[])
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 
+        // global average pooling in place of pool + flatten
+        cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        gpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        PNetwork gap[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(gap[i], 2, 9, 9);
+            ann_add_conv2d(gap[i], 4, 3, 1, 1, ACTIVATION_RELU);   // 4x9x9
+            ann_add_conv2d(gap[i], 6, 3, 2, 0, ACTIVATION_TANH);   // 6x4x4
+            ann_add_global_avgpool2d(gap[i]);                      // 6x1x1
+            ann_add_layer(gap[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(gap[i], 0.01f);
+            ann_set_convergence(gap[i], 0.0f);
+            ann_set_epoch_limit(gap[i], 3);
+            ann_set_batch_size(gap[i], 8);
+        }
+        TESTEX("A network with global average pooling uploads", ann_gpu_upload_network(gpu_net) == ERR_OK);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU conv -> global avg pool training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        TESTEX("and its inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
         // pooling straight off the input: the first layer has no parameters
         PNetwork pool_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
         ann_add_input(pool_net, 2, 9, 9);

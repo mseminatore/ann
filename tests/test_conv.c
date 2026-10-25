@@ -1,5 +1,5 @@
 //-----------------------------------------------------------
-// Convolution, max pooling and flatten layers.
+// Convolution, max pooling, global average pooling and flatten layers.
 //
 // Shapes and argument checks, forward passes against naive reference loops,
 // finite-difference gradient checks of every parameter (which also checks the
@@ -263,6 +263,42 @@ static PNetwork make_bar_autoencoder(void)
     ann_add_maxpool2d(net, 2, 2);                        // 4x3x3
     ann_add_upsample2d(net, 2);                          // 4x6x6
     ann_add_conv2d(net, 1, 3, 1, 1, ACTIVATION_SIGMOID); // 1x6x6
+    ann_set_learning_rate(net, 0.01f);
+    ann_set_convergence(net, 0.0f);
+    ann_set_batch_size(net, 8);
+    return net;
+}
+
+// 2x4x4 -> conv(3, k3, padding 1, tanh) -> global avg pool (3x1x1) -> dense(2, linear), MSE
+static PNetwork net_global_avgpool(void)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_input(net, 2, 4, 4);
+    ann_add_conv2d(net, 3, 3, 1, 1, ACTIVATION_TANH);
+    ann_add_global_avgpool2d(net);
+    ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_NULL);
+    return net;
+}
+
+// global avg pool as the output: 1x5x3 -> conv(2, k2, sigmoid) -> global avg pool, MSE
+static PNetwork net_global_avgpool_out(void)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_input(net, 1, 5, 3);
+    ann_add_conv2d(net, 2, 2, 1, 0, ACTIVATION_SIGMOID);
+    ann_add_global_avgpool2d(net);
+    return net;
+}
+
+// the bars classifier with global average pooling in place of pool + flatten
+static PNetwork make_bar_gap_net(void)
+{
+    PNetwork net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+    net->print_func = quiet;
+    ann_add_input(net, 1, 6, 6);
+    ann_add_conv2d(net, 4, 3, 1, 1, ACTIVATION_RELU);
+    ann_add_global_avgpool2d(net);
+    ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
     ann_set_learning_rate(net, 0.01f);
     ann_set_convergence(net, 0.0f);
     ann_set_batch_size(net, 8);
@@ -827,6 +863,157 @@ void test_main(int argc, char *argv[])
         TESTEX("A plain nearest Resize imports", imported[0]);
         TESTEX("Linear, fractional and asymmetric-rounding resizes are rejected",
                !imported[1] && !imported[2] && !imported[3]);
+        remove(onnx);
+    }
+    SUITE("Global Average Pooling");
+    {
+        PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 3, 4, 5);
+        TESTEX("Global avg pool: 3x4x5 -> 3x1x1", ann_add_global_avgpool2d(net) == ERR_OK &&
+               net->layers[1].shape.c == 3 && net->layers[1].shape.h == 1 && net->layers[1].shape.w == 1 &&
+               net->layers[1].node_count == 3 && net->layers[1].param_count == 0 &&
+               ann_get_layer_kind(net, 1) == LAYER_KIND_GLOBAL_AVGPOOL2D);
+        int k, st, p;
+        TESTEX("ann_get_layer_settings reports zeros",
+               ann_get_layer_settings(net, 1, &k, &st, &p) == ERR_OK && k == 0 && st == 0 && p == 0);
+        TESTEX("A dense layer follows directly", ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_NULL) == ERR_OK &&
+               net->layers[2].params[0].value->cols == 3);
+        ann_free_network(net);
+
+        net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        TESTEX("Global avg pool as the first layer is rejected", ann_add_global_avgpool2d(net) == ERR_INVALID);
+        ann_free_network(net);
+
+        // each output is its channel's mean; batch and single predictions agree
+        net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 3, 4, 5);
+        ann_add_global_avgpool2d(net);
+        ann_train_begin(net);
+        ann_train_end(net);
+        real x[2 * 60], y[2 * 3], y1[3];
+        for (int i = 0; i < 120; i++) x[i] = (real)sin(0.37 * i) + 0.1f * (real)(i % 7);
+        ann_predict(net, x, y1);
+        int close = 1;
+        for (int c = 0; c < 3; c++) {
+            double sum = 0.0;
+            for (int i = 0; i < 20; i++) sum += x[c * 20 + i];
+            close &= fabs(y1[c] - sum / 20.0) < 1e-6;
+        }
+        TESTEX("Global avg pool output is each channel's mean", close);
+        TESTEX("ann_predict_batch matches ann_predict", ann_predict_batch(net, x, y, 2) == ERR_OK &&
+               memcmp(y, y1, sizeof(y1)) == 0 && fabs(y[3] - (x[60] + x[61] + x[62] + x[63] + x[64] + x[65] +
+               x[66] + x[67] + x[68] + x[69] + x[70] + x[71] + x[72] + x[73] + x[74] + x[75] + x[76] + x[77] +
+               x[78] + x[79]) / 20.0) < 1e-6);
+        ann_free_network(net);
+    }
+    TESTEX("Gradients: conv -> global avg pool -> dense", grad_check(net_global_avgpool(), 0) <= 1.0f);
+    TESTEX("Gradients: non-square conv -> global avg pool output", grad_check(net_global_avgpool_out(), 0) <= 1.0f);
+    {
+        // the bars classifier learns with global average pooling
+        enum { N = 48 };
+        real x[N * 36], y[N * 2];
+        make_bars(x, y, N);
+        PTensor tx = tensor_create_from_array(N, 36, x);
+        PTensor ty = tensor_create_from_array(N, 2, y);
+        PNetwork net = make_bar_gap_net();
+        ann_set_epoch_limit(net, 300);
+        ann_train_network(net, tx, ty, N);
+        real acc = ann_evaluate_accuracy(net, tx, ty);
+        printf("\t  bars with global avg pool: accuracy %.2f\n", acc);
+        TESTEX("A conv + global avg pool classifier learns the bars", acc >= 0.95f);
+
+        TESTEX("Text and binary saves succeed", ann_save_network(net, "test_gap.nna") == ERR_OK &&
+               ann_save_network_binary(net, "test_gap.nnb") == ERR_OK);
+        TESTEX("and write format v2", file_version("test_gap.nna", 0) == 2 && file_version("test_gap.nnb", 1) == 2);
+        PNetwork text = ann_load_network("test_gap.nna");
+        PNetwork bin = ann_load_network_binary("test_gap.nnb");
+        TESTEX("Loaded networks keep the layer kinds", same_structure(net, text) && same_structure(net, bin));
+        TESTEX("Binary load predicts identically", bin && max_pred_diff(net, bin, x, N) == 0.0f);
+        TESTEX("Text load predicts the same (6 decimals)", text && max_pred_diff(net, text, x, N) < 1e-4f);
+        ann_free_network(text);
+        ann_free_network(bin);
+        remove("test_gap.nna");
+        remove("test_gap.nnb");
+
+        const char *onnx = "test_gap.onnx.json";
+        TESTEX("Global avg pool model exports to ONNX", ann_export_onnx(net, onnx) == ERR_OK);
+        TESTEX("with a GlobalAveragePool node, flattened before the dense layer",
+               file_contains(onnx, "\"op_type\": \"GlobalAveragePool\"") &&
+               file_contains(onnx, "\"input\": [\"global_avgpool_1_out\"],\n        \"output\": [\"flatten_input_2_out\"]"));
+        PNetwork back = ann_import_onnx(onnx);
+        TESTEX("and imports with the same structure", same_structure(net, back));
+        TESTEX("and predicts identically", back && max_pred_diff(net, back, x, N) == 0.0f);
+        ann_free_network(back);
+        remove(onnx);
+        tensor_free(tx);
+        tensor_free(ty);
+        ann_free_network(net);
+
+        // a PyTorch-style model (protobuf JSON): Conv(2, k2) + Relu,
+        // GlobalAveragePool, Flatten, Gemm(transB = 1) on a 1x3x3 input
+        static const char *model =
+            "{\"irVersion\":\"8\",\"producerName\":\"pytorch\",\"graph\":{\"node\":["
+            "{\"input\":[\"x\",\"c.w\",\"c.b\"],\"output\":[\"c\"],\"opType\":\"Conv\",\"attribute\":[{\"name\":\"kernel_shape\",\"ints\":[\"2\",\"2\"],\"type\":\"INTS\"}]},"
+            "{\"input\":[\"c\"],\"output\":[\"r\"],\"opType\":\"Relu\"},"
+            "{\"input\":[\"r\"],\"output\":[\"p\"],\"name\":\"/pool/GlobalAveragePool\",\"opType\":\"GlobalAveragePool\"},"
+            "{\"input\":[\"p\"],\"output\":[\"f\"],\"name\":\"/Flatten\",\"opType\":\"Flatten\",\"attribute\":[{\"name\":\"axis\",\"i\":\"1\",\"type\":\"INT\"}]},"
+            "{\"input\":[\"f\",\"fc.w\",\"fc.b\"],\"output\":[\"y\"],\"opType\":\"Gemm\",\"attribute\":[{\"name\":\"transB\",\"i\":\"1\",\"type\":\"INT\"}]}],"
+            "\"name\":\"g\",\"initializer\":["
+            "{\"dims\":[\"2\",\"1\",\"2\",\"2\"],\"dataType\":1,\"name\":\"c.w\",\"floatData\":[0.5,-0.25,0.75,0.125,-0.5,1,0.25,-0.75]},"
+            "{\"dims\":[\"2\"],\"dataType\":1,\"name\":\"c.b\",\"floatData\":[0.1,-0.2]},"
+            "{\"dims\":[\"3\",\"2\"],\"dataType\":1,\"name\":\"fc.w\",\"floatData\":[1,-1,0.5,2,-1.5,0.25]},"
+            "{\"dims\":[\"3\"],\"dataType\":1,\"name\":\"fc.b\",\"floatData\":[0,0.5,-0.5]}],"
+            "\"input\":[{\"name\":\"x\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"1\"},{\"dimValue\":\"3\"},{\"dimValue\":\"3\"}]}}}}],"
+            "\"output\":[{\"name\":\"y\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"3\"}]}}}}]},"
+            "\"opsetImport\":[{\"domain\":\"\",\"version\":\"17\"}]}";
+        static const real cw[8] = { 0.5f, -0.25f, 0.75f, 0.125f, -0.5f, 1.0f, 0.25f, -0.75f };
+        static const real cb[2] = { 0.1f, -0.2f }, fw[6] = { 1, -1, 0.5f, 2, -1.5f, 0.25f }, fb[3] = { 0, 0.5f, -0.5f };
+        FILE *f = fopen(onnx, "w");
+        if (f) {
+            fputs(model, f);
+            fclose(f);
+        }
+        back = ann_import_onnx(onnx);
+        real in[9], out[3];
+        double pooled[2], expected[3];
+        for (int i = 0; i < 9; i++) in[i] = (real)sin(1.3 * i + 0.2);
+        // reference: conv, relu, mean over the 2x2 output, then the linear layer
+        for (int c = 0; c < 2; c++) {
+            pooled[c] = 0.0;
+            for (int oh = 0; oh < 2; oh++)
+                for (int ow = 0; ow < 2; ow++) {
+                    double v = cb[c];
+                    for (int i = 0; i < 2; i++)
+                        for (int j = 0; j < 2; j++)
+                            v += cw[c * 4 + i * 2 + j] * in[(oh + i) * 3 + ow + j];
+                    pooled[c] += (v > 0.0 ? v : 0.0) / 4.0;
+                }
+        }
+        for (int o = 0; o < 3; o++)
+            expected[o] = fb[o] + fw[o * 2] * pooled[0] + fw[o * 2 + 1] * pooled[1];
+        int close = back != NULL;
+        if (back) {
+            ann_predict(back, in, out);
+            for (int o = 0; o < 3; o++)
+                close &= fabs(out[o] - expected[o]) < 1e-5;
+        }
+        TESTEX("External model with GlobalAveragePool imports and matches a reference",
+               close && ann_get_layer_kind(back, 2) == LAYER_KIND_GLOBAL_AVGPOOL2D);
+        ann_free_network(back);
+
+        // it needs an image input
+        f = fopen(onnx, "w");
+        if (f) {
+            fputs("{\"graph\":{\"node\":[{\"input\":[\"x\"],\"output\":[\"y\"],\"op_type\":\"GlobalAveragePool\"}],"
+                  "\"input\":[{\"name\":\"x\",\"type\":{\"tensor_type\":{\"shape\":{\"dim\":[{\"dim_param\":\"N\"},"
+                  "{\"dim_value\":4}]}}}}]}}", f);
+            fclose(f);
+        }
+        back = ann_import_onnx(onnx);
+        TESTEX("GlobalAveragePool on a flat input is rejected", back == NULL);
+        ann_free_network(back);
         remove(onnx);
     }
 }

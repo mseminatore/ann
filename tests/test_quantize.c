@@ -265,6 +265,26 @@ void test_main(int argc, char *argv[])
         ann_free_quantized(q);
         ann_free_network(net);
 
+        // global average pooling in place of flatten
+        net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 1, 6, 6);
+        ann_add_conv2d(net, 4, 3, 1, 1, ACTIVATION_RELU);
+        ann_add_global_avgpool2d(net);
+        ann_add_layer(net, 3, LAYER_OUTPUT, ACTIVATION_TANH);
+        set_params(net);
+        q = ann_quantize(net, x);
+        err = q ? max_error(net, q, x, 0) : 1e9;
+        printf("\t  conv/global avg pool: %.2f steps\n", err);
+        TESTEX("ReLU conv and global avg pool within 5 steps", err <= 5.0);
+        TESTEX("Its header needs ann_rt.h version 3",
+               ann_export_c_header(NULL, q, "test_quantize_gap.h", "gap_q") == ERR_OK &&
+               file_contains("test_quantize_gap.h", "ANN_RT_VERSION < 3") &&
+               file_contains("test_quantize_gap.h", "ANN_RT_GLOBAL_AVGPOOL2D"));
+        remove("test_quantize_gap.h");
+        ann_free_quantized(q);
+        ann_free_network(net);
+
         tensor_free(x);
     }
 

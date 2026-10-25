@@ -3,8 +3,8 @@
 //
 // Trains a small dense network and a small CNN, quantizes them, and writes
 // into the output directory:
-//   dense_q.h, cnn_q.h, ae_q.h   int8 headers (ann_export_c_header with the int8 model)
-//   dense_f.h, cnn_f.h, ae_f.h   float32 headers (ann_export_c_header without it)
+//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h   int8 headers (ann_export_c_header with the int8 model)
+//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h   float32 headers (ann_export_c_header without it)
 //   expected.h           test inputs and libann's outputs for them:
 //                        ann_quantized_predict_int8, ann_quantized_predict and
 //                        ann_predict
@@ -198,6 +198,16 @@ int main(int argc, char *argv[])
 	ann_add_conv2d(ae, 2, 3, 2, 1, ACTIVATION_TANH);
 	err |= export_model(ae, argv[1], "ae", expected, 3);
 	ann_free_network(ae);
+
+	// global average pooling in place of flatten: two convs, pooled, softmax dense output
+	PNetwork gap = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+	ann_add_input(gap, 2, 7, 7);
+	ann_add_conv2d(gap, 4, 3, 1, 1, ACTIVATION_RELU);
+	ann_add_conv2d(gap, 6, 3, 2, 0, ACTIVATION_TANH);
+	ann_add_global_avgpool2d(gap);
+	ann_add_layer(gap, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+	err |= export_model(gap, argv[1], "gap", expected, 4);
+	ann_free_network(gap);
 
 	if (fclose(expected) != 0 || err != ERR_OK)
 	{

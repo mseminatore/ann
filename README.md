@@ -356,11 +356,23 @@ ann_add_maxpool2d | 2-D max pooling per channel
 ann_add_flatten | reshape an image to a vector (optional: dense layers flatten their input)
 ann_add_upsample2d | nearest-neighbour upsampling by an integer scale, per channel
 ann_add_reshape | give the previous layer's values a (channels, height, width) shape
+ann_add_global_avgpool2d | each channel's mean: (C, H, W) to (C, 1, 1)
 
 Output sizes are `(H + 2*padding - kernel) / stride + 1` for convolutions,
 `(H - pool) / stride + 1` for pooling and `H * scale` for upsampling. Settings
 that don't fit the input, a reshape to a different size, or an activation
 other than none on pool/flatten/upsample/reshape layers, return `ERR_INVALID`.
+
+Global average pooling replaces flatten + a large dense layer at the end of a
+CNN: each channel becomes its mean, so the classifier sees one value per
+filter. This removes most of the parameters, which keeps quantized and
+exported models small:
+
+```c
+ann_add_conv2d(net, 32, 3, 1, 1, ACTIVATION_RELU);  // 32x14x14
+ann_add_global_avgpool2d(net);                      // 32 (no flatten needed)
+ann_add_layer(net, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+```
 
 Upsampling and reshape layers build decoders, e.g. a convolutional
 autoencoder trained to reproduce (or denoise) its input:
@@ -382,11 +394,11 @@ ann_train_network(net, x_train, x_train, x_train->rows);  // targets are the inp
 A dense bottleneck turns back into an image with `ann_add_reshape`, e.g.
 `... -> ann_add_layer(net, 392, ...) -> ann_add_reshape(net, 8, 7, 7) -> ann_add_upsample2d(net, 2) -> ...`.
 
-Convolutional networks, including ones with upsample and reshape layers,
-train and run on the GPU with the Metal backend (the CUDA backend returns
+Convolutional networks, including ones with upsample, reshape and global
+average pooling layers, train and run on the GPU with the Metal and Vulkan backends (the CUDA backend returns
 `ERR_INVALID` from `ann_gpu_upload_network()` for them, so they stay on the
 CPU there), save in model format v2, and export to and import
-from ONNX as `Conv`, `MaxPool`, `Flatten`, `Resize` (nearest) and `Reshape`
+from ONNX as `Conv`, `MaxPool`, `GlobalAveragePool`, `Flatten`, `Resize` (nearest) and `Reshape`
 with a `[batch, C, H, W]` input.
 The importer also reads simple CNNs and MLPs exported by other tools, such as
 PyTorch (see [ONNX Export & Import](docs/ONNX_EXPORT.md)). The `fashion_cnn`

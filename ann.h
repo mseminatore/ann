@@ -114,7 +114,8 @@ typedef enum {
 	LAYER_KIND_MAXPOOL2D,				// 2-D max pooling, per channel
 	LAYER_KIND_FLATTEN,					// reshape (C, H, W) to (C*H*W, 1, 1)
 	LAYER_KIND_UPSAMPLE2D,				// nearest-neighbour upsampling by an integer scale, per channel
-	LAYER_KIND_RESHAPE					// give the same values a new (C, H, W) shape
+	LAYER_KIND_RESHAPE,					// give the same values a new (C, H, W) shape
+	LAYER_KIND_GLOBAL_AVGPOOL2D			// each channel's mean: (C, H, W) to (C, 1, 1)
 } Layer_kind;
 
 //------------------------------
@@ -465,6 +466,19 @@ ANN_API int ann_add_upsample2d(PNetwork pnet, int scale);
  *         the previous layer's size) or ERR_ALLOC
  */
 ANN_API int ann_add_reshape(PNetwork pnet, int channels, int height, int width);
+
+/**
+ * Add a global average pooling layer: each channel's mean over H x W.
+ * 
+ * Output shape is (C, 1, 1), so a dense layer can follow directly (no
+ * flatten). Used in place of flatten + a large dense layer at the end of a
+ * CNN, it removes most of the parameters, which keeps quantized and exported
+ * models small. No parameters; maps to an ONNX GlobalAveragePool node.
+ * 
+ * @param pnet Network to add the layer to
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (first layer) or ERR_ALLOC
+ */
+ANN_API int ann_add_global_avgpool2d(PNetwork pnet);
 
 /**
  * Free all memory associated with a network.

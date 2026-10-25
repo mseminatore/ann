@@ -1431,6 +1431,90 @@ static void upsample_backward(PLayer layer, const PTensor X, const PTensor dZ, P
 }
 
 //------------------------------
+// GlobalAvgPool2D: no parameters; each channel's mean, so (C, H, W) becomes
+// (C, 1, 1)
+//------------------------------
+static int global_avgpool_setup(PNetwork pnet, int layer)
+{
+	PLayer cur = &pnet->layers[layer];
+
+	if (cur->activation != ACTIVATION_NULL || cur->shape.c != cur->in_shape.c ||
+		cur->shape.h != 1 || cur->shape.w != 1)
+		return ERR_INVALID;
+	return ERR_OK;
+}
+
+//------------------------------
+// GlobalAvgPool2D forward, split across threads by sample
+//------------------------------
+static void global_avgpool_forward_samples(void *arg, int begin, int end)
+{
+	const pool_job *job = (const pool_job *)arg;
+	PLayer layer = job->layer;
+	int area = layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = begin; b < end; b++)
+	{
+		const real *x = job->x + (size_t)b * layer->node_count * area;
+		real *y = job->y + (size_t)b * layer->node_count;
+
+		for (int c = 0; c < layer->node_count; c++, x += area)
+		{
+			real sum = (real)0.0;
+			for (int i = 0; i < area; i++)
+				sum += x[i];
+			y[c] = sum / (real)area;
+		}
+	}
+}
+
+static void global_avgpool_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	pool_job job;
+
+	job.layer = layer;
+	job.x = X->values;
+	job.y = Y->values;
+	ann_parallel_for(rows, 1, global_avgpool_forward_samples, &job);
+}
+
+//------------------------------
+// GlobalAvgPool2D backward: each input gets its channel's gradient / (H*W)
+//------------------------------
+static void global_avgpool_backward_samples(void *arg, int begin, int end)
+{
+	const pool_job *job = (const pool_job *)arg;
+	PLayer layer = job->layer;
+	int area = layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = begin; b < end; b++)
+	{
+		const real *dz = job->x + (size_t)b * layer->node_count;
+		real *dx = job->y + (size_t)b * layer->node_count * area;
+
+		for (int c = 0; c < layer->node_count; c++, dx += area)
+		{
+			real g = dz[c] / (real)area;
+			for (int i = 0; i < area; i++)
+				dx[i] = g;
+		}
+	}
+}
+
+static void global_avgpool_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
+{
+	pool_job job;
+	(void)X;
+	if (!dX)
+		return;
+
+	job.layer = layer;
+	job.x = dZ->values;
+	job.y = dX->values;
+	ann_parallel_for(rows, 1, global_avgpool_backward_samples, &job);
+}
+
+//------------------------------
 // Operations every layer kind provides
 //------------------------------
 typedef struct {
@@ -1474,6 +1558,8 @@ static void upsample_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, cons
 static void reshape_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
 static void reshape_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
                                char *output, size_t output_size, int *first);
+static void global_avgpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                                      char *output, size_t output_size, int *first);
 
 // indexed by Layer_kind
 static const Layer_ops g_layer_ops[] = {
@@ -1489,6 +1575,8 @@ static const Layer_ops g_layer_ops[] = {
 	  upsample_onnx_initializers, upsample_onnx_nodes },
 	{ "Reshape", 0, reshape_setup, NULL, flatten_forward, NULL, flatten_backward,
 	  reshape_onnx_initializers, reshape_onnx_nodes },
+	{ "GlobalAvgPool2D", 0, global_avgpool_setup, NULL, global_avgpool_forward, NULL, global_avgpool_backward,
+	  no_onnx_initializers, global_avgpool_onnx_nodes },
 };
 
 static const Layer_ops *layer_ops(const Layer *layer)
@@ -2781,6 +2869,20 @@ int ann_add_reshape(PNetwork pnet, int channels, int height, int width)
 		return ERR_INVALID;
 	}
 	return add_layer(pnet, LAYER_KIND_RESHAPE, shape, NULL, 0, LAYER_HIDDEN, ACTIVATION_NULL);
+}
+
+//------------------------------
+// add a global average pooling layer
+//------------------------------
+int ann_add_global_avgpool2d(PNetwork pnet)
+{
+	const Layer_shape *in = last_shape(pnet);
+	Layer_shape shape;
+
+	shape.c = in ? in->c : 1;
+	shape.h = 1;
+	shape.w = 1;
+	return add_layer(pnet, LAYER_KIND_GLOBAL_AVGPOOL2D, shape, NULL, 0, LAYER_HIDDEN, ACTIVATION_NULL);
 }
 
 //------------------------------
@@ -5097,6 +5199,19 @@ static void maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const
 }
 
 //-----------------------------------------------
+// GlobalAveragePool ONNX node: [batch, C, H, W] -> [batch, C, 1, 1]
+//-----------------------------------------------
+static void global_avgpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                                      char *output, size_t output_size, int *first)
+{
+	char name[32];
+	(void)pnet;
+	snprintf(name, sizeof(name), "global_avgpool_%d", layer - 1);
+	snprintf(output, output_size, "global_avgpool_%d_out", layer - 1);
+	write_onnx_node(fptr, "GlobalAveragePool", name, input, output, NULL, first);
+}
+
+//-----------------------------------------------
 // Flatten ONNX node: [batch, C, H, W] -> [batch, C*H*W]
 //-----------------------------------------------
 static void flatten_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
@@ -5183,7 +5298,8 @@ static void reshape_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const
 //-----------------------------------------------
 static int onnx_needs_image(Layer_kind kind)
 {
-	return kind == LAYER_KIND_CONV2D || kind == LAYER_KIND_MAXPOOL2D || kind == LAYER_KIND_UPSAMPLE2D;
+	return kind == LAYER_KIND_CONV2D || kind == LAYER_KIND_MAXPOOL2D || kind == LAYER_KIND_UPSAMPLE2D ||
+	       kind == LAYER_KIND_GLOBAL_AVGPOOL2D;
 }
 
 static int onnx_makes_image(Layer_kind kind)
@@ -5957,6 +6073,16 @@ PNetwork ann_import_onnx(const char *filename)
 			}
 			kind = LAYER_KIND_MAXPOOL2D;
 		}
+		else if (strcmp(op, "GlobalAveragePool") == 0)
+		{
+			// what PyTorch writes for nn.AdaptiveAvgPool2d(1)
+			if (!image)
+			{
+				error = "ann_import_onnx: GlobalAveragePool needs a [batch, C, H, W] input";
+				goto fail;
+			}
+			kind = LAYER_KIND_GLOBAL_AVGPOOL2D;
+		}
 		else if (strcmp(op, "Flatten") == 0)
 		{
 			JsonValue *axis = onnx_attribute(node, "axis");
@@ -6110,6 +6236,7 @@ PNetwork ann_import_onnx(const char *filename)
 		case LAYER_KIND_MAXPOOL2D:	err = ann_add_maxpool2d(pnet, kernel, stride); break;
 		case LAYER_KIND_UPSAMPLE2D:	err = ann_add_upsample2d(pnet, kernel); break;
 		case LAYER_KIND_RESHAPE:	err = ann_add_reshape(pnet, dims4[1], dims4[2], dims4[3]); break;
+		case LAYER_KIND_GLOBAL_AVGPOOL2D: err = ann_add_global_avgpool2d(pnet); break;
 		default:					err = ann_add_flatten(pnet); break;
 		}
 		if (err != ERR_OK)

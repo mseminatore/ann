@@ -119,6 +119,8 @@ typedef struct {
     id<MTLComputePipelineState> pso_upsample_backward;
     id<MTLComputePipelineState> pso_global_avgpool_forward;
     id<MTLComputePipelineState> pso_global_avgpool_backward;
+    id<MTLComputePipelineState> pso_global_maxpool_forward;
+    id<MTLComputePipelineState> pso_global_maxpool_backward;
     id<MTLComputePipelineState> pso_bn_stats;
     id<MTLComputePipelineState> pso_bn_forward_train;
     id<MTLComputePipelineState> pso_bn_forward_infer;
@@ -904,6 +906,28 @@ int tensor_metal_init(void)
         "    constant WindowDims &d [[buffer(2)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
         "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = dz[gid.z] / (float)(d.H * d.W); }\n"
+        // Global max pooling: each channel's largest value (the first on
+        // ties, as the CPU), recording its index in the plane; grid (batch*C)
+        "kernel void global_maxpool_forward(\n"
+        "    device const float *x [[buffer(0)]],\n"
+        "    device float *y [[buffer(1)]],\n"
+        "    device uint *arg [[buffer(2)]],\n"
+        "    constant WindowDims &d [[buffer(3)]],\n"
+        "    uint gid [[thread_position_in_grid]]) {\n"
+        "    uint area = d.H * d.W, best = 0;\n"
+        "    device const float *plane = x + gid * area;\n"
+        "    for (uint i = 1; i < area; i++) if (plane[i] > plane[best]) best = i;\n"
+        "    y[gid] = plane[best];\n"
+        "    arg[gid] = best; }\n"
+        // dx = the channel's dz at the input it took, else 0; grid (W, H, batch*C)
+        "kernel void global_maxpool_backward(\n"
+        "    device const float *dz [[buffer(0)]],\n"
+        "    device float *dx [[buffer(1)]],\n"
+        "    device const uint *arg [[buffer(2)]],\n"
+        "    constant WindowDims &d [[buffer(3)]],\n"
+        "    uint3 gid [[thread_position_in_grid]]) {\n"
+        "    uint i = gid.y * d.W + gid.x;\n"
+        "    dx[gid.z * d.H * d.W + i] = arg[gid.z] == i ? dz[gid.z] : 0.0f; }\n"
         // ----------------------------------------------------------------
         // Batch norm over [batch][C][area] (area = H*W, 1 after a dense
         // layer). stats holds 4 rows of C: the batch mean, 1 / sqrt(var +
@@ -1180,6 +1204,8 @@ int tensor_metal_init(void)
     g_metal.pso_upsample_backward = make_pso(g_metal.library, "upsample_backward");
     g_metal.pso_global_avgpool_forward = make_pso(g_metal.library, "global_avgpool_forward");
     g_metal.pso_global_avgpool_backward = make_pso(g_metal.library, "global_avgpool_backward");
+    g_metal.pso_global_maxpool_forward = make_pso(g_metal.library, "global_maxpool_forward");
+    g_metal.pso_global_maxpool_backward = make_pso(g_metal.library, "global_maxpool_backward");
     g_metal.pso_bn_stats         = make_pso(g_metal.library, "bn_stats");
     g_metal.pso_bn_forward_train = make_pso(g_metal.library, "bn_forward_train");
     g_metal.pso_bn_forward_infer = make_pso(g_metal.library, "bn_forward_infer");
@@ -1200,6 +1226,7 @@ int tensor_metal_init(void)
         !g_metal.pso_conv_grouped_weight_grad ||
         !g_metal.pso_upsample_forward || !g_metal.pso_upsample_backward ||
         !g_metal.pso_global_avgpool_forward || !g_metal.pso_global_avgpool_backward ||
+        !g_metal.pso_global_maxpool_forward || !g_metal.pso_global_maxpool_backward ||
         !g_metal.pso_bn_stats || !g_metal.pso_bn_forward_train || !g_metal.pso_bn_forward_infer ||
         !g_metal.pso_bn_grad || !g_metal.pso_bn_input_grad ||
         !g_metal.pso_transpose)
@@ -1855,6 +1882,27 @@ static void encode_upsample_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, in
 }
 
 //-----------------------------------------------------------
+// GlobalMaxPool2D forward and backward; each channel's argmax goes to the
+// layer's scratch
+//-----------------------------------------------------------
+static int encode_global_maxpool(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
+                                 id<MTLBuffer> src, id<MTLBuffer> dst, int backward)
+{
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    id<MTLBuffer> arg = layer_scratch(layer, SCRATCH_COLS, (size_t)batch_size * d.C * sizeof(uint32_t));
+    if (!arg)
+        return 0;
+    id<MTLBuffer> bufs[3] = { src, dst, arg };
+    if (backward)
+        encode_grid(cmd, g_metal.pso_global_maxpool_backward, bufs, 3, &d, sizeof(d),
+                    MTLSizeMake(d.W, d.H, (NSUInteger)batch_size * d.C));
+    else
+        encode_grid(cmd, g_metal.pso_global_maxpool_forward, bufs, 3, &d, sizeof(d),
+                    MTLSizeMake((NSUInteger)batch_size * d.C, 1, 1));
+    return 1;
+}
+
+//-----------------------------------------------------------
 // GlobalAvgPool2D forward and backward: one thread per output, no atomics
 //-----------------------------------------------------------
 static void encode_global_avgpool_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
@@ -2032,6 +2080,9 @@ static int encode_layer_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
     case LAYER_KIND_GLOBAL_AVGPOOL2D:
         encode_global_avgpool_forward(cmd, pnet, layer, batch_size, X, Y);
         break;
+    case LAYER_KIND_GLOBAL_MAXPOOL2D:
+        if (!encode_global_maxpool(cmd, pnet, layer, batch_size, X, Y, 0)) return 0;
+        break;
     case LAYER_KIND_BATCHNORM:
         if (!encode_batchnorm_forward(cmd, pnet, layer, batch_size, X, Y, training)) return 0;
         break;
@@ -2107,12 +2158,14 @@ static int metal_upload_network(PNetwork pnet)
         return ERR_NULL_PTR;
     finish_all_slots();
 
-    // Every layer kind in ann.h is implemented; reject any added later
+    // Every layer kind in ann.h but Embedding is implemented (its backward pass is a
+    // scatter-add, which needs float atomics); reject it and any added later
     for (int layer = 0; layer < pnet->layer_count; layer++) {
         Layer_kind kind = pnet->layers[layer].kind;
         if (kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D && kind != LAYER_KIND_MAXPOOL2D &&
             kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE &&
-            kind != LAYER_KIND_GLOBAL_AVGPOOL2D && kind != LAYER_KIND_BATCHNORM)
+            kind != LAYER_KIND_GLOBAL_AVGPOOL2D && kind != LAYER_KIND_BATCHNORM &&
+            kind != LAYER_KIND_GLOBAL_MAXPOOL2D)
             return ERR_INVALID;
     }
 
@@ -2209,7 +2262,7 @@ static size_t forward_bytes_per_sample(const PNetwork pnet)
         floats += (size_t)l->node_count;
         if (l->kind == LAYER_KIND_CONV2D)
             floats += (size_t)l->shape.h * l->shape.w * (l->params[0].value->cols + l->shape.c);
-        else if (l->kind == LAYER_KIND_MAXPOOL2D)
+        else if (l->kind == LAYER_KIND_MAXPOOL2D || l->kind == LAYER_KIND_GLOBAL_MAXPOOL2D)
             floats += (size_t)l->node_count;
     }
     return floats * sizeof(float);
@@ -2569,6 +2622,9 @@ static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_si
             break;
         case LAYER_KIND_GLOBAL_AVGPOOL2D:
             if (dX) encode_global_avgpool_backward(cmd, pnet, li, batch_size, dl_dz, dX);
+            break;
+        case LAYER_KIND_GLOBAL_MAXPOOL2D:
+            if (dX && !encode_global_maxpool(cmd, pnet, li, batch_size, dl_dz, dX, 1)) return 0;
             break;
         case LAYER_KIND_BATCHNORM:
             if (!encode_batchnorm_backward(cmd, pnet, li, batch_size, dl_dz, dX)) return 0;

@@ -233,7 +233,7 @@ int main(int argc, char *argv[])
 	err |= export_model(dw, argv[1], "dw", expected, 6);
 	ann_free_network(dw);
 
-	// a time-series model: 1-D convs (one strided, one depthwise), a 1-D pool and a 2x3 conv
+	// a time-series model: 1-D convs (one strided, one depthwise), a 1-D pool, a 2x3 conv and global max pooling
 	PNetwork ts = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
 	ann_add_input(ts, 3, 2, 16);
 	ann_add_conv1d(ts, 4, 5, 1, 2, ACTIVATION_NULL);                   // 4x2x16
@@ -241,6 +241,7 @@ int main(int argc, char *argv[])
 	ann_add_maxpool1d(ts, 2, 2);                                       // 4x2x8
 	ann_add_conv2d_ex(ts, 4, 1, 3, 1, 2, 0, 1, 4, ACTIVATION_TANH);    // depthwise 1x3, stride 2: 4x2x4
 	ann_add_conv2d_ex(ts, 5, 2, 3, 1, 1, 0, 0, 1, ACTIVATION_RELU);    // 5x1x2
+	ann_add_global_maxpool2d(ts);                                      // 5
 	ann_add_layer(ts, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 	err |= export_model(ts, argv[1], "ts", expected, 7);
 	ann_free_network(ts);

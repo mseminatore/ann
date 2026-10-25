@@ -238,6 +238,7 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 		case LAYER_KIND_RESHAPE:	l->kind = ANN_RT_FLATTEN; break;
 		case LAYER_KIND_UPSAMPLE2D:	l->kind = ANN_RT_UPSAMPLE2D; break;
 		case LAYER_KIND_GLOBAL_AVGPOOL2D: l->kind = ANN_RT_GLOBAL_AVGPOOL2D; break;
+		case LAYER_KIND_GLOBAL_MAXPOOL2D: l->kind = ANN_RT_GLOBAL_MAXPOOL2D; break;
 		default:
 			free_float_layers(layers, count);
 			return ERR_INVALID;
@@ -409,6 +410,8 @@ static int calibrate(const ann_rt_model *model, const PTensor inputs, Range *in_
 				ann_rt_upsample_f(l, src, dst);
 			else if (l->kind == ANN_RT_GLOBAL_AVGPOOL2D)
 				ann_rt_global_avgpool_f(l, src, dst);
+			else if (l->kind == ANN_RT_GLOBAL_MAXPOOL2D)
+				ann_rt_global_maxpool_f(l, src, dst);
 			else
 			{
 				ann_rt_linear_f(l, src, dst);
@@ -750,7 +753,7 @@ static void write_float_array(FILE *f, const char *prefix, const char *name, int
 static const char *kind_name(int32_t kind)
 {
 	static const char *names[] = { "ANN_RT_DENSE", "ANN_RT_CONV2D", "ANN_RT_MAXPOOL2D", "ANN_RT_FLATTEN",
-		"ANN_RT_UPSAMPLE2D", "ANN_RT_GLOBAL_AVGPOOL2D" };
+		"ANN_RT_UPSAMPLE2D", "ANN_RT_GLOBAL_AVGPOOL2D", "ANN_RT_GLOBAL_MAXPOOL2D" };
 	return names[kind];
 }
 

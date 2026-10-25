@@ -783,6 +783,40 @@ void test_main(int argc, char *argv[])
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 
+        // global max pooling over 1-D conv features and over an image
+        cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        gpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        PNetwork gmp[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(gmp[i], 2, 9, 9);
+            ann_add_conv2d(gmp[i], 6, 3, 1, 1, ACTIVATION_RELU);    // 6x9x9
+            ann_add_conv1d(gmp[i], 5, 3, 2, 1, ACTIVATION_TANH);    // 5x9x5
+            ann_add_global_maxpool2d(gmp[i]);                       // 5
+            ann_add_layer(gmp[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(gmp[i], 0.01f);
+            ann_set_convergence(gmp[i], 0.0f);
+            ann_set_epoch_limit(gmp[i], 3);
+            ann_set_batch_size(gmp[i], 8);
+        }
+        TESTEX("A network with global max pooling uploads", ann_gpu_upload_network(gpu_net) == ERR_OK);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU global max pool training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        TESTEX("and its inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
+        // embeddings stay on the CPU
+        PNetwork emb = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        ann_add_layer(emb, 8, LAYER_INPUT, ACTIVATION_NULL);
+        ann_add_embedding(emb, 20, 4, 0);
+        ann_add_conv1d(emb, 4, 3, 1, 1, ACTIVATION_RELU);
+        ann_add_global_maxpool2d(emb);
+        ann_add_layer(emb, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+        TESTEX("A network with an embedding is not uploaded (it trains on the CPU)",
+               ann_gpu_upload_network(emb) == ERR_INVALID);
+        ann_free_network(emb);
+
         // pooling straight off the input: the first layer has no parameters
         PNetwork pool_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
         ann_add_input(pool_net, 2, 9, 9);

@@ -116,7 +116,9 @@ typedef enum {
 	LAYER_KIND_UPSAMPLE2D,				// nearest-neighbour upsampling by an integer scale, per channel
 	LAYER_KIND_RESHAPE,					// give the same values a new (C, H, W) shape
 	LAYER_KIND_GLOBAL_AVGPOOL2D,		// each channel's mean: (C, H, W) to (C, 1, 1)
-	LAYER_KIND_BATCHNORM				// normalize each channel over the batch, then scale and shift
+	LAYER_KIND_BATCHNORM,				// normalize each channel over the batch, then scale and shift
+	LAYER_KIND_EMBEDDING,				// token ids to learned vectors: L ids to the sequence (D, 1, L)
+	LAYER_KIND_GLOBAL_MAXPOOL2D			// each channel's largest value: (C, H, W) to (C, 1, 1)
 } Layer_kind;
 
 //------------------------------
@@ -618,6 +620,43 @@ ANN_API int ann_add_global_avgpool2d(PNetwork pnet);
  * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (first layer or bad activation) or ERR_ALLOC
  */
 ANN_API int ann_add_batchnorm(PNetwork pnet, Activation_type activation);
+
+/**
+ * Add an embedding layer: map token ids to learned vectors.
+ * 
+ * The layer below (usually the input layer) holds L token ids per sample,
+ * as reals rounded to the nearest integer. The output is the sequence
+ * (embed_dim, 1, L): channel d at step t is row id_t of the weights
+ * [vocab_size x embed_dim], so ann_add_conv1d and the pooling layers follow
+ * directly. Ids outside [0, vocab_size) and padding_idx give zero vectors and
+ * train nothing; padding_idx's row stays zero. Weights start N(0, 1), as
+ * PyTorch's nn.Embedding. No gradient reaches the layer below. Maps to ONNX
+ * Cast, Gather, Transpose and Unsqueeze nodes (PyTorch's nn.Embedding imports).
+ * Networks with an embedding cannot be quantized or exported as C headers yet,
+ * and train on the CPU.
+ * 
+ * @param pnet Network to add the layer to
+ * @param vocab_size Number of token ids (> 0)
+ * @param embed_dim Length of each vector (> 0)
+ * @param padding_idx Id that pads sequences (its vector is always zero), or -1 for none
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (first layer, a layer below that is not flat, or bad
+ *         settings) or ERR_ALLOC
+ */
+ANN_API int ann_add_embedding(PNetwork pnet, int vocab_size, int embed_dim, int padding_idx);
+
+/**
+ * Add a global max pooling layer: each channel's largest value over H x W.
+ * 
+ * Output shape is (C, 1, 1), so a dense layer can follow directly. Over the
+ * steps of a sequence it keeps the strongest response of each feature
+ * wherever it occurs, the usual pooling for text after an embedding and 1-D
+ * convolutions. Gradients go to the input that was largest (the first on
+ * ties). No parameters; maps to an ONNX GlobalMaxPool node.
+ * 
+ * @param pnet Network to add the layer to
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (first layer) or ERR_ALLOC
+ */
+ANN_API int ann_add_global_maxpool2d(PNetwork pnet);
 
 /**
  * Free all memory associated with a network.
@@ -1556,6 +1595,7 @@ ANN_API int ann_get_layer_shape(const PNetwork pnet, int layer, int *channels, i
  * Conv2D: kernel size, stride and padding. MaxPool2D: pool size, stride and 0.
  * Upsample2D: the scale, the scale and 0. Other layers report 0 for all three.
  * For a non-square window these are the height's; see ann_get_layer_window.
+ * Embedding: the vocabulary size, 0 and the padding id (-1 for none).
  * 
  * @param pnet Network to query (must not be NULL)
  * @param layer Layer index (0 = input layer)

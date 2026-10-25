@@ -102,7 +102,7 @@ int main(void)
 	for (r = 0; r < ROWS; r++)
 		same &= ts_q_predict(ts_x_q[r], out_q, ws_q) == 0 &&
 		        memcmp(out_q, ts_y_int8[r], TS_Q_OUTPUT_SIZE) == 0;
-	check("1-D and non-square int8 header matches libann bit for bit", same);
+	check("1-D, non-square and max pool int8 header matches libann bit for bit", same);
 
 #ifndef ANN_RT_NO_FLOAT
 	{

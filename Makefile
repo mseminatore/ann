@@ -32,7 +32,7 @@ LFLAGS += -pthread
 #-DMKL_ILP64  -m64  -I"${MKLROOT}/include"
 #LFLAGS = ${MKLROOT}/lib/libmkl_intel_ilp64.a ${MKLROOT}/lib/libmkl_tbb_thread.a ${MKLROOT}/lib/libmkl_core.a -L${TBBROOT}/lib -ltbb -lc++ -lpthread -lm -ldl
 
-all: $(LIBANN) mnist fashion_cnn fashion_dae export_model mnist_hypertune_tpe mnist_hypertune_grid mnist_hypertune_random mnist_hypertune_bayes logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json test_gradients test_comprehensive_callbacks test_training_options test_conv test_batchnorm test_threads test_noise test_quantize
+all: $(LIBANN) mnist fashion_cnn fashion_dae export_model mnist_hypertune_tpe mnist_hypertune_grid mnist_hypertune_random mnist_hypertune_bayes logic digit5x7 save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json test_gradients test_comprehensive_callbacks test_training_options test_conv test_batchnorm test_embedding test_threads test_noise test_quantize
 
 # build the static library
 $(LIBANN): $(LIB_OBJS)
@@ -144,6 +144,9 @@ test_conv: $(LIBANN) tests/test_conv.o testy/test_main.o
 test_batchnorm: $(LIBANN) tests/test_batchnorm.o testy/test_main.o
 	$(CC) -o $@ tests/test_batchnorm.o testy/test_main.o $(LIBANN) $(LFLAGS)
 
+test_embedding: $(LIBANN) tests/test_embedding.o testy/test_main.o
+	$(CC) -o $@ tests/test_embedding.o testy/test_main.o $(LIBANN) $(LFLAGS)
+
 test_threads: $(LIBANN) tests/test_threads.o testy/test_main.o
 	$(CC) -o $@ tests/test_threads.o testy/test_main.o $(LIBANN) $(LFLAGS)
 
@@ -164,5 +167,5 @@ examples/%.o: examples/%.c $(DEPS)
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) -I. $< -o $@
 
 clean:
-	rm -f $(LIBANN) $(LIBANN_SO) $(LIB_OBJS) $(SHARED_OBJS) $(TARGET) fashion_cnn fashion_dae export_model run_exported logic digit5x7 mnist_hypertune_tpe mnist_hypertune_grid mnist_hypertune_random mnist_hypertune_bayes save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json test_gradients test_comprehensive_callbacks test_training_options test_conv test_batchnorm test_threads test_noise test_quantize testy/test_main.o
+	rm -f $(LIBANN) $(LIBANN_SO) $(LIB_OBJS) $(SHARED_OBJS) $(TARGET) fashion_cnn fashion_dae export_model run_exported logic digit5x7 mnist_hypertune_tpe mnist_hypertune_grid mnist_hypertune_random mnist_hypertune_bayes save_test save_test_binary blas_perf test_tensor test_network test_activations test_loss_functions test_save_load test_optimizers test_forward_pass test_training_convergence test_onnx_export test_hypertune test_json test_gradients test_comprehensive_callbacks test_training_options test_conv test_batchnorm test_embedding test_threads test_noise test_quantize testy/test_main.o
 	rm -f tests/*.o examples/*.o

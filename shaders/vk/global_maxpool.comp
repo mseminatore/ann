@@ -1,0 +1,40 @@
+#version 450
+#include "common.glsl"
+// Global max pooling. Forward: one invocation per (sample, channel) takes the
+// plane's largest value (the first on ties, as the CPU does) and records its
+// index in the plane in arg. Backward: each input gets its channel's dz if it
+// was the one taken, else 0. Both are gathers (no atomics).
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufSrc { float src[]; };
+layout(std430, binding = 1) writeonly buffer BufDst { float dst[]; };
+layout(std430, binding = 2) buffer BufArg { uint arg[]; };
+
+layout(push_constant) uniform Params {
+    WindowDims d;
+    uint backward;
+} pc;
+
+void main()
+{
+    WindowDims d = pc.d;
+    uint area = d.H * d.W;
+    if (pc.backward == 0u)
+    {
+        GRID_LOOP(plane, d.batch * d.C)
+        {
+            uint best = 0u;
+            for (uint i = 1u; i < area; i++)
+                if (src[plane * area + i] > src[plane * area + best])
+                    best = i;
+            dst[plane] = src[plane * area + best];
+            arg[plane] = best;
+        }
+    }
+    else
+    {
+        GRID_LOOP(idx, d.batch * d.C * area)
+            dst[idx] = arg[idx / area] == idx % area ? src[idx / area] : 0.0;
+    }
+}

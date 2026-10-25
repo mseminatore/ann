@@ -20,7 +20,10 @@ ann_export_onnx(pnet, "model.onnx.json");
   `scales` initializer `[1, 1, s, s]`; reshape layers export `Reshape` with a
   shape initializer `[-1, C, H, W]`. Global average pooling layers export
   `GlobalAveragePool` (output `[batch, C, 1, 1]`, flattened before a dense
-  layer). A model that starts with dense layers
+  layer). Batch norm layers export `BatchNormalization` (inference form,
+  initializers `bn_N_scale`, `bn_N_bias`, `bn_N_mean`, `bn_N_var`, epsilon
+  1e-5, momentum 0.9 in ONNX's convention) on `[batch, C]` or
+  `[batch, C, H, W]`. A model that starts with dense layers
   keeps a `[batch, n]` input.
 - `weight_N` has dims `[in_nodes, out_nodes]`, the layout ONNX `MatMul` expects
   (libann stores weights as `[out, in]` internally and transposes them on export)
@@ -58,6 +61,7 @@ ONNX node | libann layer
 `Conv` | conv layer (square kernel, equal strides and pads, no dilation or groups; bias optional)
 `MaxPool` | max pooling layer (square window, equal strides, no padding, `ceil_mode = 0`)
 `GlobalAveragePool` | global average pooling layer (as PyTorch writes `nn.AdaptiveAvgPool2d(1)`)
+`BatchNormalization` | batch norm layer (inference form: constant `[C]` scale, bias, mean and var, one output; any epsilon, which is moved into the variance since libann's is 1e-5), on `[batch, C]` or `[batch, C, H, W]`
 `Flatten` (axis 1) | flatten layer (libann's own `flatten_input_N` nodes are skipped)
 `Resize`, `Upsample` | upsampling layer (`nearest` mode, one integer scale on H and W from `scales` or output `sizes`; `asymmetric` coordinates with `floor` rounding, or `half_pixel` with rounding)
 `Reshape` | reshape layer to a constant `[batch, C, H, W]` shape (`0` copies a dimension, one `-1` is inferred); a `[batch, n]` shape is a flatten
@@ -87,7 +91,7 @@ ann_export_onnx(net, "model.onnx.json");                // 1.1 file
 - Reads JSON, not binary `.onnx` files: convert with `json_format.MessageToJson(onnx.load("model.onnx"))`
 - Anything libann can't reproduce exactly is rejected with `NULL` and an error
   callback message: branching graphs, other ops (e.g. `AveragePool`,
-  `ConvTranspose`, `BatchNormalization`), dilated or grouped convolutions,
+  `ConvTranspose`), `BatchNormalization` in training form, dilated or grouped convolutions,
   padded or `ceil_mode` pooling, linear or fractional `Resize`, a `Reshape`
   whose shape is computed in the graph (`Shape` → `Gather` → `Concat`), the
   exact (erf) `Gelu`, or an activation after a pool/flatten/upsample/reshape

@@ -38,14 +38,18 @@ static int file_contains(const char *path, const char *needle)
     return strstr(buf, needle) != NULL;
 }
 
-// Fill every parameter with fixed, varied values
+// Fill every parameter with fixed, varied values (a batch norm's gamma
+// near 1 and its variance positive)
 static void set_params(PNetwork net)
 {
     for (int l = 1; l < net->layer_count; l++)
         for (int p = 0; p < net->layers[l].param_count; p++) {
             PTensor t = net->layers[l].params[p].value;
-            for (int i = 0; i < t->rows * t->cols; i++)
-                t->values[i] = 0.5f * (real)sin(1.7 * i + 0.9 * l + 2.3 * p + 0.4);
+            int bn = net->layers[l].kind == LAYER_KIND_BATCHNORM;
+            for (int i = 0; i < t->rows * t->cols; i++) {
+                real v = 0.5f * (real)sin(1.7 * i + 0.9 * l + 2.3 * p + 0.4);
+                t->values[i] = bn && p == 0 ? 1.0f + v : bn && p == 3 ? 0.3f + (real)fabs(v) : v;
+            }
         }
 }
 
@@ -284,6 +288,54 @@ void test_main(int argc, char *argv[])
         remove("test_quantize_gap.h");
         ann_free_quantized(q);
         ann_free_network(net);
+
+        // batch norm folds into the conv or dense layer before it
+        net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 1, 6, 6);
+        ann_add_conv2d(net, 3, 3, 1, 1, ACTIVATION_NULL);
+        ann_add_batchnorm(net, ACTIVATION_RELU);
+        ann_add_maxpool2d(net, 2, 2);
+        ann_add_layer(net, 5, LAYER_HIDDEN, ACTIVATION_NULL);
+        ann_add_batchnorm(net, ACTIVATION_NULL);
+        ann_add_batchnorm(net, ACTIVATION_TANH);
+        ann_add_layer(net, 3, LAYER_OUTPUT, ACTIVATION_TANH);
+        set_params(net);
+        q = ann_quantize(net, x);
+        err = q ? max_error(net, q, x, 0) : 1e9;
+        // one more rounding stage than conv/pool above (the hidden dense layer),
+        // amplified by the two folded batch norms' gains (up to ~1.8 each);
+        // the C export test checks the folding itself is exact
+        printf("\t  conv/dense with batch norm: %.2f steps\n", err);
+        TESTEX("Batch norm folded into conv and dense layers within 6 steps", err <= 6.0);
+        TESTEX("Its header has no batch norm layers: conv, pool, dense, dense",
+               ann_export_c_header(NULL, q, "test_quantize_bn.h", "bn_q") == ERR_OK &&
+               file_contains("test_quantize_bn.h", "bn_q_layers[4]") &&
+               file_contains("test_quantize_bn.h", "ANN_RT_VERSION < 1"));
+        TESTEX("and the float header exports", ann_export_c_header(net, NULL, "test_quantize_bn.h", "bn_f") == ERR_OK &&
+               file_contains("test_quantize_bn.h", "bn_f_layers[4]"));
+        remove("test_quantize_bn.h");
+        ann_free_quantized(q);
+        ann_free_network(net);
+
+        // a batch norm with no weighted layer without activation before it is rejected
+        int rejected = 1;
+        for (int c = 0; c < 3; c++) {
+            net = ann_make_network(OPT_ADAM, LOSS_MSE);
+            net->print_func = quiet;
+            ann_add_input(net, 1, 6, 6);
+            if (c == 1) ann_add_conv2d(net, 2, 3, 1, 1, ACTIVATION_RELU);
+            if (c == 2) { ann_add_conv2d(net, 2, 3, 1, 1, ACTIVATION_NULL); ann_add_maxpool2d(net, 2, 2); }
+            ann_add_batchnorm(net, ACTIVATION_NULL);
+            ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_NULL);
+            set_params(net);
+            q = ann_quantize(net, x);
+            rejected &= q == NULL && ann_export_c_header(net, NULL, "test_quantize_bn.h", "bn_f") == ERR_INVALID;
+            ann_free_quantized(q);
+            ann_free_network(net);
+        }
+        remove("test_quantize_bn.h");
+        TESTEX("Batch norm on the input, after an activation or after pooling is rejected", rejected);
 
         tensor_free(x);
     }

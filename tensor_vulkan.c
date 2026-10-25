@@ -24,7 +24,7 @@
 //================================================================================================
 // Vulkan GPU backend: inference and training on any Vulkan 1.1 GPU (AMD, Intel, NVIDIA) on
 // Windows and Linux, for every layer kind (dense, conv, max pool, upsample, flatten, reshape,
-// global average pool).
+// global average pool, batch norm).
 // See docs/GPU_VULKAN.md.
 //
 // - The Vulkan loader is opened at run time (vulkan-1.dll / libvulkan.so.1), so a build with
@@ -116,7 +116,7 @@ typedef enum {
     K_BIAS_ACT, K_SOFTMAX, K_ACT_DERIV, K_SOFTMAX_JACOBIAN, K_OUTPUT_DELTA_LOSS,
     K_BIAS_GRAD_SUM, K_OPTIMIZER, K_DROPOUT,
     K_CONV_IM2COL, K_CONV_OUTPUT, K_CONV_GRAD_ROWS, K_CONV_COL2IM,
-    K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_GLOBAL_AVGPOOL, K_SUM_PARTIALS,
+    K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_GLOBAL_AVGPOOL, K_BATCHNORM, K_SUM_PARTIALS,
     K_CONV_DIRECT_FORWARD, K_CONV_DIRECT_INPUT_GRAD, K_CONV_DIRECT_WEIGHT_GRAD,
     K_COUNT
 } Kernel;
@@ -146,6 +146,7 @@ static const struct {
     { SPV(maxpool_backward), 0, 0 },
     { SPV(upsample), 0, 0 },
     { SPV(global_avgpool), 0, 0 },
+    { SPV(batchnorm), 0, 0 },
     { SPV(sum_partials), 0, 0 },
     { SPV(conv_direct_forward), 0, 0 },
     { SPV(conv_direct_input_grad), 0, 0 },
@@ -158,7 +159,7 @@ static const char *const g_kernel_names[K_COUNT + 1] = {
     "bias_act", "softmax", "act_deriv", "softmax_jacobian", "output_delta_loss",
     "bias_grad_sum", "optimizer", "dropout",
     "conv_im2col", "conv_output", "conv_grad_rows", "conv_col2im",
-    "maxpool_forward", "maxpool_backward", "upsample", "global_avgpool", "sum_partials",
+    "maxpool_forward", "maxpool_backward", "upsample", "global_avgpool", "batchnorm", "sum_partials",
     "conv_direct_forward", "conv_direct_input_grad", "conv_direct_weight_grad",
     "copy / fill",
 };
@@ -1543,6 +1544,13 @@ static int ensure_layer_scratch(PNetwork pnet, int rows, int training)
             if (!layer_scratch(layer, SCRATCH_COLS, (size_t)rows * l->node_count * sizeof(uint32_t)))
                 return 0;
         }
+        else if (l->kind == LAYER_KIND_BATCHNORM && training)
+        {
+            // x_hat, and the per-channel statistics (see batchnorm.comp)
+            if (!layer_scratch(layer, SCRATCH_COLS, (size_t)rows * l->node_count * sizeof(float)) ||
+                !layer_scratch(layer, SCRATCH_PARTIAL, (size_t)4 * l->shape.c * sizeof(float)))
+                return 0;
+        }
     }
     return 1;
 }
@@ -1700,6 +1708,60 @@ static void encode_upsample(PNetwork pnet, int layer, int batch_size, VkBuf *src
     cmd_dispatch(K_UPSAMPLE, bufs, 2, &p, sizeof(p), groups_for(count, 256), 1);
 }
 
+//-----------------------------------------------------------
+// BatchNorm (batchnorm.comp): params are gamma, beta, running mean, running variance.
+// Training keeps x_hat in SCRATCH_COLS and the statistics in SCRATCH_PARTIAL.
+//-----------------------------------------------------------
+typedef struct {
+    uint32_t C, area, batch, mode;
+    float momentum, eps;
+} BnParams;
+
+static VkBuf *bn_param(PLayer l, int p)
+{
+    return (VkBuf *)l->params[p].value->gpu_buf;
+}
+
+static void k_batchnorm(PNetwork pnet, int layer, int rows, uint32_t mode, VkBuf **bufs)
+{
+    PLayer l = &pnet->layers[layer];
+    BnParams p = { (uint32_t)l->shape.c, (uint32_t)(l->shape.h * l->shape.w), (uint32_t)rows, mode,
+                   0.1f, (float)ANN_BATCHNORM_EPSILON };
+    // the statistics and gradient modes run a workgroup per channel
+    size_t groups = mode == 0 || mode == 3 ? (size_t)p.C * 256 : (size_t)rows * l->node_count;
+    cmd_dispatch(K_BATCHNORM, bufs, 8, &p, sizeof(p), groups_for(groups, 256), 1);
+}
+
+static void encode_batchnorm_forward(PNetwork pnet, int layer, int rows, VkBuf *X, VkBuf *Y, int training)
+{
+    PLayer l = &pnet->layers[layer];
+    if (!training)
+    {
+        VkBuf *bufs[8] = { X, Y, X, X, bn_param(l, 0), bn_param(l, 1), bn_param(l, 2), bn_param(l, 3) };
+        k_batchnorm(pnet, layer, rows, 2, bufs);
+        return;
+    }
+    VkBuf *x_hat = scratch_of(layer, SCRATCH_COLS), *stats = scratch_of(layer, SCRATCH_PARTIAL);
+    VkBuf *sbufs[8] = { X, Y, x_hat, stats, bn_param(l, 0), bn_param(l, 1), bn_param(l, 2), bn_param(l, 3) };
+    k_batchnorm(pnet, layer, rows, 0, sbufs);
+    k_batchnorm(pnet, layer, rows, 1, sbufs);
+}
+
+// gamma and beta gradients, then dX unless it is NULL (layer 1)
+static void encode_batchnorm_backward(PNetwork pnet, int layer, int rows, VkBuf *dZ, VkBuf *dX)
+{
+    PLayer l = &pnet->layers[layer];
+    VkBuf *x_hat = scratch_of(layer, SCRATCH_COLS), *stats = scratch_of(layer, SCRATCH_PARTIAL);
+    VkBuf *gbufs[8] = { dZ, dZ, x_hat, stats, (VkBuf *)l->params[0].grad->gpu_buf,
+                        (VkBuf *)l->params[1].grad->gpu_buf, dZ, dZ };
+    k_batchnorm(pnet, layer, rows, 3, gbufs);
+    if (dX)
+    {
+        VkBuf *bufs[8] = { dZ, dX, x_hat, stats, bn_param(l, 0), dZ, dZ, dZ };
+        k_batchnorm(pnet, layer, rows, 4, bufs);
+    }
+}
+
 // GlobalAvgPool2D forward (src = X, dst = Y) or backward (src = dZ, dst = dX)
 static void encode_global_avgpool(PNetwork pnet, int layer, int batch_size, VkBuf *src, VkBuf *dst, int backward)
 {
@@ -1715,7 +1777,8 @@ static void encode_global_avgpool(PNetwork pnet, int layer, int batch_size, VkBu
 // Y = X * W^T + b), then (when Z is given) save the values before activation (GELU only
 // needs them), apply the activation, and apply dropout when a mask is given
 //-----------------------------------------------------------
-static void encode_layer_forward(PNetwork pnet, int layer, int rows, VkBuf *X, VkBuf *Y, VkBuf *Z, VkBuf *mask)
+static void encode_layer_forward(PNetwork pnet, int layer, int rows, VkBuf *X, VkBuf *Y, VkBuf *Z, VkBuf *mask,
+                                 int training)
 {
     PLayer dst = &pnet->layers[layer];
     uint32_t out = (uint32_t)dst->node_count;
@@ -1748,6 +1811,9 @@ static void encode_layer_forward(PNetwork pnet, int layer, int rows, VkBuf *X, V
         break;
     case LAYER_KIND_GLOBAL_AVGPOOL2D:
         encode_global_avgpool(pnet, layer, rows, X, Y, 0);
+        break;
+    case LAYER_KIND_BATCHNORM:
+        encode_batchnorm_forward(pnet, layer, rows, X, Y, training);
         break;
     case LAYER_KIND_FLATTEN:
     case LAYER_KIND_RESHAPE:
@@ -1841,7 +1907,7 @@ static int vk_upload_network(PNetwork pnet)
         Layer_kind kind = pnet->layers[layer].kind;
         if (kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D && kind != LAYER_KIND_MAXPOOL2D &&
             kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE &&
-            kind != LAYER_KIND_GLOBAL_AVGPOOL2D)
+            kind != LAYER_KIND_GLOBAL_AVGPOOL2D && kind != LAYER_KIND_BATCHNORM)
             return ERR_INVALID;
     }
 
@@ -1964,7 +2030,7 @@ static int forward_infer(PNetwork pnet, const real *inputs, real *outputs, int r
     int cur = 0;
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
-        encode_layer_forward(pnet, layer, rows, g_vk.infer[cur], g_vk.infer[1 - cur], NULL, NULL);
+        encode_layer_forward(pnet, layer, rows, g_vk.infer[cur], g_vk.infer[1 - cur], NULL, NULL, 0);
         cur = 1 - cur;
     }
     const void *result = cmd_download(g_vk.infer[cur], out_bytes);
@@ -2163,6 +2229,9 @@ static void encode_backward(PNetwork pnet, int batch_size, VkSlot *slot)
             if (dX)
                 encode_global_avgpool(pnet, li, batch_size, dl_dz, dX, 1);
             break;
+        case LAYER_KIND_BATCHNORM:
+            encode_batchnorm_backward(pnet, li, batch_size, dl_dz, dX);
+            break;
         case LAYER_KIND_FLATTEN:
         case LAYER_KIND_RESHAPE:
             if (dX)
@@ -2237,7 +2306,8 @@ static void encode_optimizer(PNetwork pnet)
                 bufs[4 * k + 1] = (VkBuf *)param->grad->gpu_buf;
                 bufs[4 * k + 2] = param->m ? (VkBuf *)param->m->gpu_buf : w;
                 bufs[4 * k + 3] = param->v ? (VkBuf *)param->v->gpu_buf : w;
-                if (i + k >= l->param_count)
+                // running statistics (batch norm) are updated by their own kernel
+                if (i + k >= l->param_count || param->state)
                     continue;
                 n[k] = (uint32_t)(param->value->rows * param->value->cols);
                 if (param->regularize)
@@ -2246,6 +2316,8 @@ static void encode_optimizer(PNetwork pnet)
                     reg[k][1] = l1;
                 }
             }
+            if (n[0] + n[1] == 0)
+                continue;
             p.n0 = n[0];
             p.n1 = n[1];
             p.decay0 = reg[0][0];
@@ -2329,7 +2401,7 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
         int masked = layer < out_idx && dropout_mask(pnet, layer, batch_size);
         VkBuf *X = layer == 1 ? slot->inputs : (VkBuf *)pnet->layers[layer - 1].t_batch_values->gpu_buf;
         encode_layer_forward(pnet, layer, batch_size, X, (VkBuf *)dst->t_batch_values->gpu_buf,
-                             (VkBuf *)dst->t_batch_z->gpu_buf, masked ? slot->masks[layer] : NULL);
+                             (VkBuf *)dst->t_batch_z->gpu_buf, masked ? slot->masks[layer] : NULL, 1);
     }
 
     // Output delta = t - y and each row's loss; MSE then applies the output activation's

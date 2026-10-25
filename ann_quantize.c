@@ -109,6 +109,15 @@ static int is_weighted(const ann_rt_layer *l)
 	return l->kind == ANN_RT_DENSE || l->kind == ANN_RT_CONV2D;
 }
 
+static int weight_count(const ann_rt_layer *l)
+{
+	if (l->kind == ANN_RT_DENSE)
+		return l->out_c * l->in_c * l->in_h * l->in_w;
+	if (l->kind == ANN_RT_CONV2D)
+		return l->out_c * l->in_c * l->size * l->size;
+	return 0;
+}
+
 //------------------------------
 // free the float weights made by make_float_layers()
 //------------------------------
@@ -125,12 +134,47 @@ static void free_float_layers(ann_rt_layer *layers, int count)
 }
 
 //------------------------------
+// fold a batch norm layer into the dense or conv layer l before it:
+// y = s * (W x + b - mean) + beta with s = gamma / sqrt(var + epsilon), so
+// W' = s * W and b' = s * (b - mean) + beta per output channel. l takes the
+// batch norm's activation. Returns ERR_OK, or ERR_INVALID when l is not a
+// weighted layer without an activation.
+//------------------------------
+static int fold_batchnorm(ann_rt_layer *l, const Layer *bn)
+{
+	const real *gamma = bn->params[0].value->values, *beta = bn->params[1].value->values;
+	const real *mean = bn->params[2].value->values, *var = bn->params[3].value->values;
+
+	if (!is_weighted(l) || l->act != ANN_RT_ACT_NONE || l->out_c != bn->shape.c ||
+		l->out_h != bn->shape.h || l->out_w != bn->shape.w)
+		return ERR_INVALID;
+
+	int per_channel = weight_count(l) / l->out_c;
+	float *w = (float *)l->w_f, *b = (float *)l->b_f;
+	int finite = 1;
+	for (int c = 0; c < l->out_c; c++)
+	{
+		double s = (double)gamma[c] / sqrt((double)var[c] + ANN_BATCHNORM_EPSILON);
+		for (int i = 0; i < per_channel; i++)
+		{
+			w[c * per_channel + i] = (float)(s * w[c * per_channel + i]);
+			finite &= isfinite(w[c * per_channel + i]) != 0;
+		}
+		b[c] = (float)(s * ((double)b[c] - mean[c]) + beta[c]);
+		finite &= isfinite(b[c]) != 0;
+	}
+	l->act = rt_activation(bn->activation);
+	return finite ? ERR_OK : ERR_INVALID;
+}
+
+//------------------------------
 // describe the network's layers 1..n-1 for ann_rt.h with float copies of the
-// weights; fills the model's sizes. Returns ERR_OK, ERR_INVALID or ERR_ALLOC.
+// weights, batch norm layers folded into the layer before them; fills the
+// model's sizes. Returns ERR_OK, ERR_INVALID or ERR_ALLOC.
 //------------------------------
 static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_layer **out)
 {
-	int count = pnet->layer_count - 1;
+	int count = pnet->layer_count - 1, n = 0;
 	ann_rt_layer *layers;
 
 	*out = NULL;
@@ -147,19 +191,28 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 		return ERR_ALLOC;
 
 	memset(model, 0, sizeof(*model));
-	model->layer_count = count;
 	model->layers = layers;
 	model->input_size = pnet->layers[0].node_count;
 	model->output_size = pnet->layers[count].node_count;
 	model->softmax = pnet->layers[count].activation == ACTIVATION_SOFTMAX;
 
-	for (int n = 0; n < count; n++)
+	for (int k = 1; k <= count; k++)
 	{
-		const Layer *src = &pnet->layers[n + 1];
-		ann_rt_layer *l = &layers[n];
+		const Layer *src = &pnet->layers[k];
 		int size, stride, pad;
 
-		ann_get_layer_settings(pnet, n + 1, &size, &stride, &pad);
+		if (src->kind == LAYER_KIND_BATCHNORM)
+		{
+			if (n == 0 || fold_batchnorm(&layers[n - 1], src) != ERR_OK)
+			{
+				free_float_layers(layers, count);
+				return ERR_INVALID;
+			}
+			continue;
+		}
+
+		ann_rt_layer *l = &layers[n++];
+		ann_get_layer_settings(pnet, k, &size, &stride, &pad);
 		l->act = rt_activation(src->activation);
 		l->in_c = src->in_shape.c;
 		l->in_h = src->in_shape.h;
@@ -222,6 +275,7 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 		}
 	}
 
+	model->layer_count = n;
 	*out = layers;
 	return ERR_OK;
 }
@@ -700,15 +754,6 @@ static const char *act_name(int32_t act)
 	static const char *names[] = { "ANN_RT_ACT_NONE", "ANN_RT_ACT_RELU", "ANN_RT_ACT_LEAKY_RELU",
 		"ANN_RT_ACT_SIGMOID", "ANN_RT_ACT_TANH", "ANN_RT_ACT_SOFTSIGN", "ANN_RT_ACT_GELU", "ANN_RT_ACT_SOFTMAX" };
 	return names[act];
-}
-
-static int weight_count(const ann_rt_layer *l)
-{
-	if (l->kind == ANN_RT_DENSE)
-		return l->out_c * l->in_c * l->in_h * l->in_w;
-	if (l->kind == ANN_RT_CONV2D)
-		return l->out_c * l->in_c * l->size * l->size;
-	return 0;
 }
 
 //------------------------------

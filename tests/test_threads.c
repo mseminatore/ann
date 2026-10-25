@@ -25,14 +25,15 @@ static void capture(const char *msg)
 
 #define ROWS 64
 
-// A CNN (conv, pool) or a dense network large enough for its GEMMs to be split
+// A CNN (conv, batch norm, pool) or a dense network large enough for its GEMMs to be split
 static PNetwork make_net(int cnn)
 {
     PNetwork net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
     net->print_func = quiet;
     if (cnn) {
         ann_add_input(net, 2, 10, 10);
-        ann_add_conv2d(net, 6, 3, 1, 1, ACTIVATION_RELU);
+        ann_add_conv2d(net, 6, 3, 1, 1, ACTIVATION_NULL);
+        ann_add_batchnorm(net, ACTIVATION_RELU);
         ann_add_maxpool2d(net, 2, 2);
         ann_add_conv2d(net, 8, 3, 1, 0, ACTIVATION_TANH);
         ann_add_layer(net, 4, LAYER_OUTPUT, ACTIVATION_SOFTMAX);

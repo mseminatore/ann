@@ -33,6 +33,7 @@ add_test(NAME test_gradients COMMAND test_gradients)
 add_test(NAME test_comprehensive_callbacks COMMAND test_comprehensive_callbacks)
 add_test(NAME test_training_options COMMAND test_training_options)
 add_test(NAME test_conv COMMAND test_conv)
+add_test(NAME test_batchnorm COMMAND test_batchnorm)
 add_test(NAME test_threads COMMAND test_threads)
 add_test(NAME test_noise COMMAND test_noise)
 
@@ -183,7 +184,7 @@ if ( USE_VULKAN )
     set(VULKAN_SHADERS gemm bias_act softmax act_deriv softmax_jacobian output_delta_loss
                        bias_grad_sum optimizer dropout
                        conv_im2col conv_output conv_grad_rows conv_col2im
-                       maxpool_forward maxpool_backward upsample global_avgpool sum_partials
+                       maxpool_forward maxpool_backward upsample global_avgpool batchnorm sum_partials
                        conv_direct_forward conv_direct_input_grad conv_direct_weight_grad)
     set(VULKAN_SPV_DIR ${CMAKE_CURRENT_BINARY_DIR}/vk_spv)
     file(MAKE_DIRECTORY ${VULKAN_SPV_DIR})
@@ -374,6 +375,9 @@ target_link_libraries(test_training_options libann ${BLAS_LIB} ${MATH_LIB})
 add_executable(test_conv tests/test_conv.c testy/test_main.c)
 target_link_libraries(test_conv libann ${BLAS_LIB} ${MATH_LIB})
 
+add_executable(test_batchnorm tests/test_batchnorm.c testy/test_main.c)
+target_link_libraries(test_batchnorm libann ${BLAS_LIB} ${MATH_LIB})
+
 add_executable(test_threads tests/test_threads.c testy/test_main.c)
 target_link_libraries(test_threads libann ${BLAS_LIB} ${MATH_LIB} Threads::Threads)
 
@@ -406,7 +410,8 @@ target_link_libraries(gen_c_export libann ${BLAS_LIB} ${MATH_LIB})
 set(C_EXPORT_DIR ${CMAKE_CURRENT_BINARY_DIR}/c_export)
 set(C_EXPORT_FILES ${C_EXPORT_DIR}/ann_rt.h ${C_EXPORT_DIR}/expected.h
     ${C_EXPORT_DIR}/dense_q.h ${C_EXPORT_DIR}/dense_f.h ${C_EXPORT_DIR}/cnn_q.h ${C_EXPORT_DIR}/cnn_f.h
-    ${C_EXPORT_DIR}/ae_q.h ${C_EXPORT_DIR}/ae_f.h ${C_EXPORT_DIR}/gap_q.h ${C_EXPORT_DIR}/gap_f.h)
+    ${C_EXPORT_DIR}/ae_q.h ${C_EXPORT_DIR}/ae_f.h ${C_EXPORT_DIR}/gap_q.h ${C_EXPORT_DIR}/gap_f.h
+    ${C_EXPORT_DIR}/bn_q.h ${C_EXPORT_DIR}/bn_f.h)
 add_custom_command(OUTPUT ${C_EXPORT_FILES}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${C_EXPORT_DIR}
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/ann_rt.h ${C_EXPORT_DIR}/ann_rt.h

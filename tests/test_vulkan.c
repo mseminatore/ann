@@ -804,6 +804,59 @@ void test_main(int argc, char *argv[])
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 
+        // batch norm after a conv (relu) and a dense layer (gelu), trained with
+        // the batch's statistics; inference uses the running ones. SGD, since
+        // a bias before a batch norm (and here the first batch norm's beta,
+        // which the second cancels) gets only rounding noise as its gradient,
+        // and Adam scales that noise up to full steps that differ by path.
+        cpu_net = ann_make_network(OPT_SGD, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        gpu_net = ann_make_network(OPT_SGD, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        PNetwork bn[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(bn[i], 2, 9, 9);
+            ann_add_conv2d(bn[i], 4, 3, 1, 1, ACTIVATION_NULL);    // 4x9x9
+            ann_add_batchnorm(bn[i], ACTIVATION_RELU);
+            ann_add_maxpool2d(bn[i], 3, 3);                         // 4x3x3
+            ann_add_layer(bn[i], 8, LAYER_HIDDEN, ACTIVATION_NULL);
+            ann_add_batchnorm(bn[i], ACTIVATION_GELU);
+            ann_add_layer(bn[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(bn[i], 0.05f);
+            ann_set_convergence(bn[i], 0.0f);
+            ann_set_epoch_limit(bn[i], 3);
+            ann_set_batch_size(bn[i], 8);
+        }
+        TESTEX("A network with batch norm uploads", ann_gpu_upload_network(gpu_net) == ERR_OK);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU batch norm training (weights and running statistics) matches CPU training",
+               cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        TESTEX("and its inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
+        // batch norm as the output layer with MSE, and straight off the input
+        cpu_net = ann_make_network(OPT_SGD, LOSS_MSE);
+        gpu_net = ann_make_network(OPT_SGD, LOSS_MSE);
+        PNetwork bn_out[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(bn_out[i], 2, 9, 9);
+            ann_add_batchnorm(bn_out[i], ACTIVATION_NULL);
+            ann_add_conv2d(bn_out[i], 3, 3, 2, 0, ACTIVATION_TANH);  // 3x4x4
+            ann_add_layer(bn_out[i], CNN_CLASSES, LAYER_HIDDEN, ACTIVATION_NULL);
+            ann_add_batchnorm(bn_out[i], ACTIVATION_SIGMOID);
+            ann_set_learning_rate(bn_out[i], 0.05f);
+            ann_set_convergence(bn_out[i], 0.0f);
+            ann_set_epoch_limit(bn_out[i], 3);
+            ann_set_batch_size(bn_out[i], 8);
+        }
+        ann_gpu_upload_network(gpu_net);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU batch norm on the input and as an MSE output matches CPU training",
+               cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1) && cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
         // pooling straight off the input: the first layer has no parameters
         PNetwork pool_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
         ann_add_input(pool_net, 2, 9, 9);

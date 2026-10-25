@@ -3,7 +3,7 @@
 The Vulkan backend runs GPU **inference and training** on any GPU with a Vulkan 1.1 driver
 (AMD, Intel and NVIDIA) on Windows and Linux, through the same `GpuBackend` vtable as the Metal
 and CUDA backends. Like Metal, it runs every layer kind: dense, conv, max pool, upsample, flatten,
-reshape and global average pooling. It consists of:
+reshape, global average pooling and batch norm. It consists of:
 
 - `tensor_vulkan.c`: device setup, buffers, command recording, and the inference and training
   paths
@@ -146,7 +146,7 @@ ctest -R test_vulkan --output-on-failure      # test_vulkan, test_vulkan_staging
 straddle the GEMM tiles, every optimizer, categorical and binary cross-entropy, MSE through
 softmax and linear outputs, L1/L2 with gradient clipping, CNNs (the CNN suite shared with
 `tests/test_metal.c`: strided and padded convs, overlapping pools, conv dropout, every
-activation, input noise, conv autoencoders, reshape and upsample, global average pooling, a batch
+activation, input noise, conv autoencoders, reshape and upsample, global average pooling, batch norm, a batch
 evaluated in pieces),
 and the shared consistency suite in `tests/gpu_consistency.h` (dropout, Adam state, GELU, early
 stopping, online training).

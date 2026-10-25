@@ -1,0 +1,119 @@
+#version 450
+#include "common.glsl"
+// Batch norm over [batch][C][area] (area = H*W, 1 after a dense layer). stats holds 4 rows
+// of C: the batch mean, 1 / sqrt(var + eps), then mean(dz) and mean(dz * x_hat) for the
+// input gradient. One shader, five modes:
+//   0 stats:         the batch's mean and variance per channel (a workgroup each), then the
+//                    running statistics (unbiased variance, as the CPU keeps it)
+//   1 forward train: y = gamma * x_hat + beta, keeping x_hat
+//   2 forward:       prediction with the running statistics
+//   3 grad:          gamma and beta gradients per channel (a workgroup each), and the means
+//                    the input gradient needs
+//   4 input grad:    dx = gamma * inv_std * (dz - mean(dz) - x_hat * mean(dz * x_hat))
+// Bindings by mode: 0 x or dz; 1 y or dx; 2 x_hat; 3 stats; 4 gamma (grad: its gradient);
+// 5 beta (grad: its gradient); 6 running mean; 7 running variance.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufSrc { float src[]; };
+layout(std430, binding = 1) buffer BufDst { float dst[]; };
+layout(std430, binding = 2) buffer BufXHat { float x_hat[]; };
+layout(std430, binding = 3) buffer BufStats { float stats[]; };
+layout(std430, binding = 4) buffer BufGamma { float gamma[]; };
+layout(std430, binding = 5) buffer BufBeta { float beta[]; };
+layout(std430, binding = 6) buffer BufMean { float mean_run[]; };
+layout(std430, binding = 7) buffer BufVar { float var_run[]; };
+
+layout(push_constant) uniform Params {
+    uint C, area, batch, mode;
+    float momentum, eps;
+} pc;
+
+shared float part[256];
+
+// sum of s over the workgroup; every invocation gets it
+float reduce(float s)
+{
+    uint t = gl_LocalInvocationID.x;
+    part[t] = s;
+    barrier();
+    for (uint w = 128; w > 0; w /= 2)
+    {
+        if (t < w)
+            part[t] += part[t + w];
+        barrier();
+    }
+    float r = part[0];
+    barrier();
+    return r;
+}
+
+void main()
+{
+    uint t = gl_LocalInvocationID.x;
+    uint n = pc.batch * pc.area, nodes = pc.C * pc.area, C = pc.C;
+
+    if (pc.mode == 0u || pc.mode == 3u)
+    {
+        for (uint c = gl_WorkGroupID.x; c < C; c += gl_NumWorkGroups.x)
+        {
+            if (pc.mode == 0u)
+            {
+                float s = 0.0;
+                for (uint j = t; j < n; j += 256u)
+                    s += src[(j / pc.area) * nodes + c * pc.area + j % pc.area];
+                float mean = reduce(s) / float(n);
+                s = 0.0;
+                for (uint j = t; j < n; j += 256u)
+                {
+                    float v = src[(j / pc.area) * nodes + c * pc.area + j % pc.area] - mean;
+                    s += v * v;
+                }
+                float sq = reduce(s);
+                if (t == 0u)
+                {
+                    float var = sq / float(n);
+                    stats[c] = mean;
+                    stats[C + c] = 1.0 / sqrt(var + pc.eps);
+                    mean_run[c] = (1.0 - pc.momentum) * mean_run[c] + pc.momentum * mean;
+                    var_run[c] = (1.0 - pc.momentum) * var_run[c] + pc.momentum * (n > 1u ? sq / float(n - 1u) : var);
+                }
+            }
+            else
+            {
+                float s = 0.0, d = 0.0;
+                for (uint j = t; j < n; j += 256u)
+                {
+                    uint i = (j / pc.area) * nodes + c * pc.area + j % pc.area;
+                    s += src[i];
+                    d += src[i] * x_hat[i];
+                }
+                float sum = reduce(s);
+                float dot = reduce(d);
+                if (t == 0u)
+                {
+                    gamma[c] += dot;
+                    beta[c] += sum;
+                    stats[2u * C + c] = sum / float(n);
+                    stats[3u * C + c] = dot / float(n);
+                }
+            }
+        }
+        return;
+    }
+
+    GRID_LOOP(i, pc.batch * nodes)
+    {
+        uint c = (i / pc.area) % C;
+        if (pc.mode == 1u)
+        {
+            float h = (src[i] - stats[c]) * stats[C + c];
+            x_hat[i] = h;
+            dst[i] = gamma[c] * h + beta[c];
+        }
+        else if (pc.mode == 2u)
+            dst[i] = (src[i] - mean_run[c]) * (gamma[c] / sqrt(var_run[c] + pc.eps)) + beta[c];
+        else
+            dst[i] = gamma[c] * stats[C + c] * (src[i] - stats[2u * C + c] - x_hat[i] * stats[3u * C + c]);
+    }
+}

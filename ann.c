@@ -533,6 +533,9 @@ static void free_layer_params(PLayer layer)
 		tensor_free(layer->t_scratch[i]);
 		layer->t_scratch[i] = NULL;
 	}
+	tensor_free(layer->t_mask);
+	layer->t_mask = NULL;
+	layer->t_in_mask = NULL;
 
 	// the dense aliases pointed at the tensors just freed
 	layer->t_weights	= NULL;
@@ -749,6 +752,17 @@ static int window_output_size(int n, int window, int stride, int padding)
 	if (window < 1 || stride < 1 || padding < 0 || span < 0)
 		return 0;
 	return span / stride + 1;
+}
+
+//------------------------------
+// how many steps one sample's padding mask keeps (see mask_follows)
+//------------------------------
+static int mask_count(const real *m, int steps)
+{
+	int kept = 0;
+	for (int i = 0; i < steps; i++)
+		kept += m[i] != (real)0.0;
+	return kept;
 }
 
 //------------------------------
@@ -1587,12 +1601,16 @@ static void global_avgpool_forward_samples(void *arg, int begin, int end)
 		const real *x = job->x + (size_t)b * layer->node_count * area;
 		real *y = job->y + (size_t)b * layer->node_count;
 
+		// over a masked sequence, the mean of the kept steps (0 if none)
+		const real *m = layer->t_in_mask ? layer->t_in_mask->values + (size_t)b * area : NULL;
+		int kept = m ? mask_count(m, area) : area;
 		for (int c = 0; c < layer->node_count; c++, x += area)
 		{
 			real sum = (real)0.0;
 			for (int i = 0; i < area; i++)
-				sum += x[i];
-			y[c] = sum / (real)area;
+				if (!m || m[i] != (real)0.0)
+					sum += x[i];
+			y[c] = kept ? sum / (real)kept : (real)0.0;
 		}
 	}
 }
@@ -1609,6 +1627,7 @@ static void global_avgpool_forward(PLayer layer, const PTensor X, PTensor Y, int
 
 //------------------------------
 // GlobalAvgPool2D backward: each input gets its channel's gradient / (H*W)
+// (masked: each kept step gets it / the kept steps, masked ones nothing)
 //------------------------------
 static void global_avgpool_backward_samples(void *arg, int begin, int end)
 {
@@ -1621,11 +1640,13 @@ static void global_avgpool_backward_samples(void *arg, int begin, int end)
 		const real *dz = job->x + (size_t)b * layer->node_count;
 		real *dx = job->y + (size_t)b * layer->node_count * area;
 
+		const real *m = layer->t_in_mask ? layer->t_in_mask->values + (size_t)b * area : NULL;
+		int kept = m ? mask_count(m, area) : area;
 		for (int c = 0; c < layer->node_count; c++, dx += area)
 		{
-			real g = dz[c] / (real)area;
+			real g = kept ? dz[c] / (real)kept : (real)0.0;
 			for (int i = 0; i < area; i++)
-				dx[i] = g;
+				dx[i] = !m || m[i] != (real)0.0 ? g : (real)0.0;
 		}
 	}
 }
@@ -1648,7 +1669,8 @@ static void global_avgpool_backward(PLayer layer, const PTensor X, const PTensor
 // running mean and variance, which are state (saved, never trained).
 // Training normalizes with the batch's statistics and keeps x_hat in
 // t_scratch[0] (one row per sample) and 1 / sqrt(var + eps) in t_scratch[1]
-// for the backward pass; prediction uses the running statistics.
+// for the backward pass; prediction uses the running statistics. Over a
+// masked sequence the batch statistics are the kept steps' (t_in_mask).
 //------------------------------
 #define BN_EPSILON	((real)ANN_BATCHNORM_EPSILON)
 #define BN_MOMENTUM	((real)0.1)	// weight of each batch in the running statistics
@@ -1738,7 +1760,8 @@ static void batchnorm_train_channels(void *arg, int begin, int end)
 	const batchnorm_job *job = (const batchnorm_job *)arg;
 	PLayer layer = job->layer;
 	int area = layer->shape.h * layer->shape.w, nodes = layer->node_count;
-	double n = (double)job->rows * area;
+	const real *mask = layer->t_in_mask ? layer->t_in_mask->values : NULL;	// kept steps, one row per sample
+	double n = mask ? (double)mask_count(mask, job->rows * area) : (double)job->rows * area;
 	real *x_hat = layer->t_scratch[0]->values, *inv_std = layer->t_scratch[1]->values;
 	const real *gamma = layer->params[BN_GAMMA].value->values, *beta = layer->params[BN_BETA].value->values;
 	real *mean_run = layer->params[BN_MEAN].value->values, *var_run = layer->params[BN_VAR].value->values;
@@ -1748,31 +1771,37 @@ static void batchnorm_train_channels(void *arg, int begin, int end)
 		double sum = 0.0, sq = 0.0;
 		for (int b = 0; b < job->rows; b++)
 		{
-			const real *x = job->x + (size_t)b * nodes + c * area;
+			const real *x = job->x + (size_t)b * nodes + c * area, *m = mask ? mask + (size_t)b * area : NULL;
 			for (int i = 0; i < area; i++)
-				sum += x[i];
+				if (!m || m[i] != (real)0.0)
+					sum += x[i];
 		}
-		double mean = sum / n;
+		double mean = n > 0.0 ? sum / n : 0.0;
 		for (int b = 0; b < job->rows; b++)
 		{
-			const real *x = job->x + (size_t)b * nodes + c * area;
+			const real *x = job->x + (size_t)b * nodes + c * area, *m = mask ? mask + (size_t)b * area : NULL;
 			for (int i = 0; i < area; i++)
-				sq += (x[i] - mean) * (x[i] - mean);
+				if (!m || m[i] != (real)0.0)
+					sq += (x[i] - mean) * (x[i] - mean);
 		}
-		double var = sq / n;
+		double var = n > 0.0 ? sq / n : 0.0;
 		real inv = (real)(1.0 / sqrt(var + BN_EPSILON));
 
+		// masked steps get x_hat 0 (their outputs are zeroed after the activation)
 		inv_std[c] = inv;
 		for (int b = 0; b < job->rows; b++)
 		{
 			size_t at = (size_t)b * nodes + c * area;
+			const real *m = mask ? mask + (size_t)b * area : NULL;
 			for (int i = 0; i < area; i++)
 			{
-				real h = (job->x[at + i] - (real)mean) * inv;
+				real h = !m || m[i] != (real)0.0 ? (job->x[at + i] - (real)mean) * inv : (real)0.0;
 				x_hat[at + i] = h;
 				job->y[at + i] = gamma[c] * h + beta[c];
 			}
 		}
+		if (n == 0.0)
+			continue;	// all padding: nothing to learn the statistics from
 
 		// the running variance is unbiased, as PyTorch keeps it
 		mean_run[c] = ((real)1.0 - BN_MOMENTUM) * mean_run[c] + BN_MOMENTUM * (real)mean;
@@ -1804,7 +1833,8 @@ static void batchnorm_backward_channels(void *arg, int begin, int end)
 	const batchnorm_job *job = (const batchnorm_job *)arg;
 	PLayer layer = job->layer;
 	int area = layer->shape.h * layer->shape.w, nodes = layer->node_count;
-	double n = (double)job->rows * area;
+	const real *mask = layer->t_in_mask ? layer->t_in_mask->values : NULL;	// kept steps, one row per sample
+	double n = mask ? (double)mask_count(mask, job->rows * area) : (double)job->rows * area;
 	const real *x_hat = layer->t_scratch[0]->values, *inv_std = layer->t_scratch[1]->values;
 	const real *gamma = layer->params[BN_GAMMA].value->values;
 	real *d_gamma = layer->params[BN_GAMMA].grad->values, *d_beta = layer->params[BN_BETA].grad->values;
@@ -1826,12 +1856,16 @@ static void batchnorm_backward_channels(void *arg, int begin, int end)
 
 		if (!job->y)
 			continue;
-		real k = gamma[c] * inv_std[c], mean_dz = (real)(sum / n), mean_dot = (real)(dot / n);
+		// dz is zero at masked steps (see mask_zero), so the sums above are the kept steps'
+		real k = gamma[c] * inv_std[c], mean_dz = n > 0.0 ? (real)(sum / n) : (real)0.0;
+		real mean_dot = n > 0.0 ? (real)(dot / n) : (real)0.0;
 		for (int b = 0; b < job->rows; b++)
 		{
 			size_t at = (size_t)b * nodes + c * area;
+			const real *m = mask ? mask + (size_t)b * area : NULL;
 			for (int i = 0; i < area; i++)
-				job->y[at + i] = k * (job->x[at + i] - mean_dz - x_hat[at + i] * mean_dot);
+				job->y[at + i] = !m || m[i] != (real)0.0 ?
+				                 k * (job->x[at + i] - mean_dz - x_hat[at + i] * mean_dot) : (real)0.0;
 		}
 	}
 }
@@ -1853,9 +1887,10 @@ static void batchnorm_backward(PLayer layer, const PTensor X, const PTensor dZ, 
 // to learned vectors. W is [vocab x D]; the output is the sequence (D, 1, L)
 // for L input ids, y[d][t] = W[id_t][d]. config holds the vocabulary size and
 // padding id + 1 (0 for none): the padding id, and ids outside the
-// vocabulary, give zeros and train nothing.
+// vocabulary, give zeros and train nothing. EMB_MASK is 1 to mask the padding
+// steps (ann_add_embedding_masked; saved only when set).
 //------------------------------
-enum { EMB_VOCAB, EMB_PADDING, EMB_CONFIG_COUNT };
+enum { EMB_VOCAB, EMB_PADDING, EMB_MASK, EMB_CONFIG_COUNT };
 
 static int embedding_id(const PLayer layer, real x)
 {
@@ -1872,6 +1907,7 @@ static int embedding_setup(PNetwork pnet, int layer)
 	int vocab = cur->config[EMB_VOCAB], padding = cur->config[EMB_PADDING] - 1;
 
 	if (cur->activation != ACTIVATION_NULL || vocab < 1 || padding < -1 || padding >= vocab ||
+		(cur->config[EMB_MASK] != 0 && (cur->config[EMB_MASK] != 1 || padding < 0)) ||
 		cur->in_shape.h != 1 || cur->in_shape.w != 1 || cur->shape.h != 1 || cur->shape.w != cur->in_shape.c ||
 		cur->shape.c < 1)
 		return ERR_INVALID;
@@ -1999,16 +2035,18 @@ static void global_maxpool_forward_samples(void *arg, int begin, int end)
 		const real *x = job->x + (size_t)b * layer->node_count * area;
 		real *y = job->y + (size_t)b * layer->node_count;
 		real *arg_max = layer->t_scratch[0]->values + (size_t)b * layer->node_count;
+		const real *m = layer->t_in_mask ? layer->t_in_mask->values + (size_t)b * area : NULL;	// kept steps
 
 		for (int c = 0; c < layer->node_count; c++)
 		{
 			const real *xc = x + (size_t)c * area;
-			int best = 0;
-			for (int i = 1; i < area; i++)
-				if (xc[i] > xc[best])
+			int best = -1;
+			for (int i = 0; i < area; i++)
+				if ((!m || m[i] != (real)0.0) && (best < 0 || xc[i] > xc[best]))
 					best = i;
-			y[c] = xc[best];
-			arg_max[c] = (real)(c * area + best);	// exact: far below 2^24
+			// -1: every step masked, so 0 and no gradient
+			y[c] = best < 0 ? (real)0.0 : xc[best];
+			arg_max[c] = best < 0 ? (real)-1.0 : (real)(c * area + best);	// exact: far below 2^24
 		}
 	}
 }
@@ -2041,7 +2079,8 @@ static void global_maxpool_backward_samples(void *arg, int begin, int end)
 
 		memset(dx, 0, in_nodes * sizeof(real));
 		for (int c = 0; c < layer->node_count; c++)
-			dx[(int)arg_max[c]] = dz[c];
+			if (arg_max[c] >= (real)0.0)
+				dx[(int)arg_max[c]] = dz[c];
 	}
 }
 
@@ -2056,6 +2095,103 @@ static void global_maxpool_backward(PLayer layer, const PTensor X, const PTensor
 	job.x = dZ->values;
 	job.y = dX->values;
 	ann_parallel_for(rows, 1, global_maxpool_backward_samples, &job);
+}
+
+//------------------------------
+// Padding masks. A masked embedding marks each step 1 (kept) or 0 (padding)
+// in t_mask, one row per sample. The 1-D conv, max pooling and batch norm
+// layers above it carry a mask of their own steps (mask_follows): their
+// outputs are zeroed at masked steps after the activation and dropout, and so
+// are the gradients there before the activation's derivative, so each layer
+// reads the zero padding a shorter text would have. Batch norm and the
+// global pooling layers read the mask below them in t_in_mask.
+//------------------------------
+static int mask_follows(const Layer *cur, int below_masked)
+{
+	switch (cur->kind)
+	{
+	case LAYER_KIND_EMBEDDING:
+		return cur->config[EMB_MASK] != 0;
+	case LAYER_KIND_CONV2D:
+	case LAYER_KIND_MAXPOOL2D:
+	case LAYER_KIND_BATCHNORM:
+		return below_masked && cur->in_shape.h == 1 && cur->shape.h == 1;
+	default:
+		return 0;
+	}
+}
+
+//------------------------------
+// set the layer's masked and t_in_mask, and compute its mask for rows
+// samples of X (the layer below's output) when it carries one. A conv or
+// pool step j reads inputs [j*s - p, j*s - p + k - 1]; it is kept when the
+// inputs [j*s, j*s + k - 1 - 2p] (the window less its padding at each end)
+// all are, so a text padded at the end keeps the steps its unpadded length
+// would give (a window narrower than its padding uses its centre input).
+//------------------------------
+static void layer_mask_forward(PNetwork pnet, int layer, const PTensor X, int rows)
+{
+	PLayer cur = &pnet->layers[layer];
+	const PLayer below = &pnet->layers[layer - 1];
+	int steps = cur->shape.w, in_steps = cur->in_shape.w;
+
+	cur->t_in_mask = below->masked ? below->t_mask : NULL;
+	cur->masked = mask_follows(cur, below->masked);
+	if (!cur->masked)
+		return;
+	if (ensure_rows(&cur->t_mask, rows, steps) != ERR_OK)
+	{
+		cur->masked = 0;
+		return;
+	}
+
+	real *m = cur->t_mask->values;
+	if (cur->kind == LAYER_KIND_EMBEDDING)
+	{
+		double padding = (double)(cur->config[EMB_PADDING] - 1);
+		for (int i = 0; i < rows * steps; i++)
+			m[i] = floor((double)X->values[i] + 0.5) == padding ? (real)0.0 : (real)1.0;
+	}
+	else if (cur->kind == LAYER_KIND_BATCHNORM)
+		memcpy(m, cur->t_in_mask->values, (size_t)rows * steps * sizeof(real));
+	else
+	{
+		Window w = cur->kind == LAYER_KIND_CONV2D ? conv_window(cur) : pool_window(cur);
+		for (int b = 0; b < rows; b++)
+		{
+			const real *in = cur->t_in_mask->values + (size_t)b * in_steps;
+			for (int j = 0; j < steps; j++)
+			{
+				int lo = j * w.sw, hi = j * w.sw + w.kw - 1 - 2 * w.pw;
+				if (hi < lo)
+					lo = hi = j * w.sw - w.pw + (w.kw - 1) / 2;
+				lo = lo < 0 ? 0 : lo;
+				hi = hi >= in_steps ? in_steps - 1 : hi;
+				real keep = (real)1.0;
+				for (int i = lo; i <= hi; i++)
+					if (in[i] == (real)0.0)
+						keep = (real)0.0;
+				m[(size_t)b * steps + j] = keep;
+			}
+		}
+	}
+}
+
+//------------------------------
+// zero a masked layer's values (or gradients) at its masked steps
+//------------------------------
+static void mask_zero(const Layer *cur, real *v, int rows)
+{
+	int steps = cur->shape.w;
+	for (int b = 0; b < rows; b++)
+	{
+		const real *m = cur->t_mask->values + (size_t)b * steps;
+		real *vb = v + (size_t)b * cur->node_count;
+		for (int t = 0; t < steps; t++)
+			if (m[t] == (real)0.0)
+				for (int c = 0; c < cur->shape.c; c++)
+					vb[c * steps + t] = (real)0.0;
+	}
 }
 
 //------------------------------
@@ -2331,6 +2467,7 @@ static void eval_network(PNetwork pnet)
 		const Layer_ops *ops = layer_ops(cur);
 
 		// linear part, e.g. y = Wx + b
+		layer_mask_forward(pnet, layer, pnet->layers[layer - 1].t_values, 1);
 		if (ops->forward_single)
 			ops->forward_single(cur, pnet->layers[layer - 1].t_values, cur->t_values);
 		else
@@ -2341,6 +2478,8 @@ static void eval_network(PNetwork pnet)
 		{
 			cur->t_values->values[i] = cur->activation_func(cur->t_values->values[i]);
 		}
+		if (cur->masked)
+			mask_zero(cur, cur->t_values->values, 1);
 	}
 
 	// apply softmax on output, if requested
@@ -2518,6 +2657,7 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 
 		// Linear part (e.g. Y = X * W^T + b), then save the pre-activation Z
 		const Layer_ops *ops = layer_ops(cur);
+		layer_mask_forward(pnet, layer, X, batch_size);
 		if (pnet->is_training && ops->forward_train)
 			ops->forward_train(cur, X, Y, batch_size);
 		else
@@ -2541,6 +2681,8 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 		{
 			apply_dropout_batched(pnet, layer, batch_size);
 		}
+		if (cur->masked)
+			mask_zero(cur, Y->values, batch_size);
 	}
 
 	// Apply softmax on output if requested
@@ -2736,6 +2878,8 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 	if (pnet->loss_type == LOSS_MSE)
 		ann_mse_output_delta(layer->activation, delta->values, Y->values,
 		                     layer->t_batch_z->values, batch_size, out_nodes);
+	if (layer->masked)
+		mask_zero(layer, delta->values, batch_size);
 	
 	// Parameter gradients, and the gradient for the layer below (the input
 	// layer needs none)
@@ -2785,6 +2929,9 @@ static void back_propagate_hidden_batched(PNetwork pnet, int batch_size, int lay
 	
 	// Apply dropout mask to gradient (if dropout was used in forward pass)
 	apply_dropout_mask_to_gradient(layer, batch_size);
+	// masked steps' outputs are constant zeros
+	if (layer->masked)
+		mask_zero(layer, dl_dz->values, batch_size);
 	
 	// dL/dz = dL/da * f'(z)
 	ann_mse_output_delta(layer->activation, dl_dz->values, layer->t_batch_values->values,
@@ -3533,25 +3680,39 @@ int ann_add_global_avgpool2d(PNetwork pnet)
 }
 
 //------------------------------
-// add an embedding layer over the previous layer's token ids
+// add an embedding layer over the previous layer's token ids, masking the
+// padding steps if mask is set
 //------------------------------
-int ann_add_embedding(PNetwork pnet, int vocab_size, int embed_dim, int padding_idx)
+static int add_embedding(PNetwork pnet, int vocab_size, int embed_dim, int padding_idx, int mask,
+                         const char *caller)
 {
 	const Layer_shape *in = last_shape(pnet);
 	Layer_shape shape;
 	int config[EMB_CONFIG_COUNT];
 
-	if (in && (in->h != 1 || in->w != 1 || vocab_size < 1 || padding_idx < -1 || padding_idx >= vocab_size))
+	if (in && (in->h != 1 || in->w != 1 || vocab_size < 1 || padding_idx < (mask ? 0 : -1) ||
+		padding_idx >= vocab_size))
 	{
-		invoke_error_callback(ERR_INVALID, "ann_add_embedding");
+		invoke_error_callback(ERR_INVALID, caller);
 		return ERR_INVALID;
 	}
 	config[EMB_VOCAB] = vocab_size;
 	config[EMB_PADDING] = padding_idx + 1;
+	config[EMB_MASK] = mask;
 	shape.c = embed_dim;
 	shape.h = 1;
 	shape.w = in ? in->c : 1;
 	return add_layer(pnet, LAYER_KIND_EMBEDDING, shape, config, EMB_CONFIG_COUNT, LAYER_HIDDEN, ACTIVATION_NULL);
+}
+
+int ann_add_embedding(PNetwork pnet, int vocab_size, int embed_dim, int padding_idx)
+{
+	return add_embedding(pnet, vocab_size, embed_dim, padding_idx, 0, "ann_add_embedding");
+}
+
+int ann_add_embedding_masked(PNetwork pnet, int vocab_size, int embed_dim, int padding_idx)
+{
+	return add_embedding(pnet, vocab_size, embed_dim, padding_idx, 1, "ann_add_embedding_masked");
 }
 
 //------------------------------
@@ -4949,6 +5110,21 @@ int ann_get_layer_groups(const PNetwork pnet, int layer)
 }
 
 //------------------------------
+// does a layer's output carry a padding mask? (worked out from the layers
+// below, as each forward pass does)
+//------------------------------
+int ann_get_layer_masked(const PNetwork pnet, int layer)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return 0;
+
+	int masked = 0;
+	for (int i = 1; i <= layer; i++)
+		masked = mask_follows(&pnet->layers[i], masked);
+	return masked;
+}
+
+//------------------------------
 // set the loss function
 //------------------------------
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
@@ -5384,6 +5560,8 @@ static int save_network(const PNetwork pnet, const char *filename, int binary, c
 			Window w = pool_window(cur);
 			config_count = w.kw != w.k || w.sw != w.s ? POOL_CONFIG_COUNT : POOL_SIZE_W;
 		}
+		else if (cur->kind == LAYER_KIND_EMBEDDING)
+			config_count = cur->config[EMB_MASK] ? EMB_CONFIG_COUNT : EMB_MASK;
 		ok = write_int(fptr, binary, cur->kind) &&
 		     write_int(fptr, binary, cur->layer_type) &&
 		     write_int(fptr, binary, cur->activation) &&
@@ -6014,13 +6192,117 @@ static void batchnorm_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, con
 }
 
 //-----------------------------------------------
+// Helper: write a FLOAT initializer holding one value
+//-----------------------------------------------
+static void write_onnx_scalar(FILE *fptr, const char *name, real value, int *first)
+{
+	if (!*first) fprintf(fptr, ",\n");
+	*first = 0;
+
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"%s\",\n", name);
+	fprintf(fptr, "        \"data_type\": 1,\n");
+	fprintf(fptr, "        \"dims\": [1],\n");
+	fprintf(fptr, "        \"float_data\": ");
+	write_json_float_array(fptr, &value, 1);
+	fprintf(fptr, "\n");
+	fprintf(fptr, "      }");
+}
+
+//-----------------------------------------------
+// Padding masks in ONNX. A masked layer's mask is the float tensor mask_N
+// [batch, 1, 1, L] (1 kept, 0 padding); a batch norm uses the mask below it.
+// The constants the mask nodes share: mask_axes [1, 2] for its Unsqueeze,
+// mask_sum_axes [2, 3] for the reductions, mask_one 1 and mask_big 3e38.
+//-----------------------------------------------
+static void onnx_mask_name(const PNetwork pnet, int layer, char *name, size_t size)
+{
+	while (pnet->layers[layer].kind == LAYER_KIND_BATCHNORM)
+		layer--;
+	snprintf(name, size, "mask_%d", layer - 1);
+}
+
+static void onnx_mask_initializers(FILE *fptr, int *first)
+{
+	int axes[2] = { 1, 2 }, sum_axes[2] = { 2, 3 };
+	write_onnx_constant(fptr, "mask_axes", 7, axes, 2, first);
+	write_onnx_constant(fptr, "mask_sum_axes", 7, sum_axes, 2, first);
+	write_onnx_scalar(fptr, "mask_one", (real)1.0, first);
+	write_onnx_scalar(fptr, "mask_big", (real)3e38, first);
+}
+
+//-----------------------------------------------
+// A masked layer's mask, then its outputs (*output on entry) times the mask:
+//   embedding     Unsqueeze(Cast(Not(Equal(ids, pad)))); its padding vectors
+//                 are already zero, so its outputs are left as they are
+//   conv, pool    -MaxPool(-mask below) over the window less its padding,
+//                 [1, kw - 2*pw] with stride [1, sw]: kept if all inputs are
+//   batch norm    the mask below
+//-----------------------------------------------
+static void onnx_mask_nodes(FILE *fptr, const PNetwork pnet, int layer, char *output, size_t output_size,
+                            int *first)
+{
+	PLayer cur = &pnet->layers[layer];
+	int index = layer - 1;
+	char name[40], mask[40], below[40], a[40], b[40], attributes[160], out[64];
+	const char *inputs[2];
+
+	onnx_mask_name(pnet, layer, mask, sizeof(mask));
+	if (cur->kind == LAYER_KIND_EMBEDDING)
+	{
+		char ids[40], pad[40];
+		snprintf(ids, sizeof(ids), "emb_%d_ids", index);
+		snprintf(pad, sizeof(pad), "emb_%d_pad", index);
+		snprintf(a, sizeof(a), "mask_%d_padding", index);
+		snprintf(name, sizeof(name), "mask_%d_equal", index);
+		inputs[0] = ids;
+		inputs[1] = pad;
+		write_onnx_node_inputs(fptr, "Equal", name, inputs, 2, a, NULL, first);
+		snprintf(b, sizeof(b), "mask_%d_kept", index);
+		snprintf(name, sizeof(name), "mask_%d_not", index);
+		write_onnx_node(fptr, "Not", name, a, b, NULL, first);
+		snprintf(a, sizeof(a), "mask_%d_float", index);
+		snprintf(name, sizeof(name), "mask_%d_cast", index);
+		write_onnx_node(fptr, "Cast", name, b, a, "[{\"name\": \"to\", \"type\": 2, \"i\": 1}]", first);
+		snprintf(name, sizeof(name), "mask_%d_unsqueeze", index);
+		inputs[0] = a;
+		inputs[1] = "mask_axes";
+		write_onnx_node_inputs(fptr, "Unsqueeze", name, inputs, 2, mask, NULL, first);
+		return;
+	}
+	if (cur->kind != LAYER_KIND_BATCHNORM)
+	{
+		Window w = cur->kind == LAYER_KIND_CONV2D ? conv_window(cur) : pool_window(cur);
+		onnx_mask_name(pnet, layer - 1, below, sizeof(below));
+		snprintf(a, sizeof(a), "mask_%d_neg", index);
+		snprintf(name, sizeof(name), "mask_%d_negate", index);
+		write_onnx_node(fptr, "Neg", name, below, a, NULL, first);
+		snprintf(b, sizeof(b), "mask_%d_min", index);
+		snprintf(name, sizeof(name), "mask_%d_pool", index);
+		snprintf(attributes, sizeof(attributes),
+		         "[{\"name\": \"kernel_shape\", \"type\": 7, \"ints\": [1, %d]}, "
+		         "{\"name\": \"strides\", \"type\": 7, \"ints\": [1, %d]}]", w.kw - 2 * w.pw, w.sw);
+		write_onnx_node(fptr, "MaxPool", name, a, b, attributes, first);
+		snprintf(name, sizeof(name), "mask_%d_restore", index);
+		write_onnx_node(fptr, "Neg", name, b, mask, NULL, first);
+	}
+
+	snprintf(out, sizeof(out), "masked_%d_out", index);
+	snprintf(name, sizeof(name), "masked_%d", index);
+	inputs[0] = output;
+	inputs[1] = mask;
+	write_onnx_node_inputs(fptr, "Mul", name, inputs, 2, out, NULL, first);
+	snprintf(output, output_size, "%s", out);
+}
+
+//-----------------------------------------------
 // Embedding ONNX initializers: emb_N_weight [vocab, D], and emb_N_axes [2]
-// for the Unsqueeze
+// for the Unsqueeze (and emb_N_pad, the padding id, when masked)
 //-----------------------------------------------
 static void embedding_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first)
 {
 	PTensor W = pnet->layers[layer].params[0].value;
-	int dims[2], axes[1] = { 2 };
+	int dims[2], axes[1] = { 2 }, padding = pnet->layers[layer].config[EMB_PADDING] - 1;
 	char name[48];
 	dims[0] = W->rows;
 	dims[1] = W->cols;
@@ -6034,11 +6316,24 @@ static void embedding_onnx_initializers(FILE *fptr, const PNetwork pnet, int lay
 	write_json_int_array(fptr, dims, 2);
 	fprintf(fptr, ",\n");
 	fprintf(fptr, "        \"float_data\": ");
-	write_json_float_array(fptr, W->values, dims[0] * dims[1]);
+	// the padding row as zeros, which libann gives whatever the row holds
+	fprintf(fptr, "[");
+	for (int i = 0; i < dims[0] * dims[1]; i++)
+	{
+		if (i > 0) fprintf(fptr, ", ");
+		write_json_float(fptr, i / dims[1] == padding ? (real)0.0 : W->values[i]);
+	}
+	fprintf(fptr, "]");
 	fprintf(fptr, "\n");
 	fprintf(fptr, "      }");
 	snprintf(name, sizeof(name), "emb_%d_axes", layer - 1);
 	write_onnx_constant(fptr, name, 7, axes, 1, first);
+	if (pnet->layers[layer].config[EMB_MASK])
+	{
+		int pad = pnet->layers[layer].config[EMB_PADDING] - 1;
+		snprintf(name, sizeof(name), "emb_%d_pad", layer - 1);
+		write_onnx_constant(fptr, name, 7, &pad, 1, first);
+	}
 }
 
 //-----------------------------------------------
@@ -6085,11 +6380,40 @@ static void embedding_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, con
 static void global_maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
                                       char *output, size_t output_size, int *first)
 {
-	char name[32];
-	(void)pnet;
-	snprintf(name, sizeof(name), "global_maxpool_%d", layer - 1);
-	snprintf(output, output_size, "global_maxpool_%d_out", layer - 1);
-	write_onnx_node(fptr, "GlobalMaxPool", name, input, output, NULL, first);
+	char name[40], mask[40], off[40], shift[40], any[40], in[40], max[40];
+	const char *inputs[2];
+	int index = layer - 1;
+	snprintf(name, sizeof(name), "global_maxpool_%d", index);
+	snprintf(output, output_size, "global_maxpool_%d_out", index);
+	if (!ann_get_layer_masked(pnet, layer - 1))
+	{
+		write_onnx_node(fptr, "GlobalMaxPool", name, input, output, NULL, first);
+		return;
+	}
+
+	// over a masked sequence: GlobalMaxPool(x + (mask - 1) * 3e38), so masked
+	// steps never win, times ReduceMax(mask), 0 when every step is masked
+	onnx_mask_name(pnet, layer - 1, mask, sizeof(mask));
+	snprintf(off, sizeof(off), "gmp_%d_off", index);
+	snprintf(shift, sizeof(shift), "gmp_%d_shift", index);
+	snprintf(any, sizeof(any), "gmp_%d_any", index);
+	snprintf(in, sizeof(in), "gmp_%d_in", index);
+	snprintf(max, sizeof(max), "gmp_%d_max", index);
+	inputs[0] = mask;
+	inputs[1] = "mask_one";
+	write_onnx_node_inputs(fptr, "Sub", off, inputs, 2, off, NULL, first);
+	inputs[0] = off;
+	inputs[1] = "mask_big";
+	write_onnx_node_inputs(fptr, "Mul", shift, inputs, 2, shift, NULL, first);
+	write_onnx_node(fptr, "ReduceMax", any, mask, any, "[{\"name\": \"axes\", \"type\": 7, \"ints\": [2, 3]}]",
+	                first);
+	inputs[0] = input;
+	inputs[1] = shift;
+	write_onnx_node_inputs(fptr, "Add", in, inputs, 2, in, NULL, first);
+	write_onnx_node(fptr, "GlobalMaxPool", name, in, max, NULL, first);
+	inputs[0] = max;
+	inputs[1] = any;
+	write_onnx_node_inputs(fptr, "Mul", output, inputs, 2, output, NULL, first);
 }
 
 //-----------------------------------------------
@@ -6098,11 +6422,35 @@ static void global_maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer
 static void global_avgpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
                                       char *output, size_t output_size, int *first)
 {
-	char name[32];
-	(void)pnet;
-	snprintf(name, sizeof(name), "global_avgpool_%d", layer - 1);
-	snprintf(output, output_size, "global_avgpool_%d_out", layer - 1);
-	write_onnx_node(fptr, "GlobalAveragePool", name, input, output, NULL, first);
+	char name[40], mask[40], count[40], kept[40], sum[40];
+	const char *inputs[2];
+	int index = layer - 1;
+	snprintf(name, sizeof(name), "global_avgpool_%d", index);
+	snprintf(output, output_size, "global_avgpool_%d_out", index);
+	if (!ann_get_layer_masked(pnet, layer - 1))
+	{
+		write_onnx_node(fptr, "GlobalAveragePool", name, input, output, NULL, first);
+		return;
+	}
+
+	// over a masked sequence: ReduceSum(x) / Max(ReduceSum(mask), 1), the mean
+	// of the kept steps (masked ones are zero), 0 when every step is masked
+	onnx_mask_name(pnet, layer - 1, mask, sizeof(mask));
+	snprintf(count, sizeof(count), "gap_%d_count", index);
+	snprintf(kept, sizeof(kept), "gap_%d_kept", index);
+	snprintf(sum, sizeof(sum), "gap_%d_sum", index);
+	inputs[0] = mask;
+	inputs[1] = "mask_sum_axes";
+	write_onnx_node_inputs(fptr, "ReduceSum", count, inputs, 2, count, NULL, first);
+	inputs[0] = count;
+	inputs[1] = "mask_one";
+	write_onnx_node_inputs(fptr, "Max", kept, inputs, 2, kept, NULL, first);
+	inputs[0] = input;
+	inputs[1] = "mask_sum_axes";
+	write_onnx_node_inputs(fptr, "ReduceSum", sum, inputs, 2, sum, NULL, first);
+	inputs[0] = sum;
+	inputs[1] = kept;
+	write_onnx_node_inputs(fptr, "Div", name, inputs, 2, output, NULL, first);
 }
 
 //-----------------------------------------------
@@ -6228,7 +6576,7 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 			image_input = 1;
 	}
 
-	int image = image_input;
+	int image = image_input, masked = 0;
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PLayer cur = &pnet->layers[layer];
@@ -6240,6 +6588,19 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 		}
 		if (cur->kind != LAYER_KIND_BATCHNORM)	// keeps its input's form
 			image = onnx_makes_image(cur->kind);
+		// a masked conv or pool's mask is a min pool over its window less its
+		// padding, which needs to be at least one step wide
+		if (ann_get_layer_masked(pnet, layer) && (cur->kind == LAYER_KIND_CONV2D || cur->kind == LAYER_KIND_MAXPOOL2D))
+		{
+			Window w = cur->kind == LAYER_KIND_CONV2D ? conv_window(cur) : pool_window(cur);
+			if (w.kw - 2 * w.pw < 1)
+			{
+				invoke_error_callback(ERR_INVALID, "ann_export_onnx");
+				return ERR_INVALID;
+			}
+		}
+		if (ann_get_layer_masked(pnet, layer))
+			masked = 1;
 	}
 
 	FILE *fptr = fopen(filename, "wt");
@@ -6270,6 +6631,8 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	int first_init = 1;
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 		layer_ops(&pnet->layers[layer])->onnx_initializers(fptr, pnet, layer, &first_init);
+	if (masked)
+		onnx_mask_initializers(fptr, &first_init);
 	fprintf(fptr, "\n    ],\n");
 
 	// ========== NODES (operations) ==========
@@ -6348,6 +6711,10 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 			// No activation, next input is the linear output
 			snprintf(prev_output, sizeof(prev_output), "%s", linear_out);
 		}
+
+		// a masked layer's mask, and its outputs zeroed at the masked steps
+		if (ann_get_layer_masked(pnet, layer))
+			onnx_mask_nodes(fptr, pnet, layer, prev_output, sizeof(prev_output), &first_node);
 	}
 	fprintf(fptr, "\n    ],\n");
 
@@ -6774,6 +7141,64 @@ static Activation_type onnx_node_activation(const JsonValue *node, int *ok)
 }
 
 //------------------------------
+// Padding masks (see onnx_mask_nodes): the mask tensors seen so far. A node
+// belongs to the mask when it is one of the ops the mask uses and reads only
+// masks and initializers, at least one mask; libann works the mask out again
+// from its layers, so those nodes are skipped.
+//------------------------------
+#define ONNX_MASK_NAMES 256
+typedef struct {
+	const char *names[ONNX_MASK_NAMES];
+	int count;
+} Onnx_masks;
+
+static int onnx_is_mask(const Onnx_masks *masks, const char *name)
+{
+	for (int i = 0; name && i < masks->count; i++)
+		if (strcmp(masks->names[i], name) == 0)
+			return 1;
+	return 0;
+}
+
+static int onnx_add_mask(Onnx_masks *masks, const char *name)
+{
+	if (masks->count >= ONNX_MASK_NAMES)
+		return 0;
+	masks->names[masks->count++] = name;
+	return 1;
+}
+
+static int onnx_op_is(const JsonValue *node, const char *op)
+{
+	const char *type = json_string(onnx_get(node, "op_type"));
+	return type && strcmp(type, op) == 0;
+}
+
+static int onnx_mask_node(const JsonValue *graph, const JsonValue *node, const Onnx_masks *masks)
+{
+	static const char *const ops[] = { "Not", "Cast", "Unsqueeze", "Neg", "MaxPool", "ReduceSum", "ReduceMax",
+	                                   "Max", "Sub", "Mul" };
+	const char *op = json_string(onnx_get(node, "op_type"));
+	JsonValue *inputs = onnx_get(node, "input");
+	int known = 0, reads_mask = 0;
+
+	for (size_t i = 0; op && i < sizeof(ops) / sizeof(ops[0]); i++)
+		if (strcmp(op, ops[i]) == 0)
+			known = 1;
+	if (!known || json_array_length(onnx_get(node, "output")) != 1)
+		return 0;
+	for (size_t i = 0; i < json_array_length(inputs); i++)
+	{
+		const char *in = json_string(json_at(inputs, i));
+		if (onnx_is_mask(masks, in))
+			reads_mask = 1;
+		else if (!in || !onnx_initializer(graph, in))
+			return 0;
+	}
+	return reads_mask;
+}
+
+//------------------------------
 // Import network from ONNX JSON file
 //------------------------------
 PNetwork ann_import_onnx(const char *filename)
@@ -6870,6 +7295,9 @@ PNetwork ann_import_onnx(const char *filename)
 	// Reshape to an image makes [batch, C, H, W])
 	int spatial = rank == 3 ? 1 : 2;
 	size_t count = json_array_length(nodes);
+	Onnx_masks masks;
+	const char *emb_ids = NULL;	// the last embedding's ids
+	masks.count = 0;
 
 	for (size_t i = 0; i < count; i++)
 	{
@@ -6878,6 +7306,38 @@ PNetwork ann_import_onnx(const char *filename)
 		const char *name = json_string(onnx_get(node, "name"));
 		const char *output = onnx_io(node, "output", 0);
 		const char *in0 = onnx_io(node, "input", 0);
+
+		// a padding mask starts with an Equal of an embedding's ids and its
+		// padding id, right after the embedding: it masks that embedding
+		if (op && output && strcmp(op, "Equal") == 0 && emb_ids && in0 && strcmp(in0, emb_ids) == 0)
+		{
+			PLayer last = &pnet->layers[pnet->layer_count - 1];
+			double pad = -1.0;
+			int ok = last->kind == LAYER_KIND_EMBEDDING &&
+				onnx_constant_values(onnx_initializer(graph, onnx_io(node, "input", 1)), &pad, 1) == 1 &&
+				pad == floor(pad) && pad >= 0.0 && pad < (double)last->config[EMB_VOCAB];
+			// libann's padding vector is always zero, so the graph's must be
+			for (int d = 0; ok && d < last->shape.c; d++)
+				ok = last->params[0].value->values[(size_t)pad * last->shape.c + d] == (real)0.0;
+			if (!ok || !onnx_add_mask(&masks, output))
+			{
+				error = "ann_import_onnx: unsupported Equal (needs a padding mask: the ids equal to a constant "
+				        "padding id whose embedding row is zero)";
+				goto fail;
+			}
+			last->config[EMB_PADDING] = (int)pad + 1;
+			last->config[EMB_MASK] = 1;
+			continue;
+		}
+		if (op && output && onnx_mask_node(graph, node, &masks))
+		{
+			if (!onnx_add_mask(&masks, output))
+			{
+				error = "ann_import_onnx: too many padding mask nodes";
+				goto fail;
+			}
+			continue;
+		}
 
 		// a Gather reads the chain as its second input (the ids; the first is its table)
 		if (op && strcmp(op, "Gather") == 0 && onnx_io(node, "input", 1))
@@ -7065,6 +7525,7 @@ PNetwork ann_import_onnx(const char *filename)
 			kind = LAYER_KIND_EMBEDDING;
 			units = dims[1];
 			kernel = dims[0];
+			emb_ids = current;
 			output = onnx_io(next, "output", 0);
 			i++;
 			spatial = 1;
@@ -7088,6 +7549,55 @@ PNetwork ann_import_onnx(const char *filename)
 			spatial = 2;
 			current = output;
 			continue;
+		}
+		else if (strcmp(op, "Mul") == 0 && onnx_is_mask(&masks, onnx_io(node, "input", 1)))
+		{
+			// a masked layer's outputs times its mask: libann zeroes them itself
+			if (!ann_get_layer_masked(pnet, pnet->layer_count - 1))
+			{
+				error = "ann_import_onnx: unsupported Mul (a padding mask on a layer libann does not mask)";
+				goto fail;
+			}
+			current = output;
+			continue;
+		}
+		else if (strcmp(op, "ReduceSum") == 0 || strcmp(op, "Add") == 0)
+		{
+			// global pooling over a masked sequence (see global_avgpool_onnx_nodes
+			// and global_maxpool_onnx_nodes):
+			//   ReduceSum(x, [2, 3]) then Div by the kept steps (from the mask)
+			//   Add(x, mask shift), GlobalMaxPool, then Mul by ReduceMax(mask)
+			int avg = op[0] == 'R', n = avg ? 2 : 3;
+			JsonValue *steps[3];
+			double axes[2] = { 0.0, 0.0 };
+			int keep_dims = 1, ok = image && ann_get_layer_masked(pnet, pnet->layer_count - 1) && i + n <= count;
+			JsonValue *attr = onnx_attribute(node, "keepdims");
+			if (attr && !onnx_int(onnx_get(attr, "i"), &keep_dims))
+				keep_dims = 0;
+			for (int k = 0; ok && k < n; k++)
+			{
+				steps[k] = json_at(nodes, i + k);
+				ok = json_array_length(onnx_get(steps[k], "input")) == (k == 1 && !avg ? 1 : 2) &&
+				     json_array_length(onnx_get(steps[k], "output")) == 1 &&
+				     (k == 0 || strcmp(onnx_io(steps[k], "input", 0), onnx_io(steps[k - 1], "output", 0)) == 0);
+			}
+			if (ok && avg)
+				ok = keep_dims == 1 && onnx_constant_values(onnx_initializer(graph, onnx_io(node, "input", 1)), axes, 2) == 2 &&
+				     axes[0] == 2.0 && axes[1] == 3.0 && onnx_op_is(steps[1], "Div") &&
+				     onnx_is_mask(&masks, onnx_io(steps[1], "input", 1));
+			else if (ok)
+				ok = onnx_is_mask(&masks, onnx_io(node, "input", 1)) &&
+				     onnx_op_is(steps[1], "GlobalMaxPool") &&
+				     onnx_op_is(steps[2], "Mul") &&
+				     onnx_is_mask(&masks, onnx_io(steps[2], "input", 1));
+			if (!ok)
+			{
+				error = "ann_import_onnx: unsupported ReduceSum or Add (only global pooling over a masked sequence)";
+				goto fail;
+			}
+			kind = avg ? LAYER_KIND_GLOBAL_AVGPOOL2D : LAYER_KIND_GLOBAL_MAXPOOL2D;
+			output = onnx_io(steps[n - 1], "output", 0);
+			i += n - 1;
 		}
 		else if (strcmp(op, "GlobalMaxPool") == 0)
 		{

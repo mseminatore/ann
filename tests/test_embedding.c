@@ -3,8 +3,9 @@
 //
 // Shapes and argument checks, lookups (rounding, padding and ids outside the
 // vocabulary), finite-difference gradient checks as in test_conv.c, the same
-// results for any thread count, a small text classifier, save/load, ONNX
-// export and import, and quantization.
+// results for any thread count, padding masks (a padded text gives what the
+// unpadded one does), a small text classifier, save/load, ONNX export and
+// import, and quantization.
 //-----------------------------------------------------------
 
 #include <stdio.h>
@@ -48,15 +49,20 @@ static void set_params(PNetwork net)
 // Ids for the gradient checks over a vocabulary of 6 with padding id 0:
 // in-vocabulary ids, padding, an id past the vocabulary, and a negative one
 static const real gc_ids[GC_BATCH * 7] = { 1, 4, 2, 0, 5, 3, 9,   2, 2, 5, -1, 1, 4, 0 };
-static real g_t[GC_BATCH * MAX_OUT];
+// and for the masked checks (padding id 0): padding at the end, at the start
+// with an id past the vocabulary, and a sample that is all padding
+static const real gc_masked_ids[3 * 7] = { 1, 4, 2, 5, 3, 0, 0,   0, 0, 2, 9, 1, 4, 3,   0, 0, 0, 0, 0, 0, 0 };
+static const real *g_ids = gc_ids;
+static int g_batch = GC_BATCH;
+static real g_t[4 * MAX_OUT];
 
 static double batch_loss(PNetwork net)
 {
     int in = net->layers[0].node_count, out = net->layers[net->layer_count - 1].node_count;
     double loss = 0.0;
     real y[MAX_OUT];
-    for (int b = 0; b < GC_BATCH; b++) {
-        ann_predict(net, &gc_ids[b * in], y);
+    for (int b = 0; b < g_batch; b++) {
+        ann_predict(net, &g_ids[b * in], y);
         for (int k = 0; k < out; k++) {
             real t = g_t[b * out + k];
             loss += net->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY ? -t * log(y[k]) : 0.5 * (t - y[k]) * (t - y[k]);
@@ -75,7 +81,7 @@ static real grad_check(PNetwork net)
     ann_train_begin(net);
     set_params(net);
     int out = net->layers[net->layer_count - 1].node_count;
-    for (int b = 0; b < GC_BATCH; b++)
+    for (int b = 0; b < g_batch; b++)
         for (int k = 0; k < out; k++)
             g_t[b * out + k] = k == b % out ? 0.7f : 0.3f / (out - 1);
 
@@ -96,7 +102,7 @@ static real grad_check(PNetwork net)
             }
         }
 
-    ann_train_step(net, gc_ids, g_t, GC_BATCH);
+    ann_train_step(net, g_ids, g_t, g_batch);
 
     real worst = 0.0f;
     n = 0;
@@ -128,6 +134,132 @@ static PNetwork net_embed_conv(int pool_max)
         ann_add_global_avgpool2d(net);
     ann_add_layer(net, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
     return net;
+}
+
+// 7 ids -> masked embedding (vocab 6, dim 3, padding 0) -> conv1d(4, k3, padding 1, tanh)
+// -> max pool 2 -> conv1d(3, k2, tanh) -> global max or average pool -> dense(3, softmax)
+static PNetwork net_masked(int pool_max)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_CATEGORICAL_CROSS_ENTROPY);
+    ann_add_layer(net, 7, LAYER_INPUT, ACTIVATION_NULL);
+    ann_add_embedding_masked(net, 6, 3, 0);
+    ann_add_conv1d(net, 4, 3, 1, 1, ACTIVATION_TANH);
+    ann_add_maxpool1d(net, 2, 2);
+    ann_add_conv1d(net, 3, 2, 1, 0, ACTIVATION_TANH);
+    if (pool_max)
+        ann_add_global_maxpool2d(net);
+    else
+        ann_add_global_avgpool2d(net);
+    ann_add_layer(net, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    return net;
+}
+
+static real grad_check_masked(PNetwork net)
+{
+    g_ids = gc_masked_ids;
+    g_batch = 3;
+    real worst = grad_check(net);
+    g_ids = gc_ids;
+    g_batch = GC_BATCH;
+    return worst;
+}
+
+//------------------------------
+// Masked sequence nets for the padding tests, over len ids from a
+// vocabulary of 12 (padding 0):
+//   strided: masked embedding (4) -> conv1d(6, k3, padding 1, relu) ->
+//            batch norm (relu) -> max pool 2 -> conv1d(5, k3, tanh)
+//   stride 1: masked embedding (4) -> conv1d(6, k3, padding 1, relu) ->
+//            conv1d(5, k3, padding 1, tanh)
+// then global max or average pooling and dense(3, softmax)
+//------------------------------
+static PNetwork net_seq(int len, int masked, int strided, int pool_max)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_CATEGORICAL_CROSS_ENTROPY);
+    net->print_func = quiet;
+    ann_add_layer(net, len, LAYER_INPUT, ACTIVATION_NULL);
+    if (masked)
+        ann_add_embedding_masked(net, 12, 4, 0);
+    else
+        ann_add_embedding(net, 12, 4, 0);
+    ann_add_conv1d(net, 6, 3, 1, 1, ACTIVATION_RELU);
+    if (strided) {
+        ann_add_batchnorm(net, ACTIVATION_RELU);
+        ann_add_maxpool1d(net, 2, 2);
+        ann_add_conv1d(net, 5, 3, 1, 0, ACTIVATION_TANH);
+    } else
+        ann_add_conv1d(net, 5, 3, 1, 1, ACTIVATION_TANH);
+    if (pool_max)
+        ann_add_global_maxpool2d(net);
+    else
+        ann_add_global_avgpool2d(net);
+    ann_add_layer(net, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    ann_set_learning_rate(net, 0.1f);
+    return net;
+}
+
+// set_params, with positive batch norm variances
+static void set_seq_params(PNetwork net)
+{
+    set_params(net);
+    for (int l = 1; l < net->layer_count; l++)
+        if (net->layers[l].kind == LAYER_KIND_BATCHNORM) {
+            PTensor var = net->layers[l].params[3].value;
+            for (int i = 0; i < var->cols; i++)
+                var->values[i] = 0.5f + (real)fabs(var->values[i]);
+        }
+}
+
+// copy every parameter of a into b (the same layers, whatever the sequence length)
+static void copy_params(PNetwork a, PNetwork b)
+{
+    for (int l = 1; l < a->layer_count; l++)
+        for (int p = 0; p < a->layers[l].param_count; p++) {
+            PTensor t = a->layers[l].params[p].value;
+            memcpy(b->layers[l].params[p].value->values, t->values, (size_t)t->rows * t->cols * sizeof(real));
+        }
+}
+
+static real max_param_diff(PNetwork a, PNetwork b)
+{
+    real worst = 0.0f;
+    for (int l = 1; l < a->layer_count; l++)
+        for (int p = 0; p < a->layers[l].param_count; p++) {
+            PTensor ta = a->layers[l].params[p].value, tb = b->layers[l].params[p].value;
+            for (int i = 0; i < ta->rows * ta->cols; i++)
+                if (fabs(ta->values[i] - tb->values[i]) > worst) worst = (real)fabs(ta->values[i] - tb->values[i]);
+        }
+    return worst;
+}
+
+// count samples of n tokens: in short, and padded with 0 to len in padded
+// (after the tokens, or before them with pre)
+enum { SHORT_LEN = 10, PAD_LEN = 24 };
+static void make_padded(real *shorter, real *padded, int count, int pre)
+{
+    for (int b = 0; b < count; b++)
+        for (int t = 0; t < PAD_LEN; t++) {
+            int at = pre ? t - (PAD_LEN - SHORT_LEN) : t;
+            real tok = (real)(1 + (7 * b + 5 * at + (at * at) % 3) % 11);
+            if (at >= 0 && at < SHORT_LEN) {
+                shorter[b * SHORT_LEN + at] = tok;
+                padded[b * PAD_LEN + t] = tok;
+            } else
+                padded[b * PAD_LEN + t] = 0;
+        }
+}
+
+// largest output difference between net a on padded samples and b on short ones
+static real padded_pred_diff(PNetwork a, PNetwork b, const real *padded, const real *shorter, int count)
+{
+    real worst = 0.0f, ya[MAX_OUT], yb[MAX_OUT];
+    for (int n = 0; n < count; n++) {
+        ann_predict(a, &padded[n * PAD_LEN], ya);
+        ann_predict(b, &shorter[n * SHORT_LEN], yb);
+        for (int k = 0; k < 3; k++)
+            if (fabs(ya[k] - yb[k]) > worst) worst = (real)fabs(ya[k] - yb[k]);
+    }
+    return worst;
 }
 
 // 7 ids -> embedding (vocab 6, dim 2, no padding) -> dense(2, sigmoid) -> dense(3, softmax)
@@ -175,12 +307,15 @@ static void make_texts(real *x, real *y, int count, unsigned seed)
     }
 }
 
-static PNetwork make_text_net(void)
+static PNetwork make_text_net(int masked)
 {
     PNetwork net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
     net->print_func = quiet;
     ann_add_layer(net, SEQ, LAYER_INPUT, ACTIVATION_NULL);
-    ann_add_embedding(net, VOCAB, 8, 0);                  // 8x1x16
+    if (masked)
+        ann_add_embedding_masked(net, VOCAB, 8, 0);
+    else
+        ann_add_embedding(net, VOCAB, 8, 0);              // 8x1x16
     ann_add_conv1d(net, 16, 2, 1, 0, ACTIVATION_RELU);    // 16x1x15: word pairs
     ann_add_global_maxpool2d(net);                        // 16: wherever the pair is
     ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
@@ -216,14 +351,14 @@ static real max_pred_diff(PNetwork a, PNetwork b, const real *x, int count)
 }
 
 // The text net's parameters after a few epochs with the given thread count
-static real *train_text_params(int threads, size_t *count)
+static real *train_text_params(int threads, int masked, size_t *count)
 {
     enum { N = 64 };
     static real x[N * SEQ], y[N * 2];
     make_texts(x, y, N, 5u);
     ann_set_num_threads(threads);
     srand(3);
-    PNetwork net = make_text_net();
+    PNetwork net = make_text_net(masked);
     ann_set_epoch_limit(net, 3);
     PTensor tx = tensor_create_from_array(N, SEQ, x), ty = tensor_create_from_array(N, 2, y);
     ann_train_network(net, tx, ty, N);
@@ -352,12 +487,161 @@ void test_main(int argc, char *argv[])
         ann_free_network(net);
     }
 
+    SUITE("Padding Masks");
+    {
+        PNetwork net = net_seq(PAD_LEN, 1, 1, 1);
+        int masked[8], expect[8] = { 0, 1, 1, 1, 1, 1, 0, 0 };
+        for (int l = 0; l < 8; l++)
+            masked[l] = ann_get_layer_masked(net, l);
+        TESTEX("The mask follows conv1d, batch norm and max pooling, and ends at global pooling",
+               memcmp(masked, expect, sizeof(expect)) == 0);
+        PNetwork plain = net_seq(PAD_LEN, 0, 1, 1);
+        int none = 1;
+        for (int l = 0; l < 8; l++)
+            none = none && ann_get_layer_masked(plain, l) == 0;
+        TESTEX("An unmasked embedding masks nothing", none && ann_get_layer_masked(NULL, 1) == 0 &&
+               ann_get_layer_masked(net, 99) == 0);
+        ann_free_network(plain);
+        ann_free_network(net);
+
+        net = ann_make_network(OPT_SGD, LOSS_MSE);
+        ann_add_layer(net, 5, LAYER_INPUT, ACTIVATION_NULL);
+        TESTEX("A masked embedding needs a padding id", ann_add_embedding_masked(net, 6, 2, -1) == ERR_INVALID &&
+               ann_add_embedding_masked(net, 6, 2, 6) == ERR_INVALID && ann_add_embedding_masked(NULL, 6, 2, 0) != ERR_OK);
+        ann_free_network(net);
+    }
+    {
+        // the same weights on padded and unpadded texts
+        enum { N = 4 };
+        static real shorter[N * SHORT_LEN], padded[N * PAD_LEN], pre[N * PAD_LEN];
+        real t[N * 3];
+        for (int i = 0; i < N * 3; i++) t[i] = (real)(i % 3 == (i / 3) % 3);
+        make_padded(shorter, padded, N, 0);
+        make_padded(shorter, pre, N, 1);
+        int end_pred[2], step[2], start_pred[2];
+        for (int pool_max = 0; pool_max < 2; pool_max++) {
+            PNetwork a = net_seq(PAD_LEN, 1, 1, pool_max), b = net_seq(SHORT_LEN, 1, 1, pool_max);
+            ann_train_begin(a);
+            ann_train_begin(b);
+            set_seq_params(a);
+            copy_params(a, b);
+            end_pred[pool_max] = padded_pred_diff(a, b, padded, shorter, N) < 1e-5f;
+            ann_train_step(a, padded, t, N);
+            ann_train_step(b, shorter, t, N);
+            step[pool_max] = max_param_diff(a, b) < 1e-5f && padded_pred_diff(a, b, padded, shorter, N) < 1e-5f;
+            ann_train_end(a);
+            ann_train_end(b);
+            ann_free_network(a);
+            ann_free_network(b);
+
+            a = net_seq(PAD_LEN, 1, 0, pool_max);
+            b = net_seq(SHORT_LEN, 1, 0, pool_max);
+            ann_train_begin(a);
+            ann_train_begin(b);
+            set_seq_params(a);
+            copy_params(a, b);
+            start_pred[pool_max] = padded_pred_diff(a, b, pre, shorter, N) < 1e-5f;
+            ann_train_end(a);
+            ann_train_end(b);
+            ann_free_network(a);
+            ann_free_network(b);
+        }
+        TESTEX("Padded at the end, a masked net predicts as on the unpadded text (global average pool)", end_pred[0]);
+        TESTEX("and a training step (batch norm statistics too) matches", step[0]);
+        TESTEX("Padded at the end, a masked net predicts as on the unpadded text (global max pool)", end_pred[1]);
+        TESTEX("and a training step (batch norm statistics too) matches", step[1]);
+        TESTEX("Padded at the start, stride 1 layers predict as unpadded (global average pool)", start_pred[0]);
+        TESTEX("Padded at the start, stride 1 layers predict as unpadded (global max pool)", start_pred[1]);
+
+        // without the mask the padding changes the answer
+        PNetwork a = net_seq(PAD_LEN, 0, 1, 0), b = net_seq(SHORT_LEN, 0, 1, 0);
+        ann_train_begin(a);
+        ann_train_begin(b);
+        set_seq_params(a);
+        copy_params(a, b);
+        TESTEX("Without the mask, padding changes the prediction", padded_pred_diff(a, b, padded, shorter, N) > 1e-3f);
+        ann_train_end(a);
+        ann_train_end(b);
+        ann_free_network(a);
+        ann_free_network(b);
+
+        // a text of nothing but padding pools to zeros: the output is softmax(bias)
+        a = net_seq(PAD_LEN, 1, 1, 1);
+        ann_train_begin(a);
+        set_seq_params(a);
+        real empty[PAD_LEN] = { 0 }, y[3], e[3], sum = 0.0f;
+        ann_predict(a, empty, y);
+        const real *bias = a->layers[7].params[1].value->values;
+        for (int k = 0; k < 3; k++) sum += e[k] = (real)exp(bias[k]);
+        TESTEX("A text that is all padding pools to zeros", fabs(y[0] - e[0] / sum) < 1e-6f &&
+               fabs(y[1] - e[1] / sum) < 1e-6f && fabs(y[2] - e[2] / sum) < 1e-6f);
+        ann_train_end(a);
+        ann_free_network(a);
+    }
+    TESTEX("Gradients with padding at either end and an all-padding text (global max pool)",
+           grad_check_masked(net_masked(1)) <= 1.0f);
+    TESTEX("Gradients with padding at either end and an all-padding text (global average pool)",
+           grad_check_masked(net_masked(0)) <= 1.0f);
+    {
+        // saved and exported with the mask
+        enum { N = 4 };
+        static real shorter[N * SHORT_LEN], padded[N * PAD_LEN];
+        make_padded(shorter, padded, N, 0);
+        int exported[2], imported[2], predicts[2];
+        for (int pool_max = 0; pool_max < 2; pool_max++) {
+            PNetwork net = net_seq(PAD_LEN, 1, 1, pool_max);
+            ann_train_begin(net);
+            set_seq_params(net);
+            real t[N * 3];
+            for (int i = 0; i < N * 3; i++) t[i] = (real)(i % 3 == 0);
+            ann_train_step(net, padded, t, N);    // running statistics that are not the identity
+            ann_train_end(net);
+            if (pool_max == 0) {
+                ann_save_network(net, "test_mask.nna");
+                ann_save_network_binary(net, "test_mask.nnb");
+                PNetwork text = ann_load_network("test_mask.nna"), bin = ann_load_network_binary("test_mask.nnb");
+                int k, st, p;
+                TESTEX("A masked embedding saves and loads its mask", text && bin && ann_get_layer_masked(text, 5) &&
+                       ann_get_layer_masked(bin, 5) && ann_get_layer_settings(bin, 1, &k, &st, &p) == ERR_OK && p == 0);
+                TESTEX("and the binary load predicts identically", bin && max_pred_diff(net, bin, padded, N) == 0.0f);
+                ann_free_network(text);
+                ann_free_network(bin);
+                remove("test_mask.nna");
+                remove("test_mask.nnb");
+            }
+            const char *onnx = "test_mask.onnx.json";
+            exported[pool_max] = ann_export_onnx(net, onnx) == ERR_OK && file_contains(onnx, "\"op_type\": \"Equal\"") &&
+                file_contains(onnx, "\"input\": [\"emb_0_ids\", \"emb_0_pad\"]") &&
+                file_contains(onnx, pool_max ? "\"op_type\": \"ReduceMax\"" : "\"op_type\": \"Div\"");
+            PNetwork back = ann_import_onnx(onnx);
+            int same_masks = back != NULL;
+            for (int l = 0; same_masks && l < net->layer_count; l++)
+                same_masks = ann_get_layer_masked(back, l) == ann_get_layer_masked(net, l);
+            imported[pool_max] = same_structure(net, back) && same_masks;
+            predicts[pool_max] = back && max_pred_diff(net, back, padded, N) == 0.0f;
+            ann_free_network(back);
+            remove(onnx);
+            ann_free_network(net);
+        }
+        TESTEX("A masked net exports the mask to ONNX (global average pool)", exported[0]);
+        TESTEX("and imports with the same layers and masks", imported[0]);
+        TESTEX("and predicts identically", predicts[0]);
+        TESTEX("A masked net exports the mask to ONNX (global max pool)", exported[1]);
+        TESTEX("and imports with the same layers and masks", imported[1]);
+        TESTEX("and predicts identically", predicts[1]);
+    }
+
     SUITE("Threads");
     {
         size_t n1, n4;
-        real *one = train_text_params(1, &n1), *four = train_text_params(4, &n4);
+        real *one = train_text_params(1, 0, &n1), *four = train_text_params(4, 0, &n4);
         TESTEX("1 and 4 threads train identical weights", one && four && n1 == n4 &&
                memcmp(one, four, n1 * sizeof(real)) == 0);
+        free(one);
+        free(four);
+        one = train_text_params(1, 1, &n1);
+        four = train_text_params(4, 1, &n4);
+        TESTEX("and with a padding mask", one && four && n1 == n4 && memcmp(one, four, n1 * sizeof(real)) == 0);
         free(one);
         free(four);
         ann_set_num_threads(0);
@@ -372,10 +656,19 @@ void test_main(int argc, char *argv[])
         PTensor tx = tensor_create_from_array(N, SEQ, x), ty = tensor_create_from_array(N, 2, y);
         PTensor txt = tensor_create_from_array(NT, SEQ, xt), tyt = tensor_create_from_array(NT, 2, yt);
         srand(1);
-        PNetwork net = make_text_net();
+        PNetwork masked = make_text_net(1);
+        ann_set_epoch_limit(masked, 40);
+        ann_train_network(masked, tx, ty, N);
+        real acc = ann_evaluate_accuracy(masked, txt, tyt);
+        printf("\t  with a padding mask: test accuracy %.2f\n", acc);
+        TESTEX("A masked text classifier learns to find the phrase too", acc >= 0.95f);
+        ann_free_network(masked);
+
+        srand(1);
+        PNetwork net = make_text_net(0);
         ann_set_epoch_limit(net, 40);
         ann_train_network(net, tx, ty, N);
-        real acc = ann_evaluate_accuracy(net, txt, tyt);
+        acc = ann_evaluate_accuracy(net, txt, tyt);
         printf("\t  phrase detection with embedding + conv1d + max pool: test accuracy %.2f\n", acc);
         TESTEX("A text classifier learns to find a phrase anywhere in the sequence", acc >= 0.95f);
 

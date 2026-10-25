@@ -363,6 +363,7 @@ ann_add_reshape | give the previous layer's values a (channels, height, width) s
 ann_add_global_avgpool2d | each channel's mean: (C, H, W) to (C, 1, 1)
 ann_add_batchnorm | batch normalization per channel (per node after a dense layer), then an optional activation
 ann_add_embedding | token ids to learned vectors: L ids become the sequence (dim, 1, L)
+ann_add_embedding_masked | an embedding whose padding steps are left out of the layers above (see below)
 ann_add_global_maxpool2d | each channel's largest value: (C, H, W) to (C, 1, 1)
 
 Output sizes are `(H + 2*padding - kernel) / stride + 1` for convolutions,
@@ -402,6 +403,19 @@ ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 Ids outside the vocabulary also give zeros. Networks with an embedding train
 on the CPU (GPU backends keep them there) and cannot be quantized or exported
 as C headers yet.
+
+The padding vectors are zero, but the layers above still see the padding
+steps: a convolution's bias makes them nonzero, and they count in pooling and
+batch norm statistics, so a text's answer depends on how much padding it has.
+`ann_add_embedding_masked(net, 10000, 64, 0)` leaves them out. The mask
+follows the sequence through 1-D convolutions, max pooling and batch norm,
+whose outputs at masked steps are zero (the zero padding a shorter text would
+have); batch norm's statistics and global average and max pooling skip them,
+and a text that is all padding pools to zeros. A text padded at the end then
+gives what the same text unpadded would (padding at the start also does when
+every stride is 1). `ann_get_layer_masked` tells which layers carry the mask.
+Saves keep it, and ONNX exports it as the ops that compute it, which libann
+imports back.
 
 Global average pooling replaces flatten + a large dense layer at the end of a
 CNN: each channel becomes its mean, so the classifier sees one value per

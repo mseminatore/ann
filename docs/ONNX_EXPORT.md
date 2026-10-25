@@ -28,8 +28,21 @@ ann_export_onnx(pnet, "model.onnx.json");
   `emb_N_weight [vocab, D]`), `Transpose` to `[batch, D, L]` and `Unsqueeze`
   to `[batch, D, 1, L]`; for ids outside the vocabulary ONNX's `Gather` fails
   where libann gives zeros, and `Cast` truncates where libann rounds (the same
-  for integer ids). A model that starts with dense layers or an embedding
-  keeps a `[batch, n]` input.
+  for integer ids). The padding row is written as zeros, which libann gives
+  whatever the row holds. A model that starts with dense layers or an
+  embedding keeps a `[batch, n]` input.
+- A masked embedding (`ann_add_embedding_masked`) also exports its padding
+  mask, a float `mask_N [batch, 1, 1, L]` (1 kept, 0 padding):
+  `Unsqueeze(Cast(Not(Equal(emb_N_ids, emb_N_pad))))` for the embedding, and
+  for each conv or max pooling layer it follows, `Neg`, `MaxPool` over the
+  window less its padding (`[1, kw - 2*pw]`, stride `[1, sw]`) and `Neg` (a
+  step is kept when all its inputs are). Each masked layer's output is
+  multiplied by its mask (batch norm uses the mask below it). Global average
+  pooling over a masked sequence becomes `ReduceSum(x, [2, 3]) /
+  Max(ReduceSum(mask, [2, 3]), 1)`, and global max pooling
+  `GlobalMaxPool(x + (mask - 1) * 3e38) * ReduceMax(mask)`, both 0 for a text
+  that is all padding. A masked conv or pool needs a window wider than twice
+  its padding (`ERR_INVALID` otherwise).
 - `weight_N` has dims `[in_nodes, out_nodes]`, the layout ONNX `MatMul` expects
   (libann stores weights as `[out, in]` internally and transposes them on export)
 - Input shape: `[batch, input_size]` with dynamic batch dimension
@@ -70,6 +83,7 @@ ONNX node | libann layer
 `GlobalAveragePool` | global average pooling layer (as PyTorch writes `nn.AdaptiveAvgPool2d(1)`)
 `GlobalMaxPool` | global max pooling layer (as PyTorch writes `nn.AdaptiveMaxPool1d(1)`/`2d(1)`)
 `Gather` (+ `Transpose` perm `[0, 2, 1]`) | embedding layer: `Gather(weight [vocab, D], ids)` on the flat ids, as PyTorch writes `nn.Embedding` followed by `x.transpose(1, 2)`; a `Cast` of the ids before it and an `Unsqueeze` at axis 2 after it (as libann exports) are accepted
+`Equal` of the ids and a constant, and the mask nodes after it | a masked embedding (the graph libann exports, above): an `Equal(ids, pad)` right after the embedding makes it masked with that padding id, whose row must be zero; the nodes that read only masks and constants are skipped (libann works the mask out again from its layers), as are `Mul`s of a masked layer by a mask, and the masked global pooling patterns import as global pooling layers
 `BatchNormalization` | batch norm layer (inference form: constant `[C]` scale, bias, mean and var, one output; any epsilon, which is moved into the variance since libann's is 1e-5), on `[batch, C]` or `[batch, C, H, W]`
 `Flatten` (axis 1) | flatten layer (libann's own `flatten_input_N` nodes are skipped)
 `Resize`, `Upsample` | upsampling layer (`nearest` mode, one integer scale on H and W from `scales` or output `sizes`; `asymmetric` coordinates with `floor` rounding, or `half_pixel` with rounding)

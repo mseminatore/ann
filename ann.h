@@ -252,6 +252,11 @@ struct Layer
 
 	PTensor t_scratch[2];				// kind work buffers (conv: im2col columns and their gradient)
 
+	// Padding mask (see ann_add_embedding_masked), set by each forward pass
+	int masked;							// 1 if the output steps carry a mask
+	PTensor t_mask;						// one row per sample, one value per step: 1 kept, 0 padding
+	PTensor t_in_mask;					// the layer below's mask when it carries one, else NULL (not owned)
+
 	PTensor t_values;					// tensor of node values for the layer
 
 	// Trainable parameters (none on the input layer). For dense layers the
@@ -633,7 +638,8 @@ ANN_API int ann_add_batchnorm(PNetwork pnet, Activation_type activation);
  * PyTorch's nn.Embedding. No gradient reaches the layer below. Maps to ONNX
  * Cast, Gather, Transpose and Unsqueeze nodes (PyTorch's nn.Embedding imports).
  * Networks with an embedding cannot be quantized or exported as C headers yet,
- * and train on the CPU.
+ * and train on the CPU. The layers above still see the padding steps; see
+ * ann_add_embedding_masked to leave them out.
  * 
  * @param pnet Network to add the layer to
  * @param vocab_size Number of token ids (> 0)
@@ -643,6 +649,30 @@ ANN_API int ann_add_batchnorm(PNetwork pnet, Activation_type activation);
  *         settings) or ERR_ALLOC
  */
 ANN_API int ann_add_embedding(PNetwork pnet, int vocab_size, int embed_dim, int padding_idx);
+
+/**
+ * Add an embedding layer that masks its padding: as ann_add_embedding, and
+ * the steps holding padding_idx are left out of everything above.
+ *
+ * The mask follows the sequence through 1-D convolutions, max pooling and
+ * batch norm layers. Their outputs at masked steps are zero, as if the text
+ * ended there with zero padding: an output step is kept when every input its
+ * window reads, less the window's padding at each end, is kept. Batch norm's
+ * statistics and the global pooling layers (average and max) leave masked
+ * steps out; a sample that is all padding pools to zeros. The mask ends at
+ * global pooling and at any other layer (flatten, dense, ...). So a text
+ * padded at the end gives what the same text without padding would; padding
+ * at the start also does when every stride is 1. Saved, and exported to ONNX
+ * as the ops that compute the mask (libann reads them back).
+ *
+ * @param pnet Network to add the layer to
+ * @param vocab_size Number of token ids (> 0)
+ * @param embed_dim Length of each vector (> 0)
+ * @param padding_idx Id that pads sequences, in [0, vocab_size)
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (first layer, a layer below that is not flat, or bad
+ *         settings) or ERR_ALLOC
+ */
+ANN_API int ann_add_embedding_masked(PNetwork pnet, int vocab_size, int embed_dim, int padding_idx);
 
 /**
  * Add a global max pooling layer: each channel's largest value over H x W.
@@ -1631,6 +1661,18 @@ ANN_API int ann_get_layer_window(const PNetwork pnet, int layer, int *kernel_h, 
  *         other layers, or 0 if pnet is NULL or layer is out of range
  */
 ANN_API int ann_get_layer_groups(const PNetwork pnet, int layer);
+
+/**
+ * Check whether a layer's output carries a padding mask.
+ *
+ * True for an embedding added with ann_add_embedding_masked and for the
+ * sequence layers above it that the mask follows (see there).
+ *
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @return 1 if the layer's output is masked, 0 if not, pnet is NULL or layer is out of range
+ */
+ANN_API int ann_get_layer_masked(const PNetwork pnet, int layer);
 
 /**
  * Set how many CPU threads libann uses for training and batched inference.

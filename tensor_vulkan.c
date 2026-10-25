@@ -24,7 +24,7 @@
 //================================================================================================
 // Vulkan GPU backend: inference and training on any Vulkan 1.1 GPU (AMD, Intel, NVIDIA) on
 // Windows and Linux, for every layer kind (dense, conv, max pool, upsample, flatten, reshape,
-// global average pool, batch norm).
+// global average pool, global max pool, batch norm; embeddings stay on the CPU).
 // See docs/GPU_VULKAN.md.
 //
 // - The Vulkan loader is opened at run time (vulkan-1.dll / libvulkan.so.1), so a build with
@@ -116,7 +116,7 @@ typedef enum {
     K_BIAS_ACT, K_SOFTMAX, K_ACT_DERIV, K_SOFTMAX_JACOBIAN, K_OUTPUT_DELTA_LOSS,
     K_BIAS_GRAD_SUM, K_OPTIMIZER, K_DROPOUT,
     K_CONV_IM2COL, K_CONV_OUTPUT, K_CONV_GRAD_ROWS, K_CONV_COL2IM,
-    K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_GLOBAL_AVGPOOL, K_BATCHNORM, K_SUM_PARTIALS,
+    K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_GLOBAL_AVGPOOL, K_GLOBAL_MAXPOOL, K_BATCHNORM, K_SUM_PARTIALS,
     K_CONV_DIRECT_FORWARD, K_CONV_DIRECT_INPUT_GRAD, K_CONV_DIRECT_WEIGHT_GRAD, K_CONV_GROUPED,
     K_COUNT
 } Kernel;
@@ -146,6 +146,7 @@ static const struct {
     { SPV(maxpool_backward), 0, 0 },
     { SPV(upsample), 0, 0 },
     { SPV(global_avgpool), 0, 0 },
+    { SPV(global_maxpool), 0, 0 },
     { SPV(batchnorm), 0, 0 },
     { SPV(sum_partials), 0, 0 },
     { SPV(conv_direct_forward), 0, 0 },
@@ -160,7 +161,7 @@ static const char *const g_kernel_names[K_COUNT + 1] = {
     "bias_act", "softmax", "act_deriv", "softmax_jacobian", "output_delta_loss",
     "bias_grad_sum", "optimizer", "dropout",
     "conv_im2col", "conv_output", "conv_grad_rows", "conv_col2im",
-    "maxpool_forward", "maxpool_backward", "upsample", "global_avgpool", "batchnorm", "sum_partials",
+    "maxpool_forward", "maxpool_backward", "upsample", "global_avgpool", "global_maxpool", "batchnorm", "sum_partials",
     "conv_direct_forward", "conv_direct_input_grad", "conv_direct_weight_grad", "conv_grouped",
     "copy / fill",
 };
@@ -1560,6 +1561,11 @@ static int ensure_layer_scratch(PNetwork pnet, int rows, int training)
             if (!layer_scratch(layer, SCRATCH_COLS, (size_t)rows * l->node_count * sizeof(uint32_t)))
                 return 0;
         }
+        else if (l->kind == LAYER_KIND_GLOBAL_MAXPOOL2D)
+        {
+            if (!layer_scratch(layer, SCRATCH_COLS, (size_t)rows * l->node_count * sizeof(uint32_t)))
+                return 0;
+        }
         else if (l->kind == LAYER_KIND_BATCHNORM && training)
         {
             // x_hat, and the per-channel statistics (see batchnorm.comp)
@@ -1583,7 +1589,7 @@ static size_t forward_bytes_per_sample(const PNetwork pnet)
             max_nodes = (size_t)l->node_count;
         if (l->kind == LAYER_KIND_CONV2D && l->shape.c > CONV_DIRECT_FILTERS && ann_get_layer_groups(pnet, layer) == 1)
             floats += (size_t)l->shape.h * l->shape.w * (l->params[0].value->cols + l->shape.c);
-        else if (l->kind == LAYER_KIND_MAXPOOL2D)
+        else if (l->kind == LAYER_KIND_MAXPOOL2D || l->kind == LAYER_KIND_GLOBAL_MAXPOOL2D)
             floats += (size_t)l->node_count;
     }
     return (floats + 2 * max_nodes) * sizeof(float);
@@ -1806,6 +1812,17 @@ static void encode_batchnorm_backward(PNetwork pnet, int layer, int rows, VkBuf 
     }
 }
 
+// GlobalMaxPool2D forward (src = X, dst = Y) or backward (src = dZ, dst = dX); each
+// channel's argmax goes to the layer's scratch
+static void encode_global_maxpool(PNetwork pnet, int layer, int batch_size, VkBuf *src, VkBuf *dst, int backward)
+{
+    WindowDims d = window_dims(pnet, layer, batch_size);
+    struct { WindowDims d; uint32_t backward; } p = { d, (uint32_t)backward };
+    VkBuf *bufs[3] = { src, dst, scratch_of(layer, SCRATCH_COLS) };
+    size_t count = (size_t)batch_size * d.C * (backward ? d.H * d.W : 1);
+    cmd_dispatch(K_GLOBAL_MAXPOOL, bufs, 3, &p, sizeof(p), groups_for(count, 256), 1);
+}
+
 // GlobalAvgPool2D forward (src = X, dst = Y) or backward (src = dZ, dst = dX)
 static void encode_global_avgpool(PNetwork pnet, int layer, int batch_size, VkBuf *src, VkBuf *dst, int backward)
 {
@@ -1855,6 +1872,9 @@ static void encode_layer_forward(PNetwork pnet, int layer, int rows, VkBuf *X, V
         break;
     case LAYER_KIND_GLOBAL_AVGPOOL2D:
         encode_global_avgpool(pnet, layer, rows, X, Y, 0);
+        break;
+    case LAYER_KIND_GLOBAL_MAXPOOL2D:
+        encode_global_maxpool(pnet, layer, rows, X, Y, 0);
         break;
     case LAYER_KIND_BATCHNORM:
         encode_batchnorm_forward(pnet, layer, rows, X, Y, training);
@@ -1945,13 +1965,15 @@ static int vk_upload_network(PNetwork pnet)
     if (!pnet || !g_vk.initialized)
         return ERR_NULL_PTR;
 
-    // Every layer kind in ann.h is implemented; reject any added later
+    // Every layer kind in ann.h but Embedding is implemented (its backward pass is a
+    // scatter-add, which needs float atomics); reject it and any added later
     for (int layer = 0; layer < pnet->layer_count; layer++)
     {
         Layer_kind kind = pnet->layers[layer].kind;
         if (kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D && kind != LAYER_KIND_MAXPOOL2D &&
             kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE &&
-            kind != LAYER_KIND_GLOBAL_AVGPOOL2D && kind != LAYER_KIND_BATCHNORM)
+            kind != LAYER_KIND_GLOBAL_AVGPOOL2D && kind != LAYER_KIND_BATCHNORM &&
+            kind != LAYER_KIND_GLOBAL_MAXPOOL2D)
             return ERR_INVALID;
     }
 
@@ -2272,6 +2294,10 @@ static void encode_backward(PNetwork pnet, int batch_size, VkSlot *slot)
         case LAYER_KIND_GLOBAL_AVGPOOL2D:
             if (dX)
                 encode_global_avgpool(pnet, li, batch_size, dl_dz, dX, 1);
+            break;
+        case LAYER_KIND_GLOBAL_MAXPOOL2D:
+            if (dX)
+                encode_global_maxpool(pnet, li, batch_size, dl_dz, dX, 1);
             break;
         case LAYER_KIND_BATCHNORM:
             encode_batchnorm_backward(pnet, li, batch_size, dl_dz, dX);

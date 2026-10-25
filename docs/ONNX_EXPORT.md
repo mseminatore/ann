@@ -23,7 +23,12 @@ ann_export_onnx(pnet, "model.onnx.json");
   layer). Batch norm layers export `BatchNormalization` (inference form,
   initializers `bn_N_scale`, `bn_N_bias`, `bn_N_mean`, `bn_N_var`, epsilon
   1e-5, momentum 0.9 in ONNX's convention) on `[batch, C]` or
-  `[batch, C, H, W]`. A model that starts with dense layers
+  `[batch, C, H, W]`. Global max pooling layers export `GlobalMaxPool`. An
+  embedding exports as `Cast` (the ids to int64), `Gather` (rows of
+  `emb_N_weight [vocab, D]`), `Transpose` to `[batch, D, L]` and `Unsqueeze`
+  to `[batch, D, 1, L]`; for ids outside the vocabulary ONNX's `Gather` fails
+  where libann gives zeros, and `Cast` truncates where libann rounds (the same
+  for integer ids). A model that starts with dense layers or an embedding
   keeps a `[batch, n]` input.
 - `weight_N` has dims `[in_nodes, out_nodes]`, the layout ONNX `MatMul` expects
   (libann stores weights as `[out, in]` internally and transposes them on export)
@@ -63,6 +68,8 @@ ONNX node | libann layer
 `Conv` | conv layer (any kernel and strides; pads equal at both ends of each axis; no dilation; `group` for grouped and depthwise convs; bias optional)
 `MaxPool` | max pooling layer (any window and strides, no padding, `ceil_mode = 0`)
 `GlobalAveragePool` | global average pooling layer (as PyTorch writes `nn.AdaptiveAvgPool2d(1)`)
+`GlobalMaxPool` | global max pooling layer (as PyTorch writes `nn.AdaptiveMaxPool1d(1)`/`2d(1)`)
+`Gather` (+ `Transpose` perm `[0, 2, 1]`) | embedding layer: `Gather(weight [vocab, D], ids)` on the flat ids, as PyTorch writes `nn.Embedding` followed by `x.transpose(1, 2)`; a `Cast` of the ids before it and an `Unsqueeze` at axis 2 after it (as libann exports) are accepted
 `BatchNormalization` | batch norm layer (inference form: constant `[C]` scale, bias, mean and var, one output; any epsilon, which is moved into the variance since libann's is 1e-5), on `[batch, C]` or `[batch, C, H, W]`
 `Flatten` (axis 1) | flatten layer (libann's own `flatten_input_N` nodes are skipped)
 `Resize`, `Upsample` | upsampling layer (`nearest` mode, one integer scale on H and W from `scales` or output `sizes`; `asymmetric` coordinates with `floor` rounding, or `half_pixel` with rounding)

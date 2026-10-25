@@ -107,5 +107,5 @@ additional GPU vendors with no interface changes:
 
 AMD and Intel GPUs are covered by the **Vulkan** backend (`-DUSE_VULKAN=1`, see
 [GPU_VULKAN.md](GPU_VULKAN.md)), which also runs on NVIDIA. A build can include CUDA and Vulkan
-together: `ann_gpu_init()` tries Metal, Vulkan, then CUDA (Vulkan runs every layer kind), and
+together: `ann_gpu_init()` tries Metal, Vulkan, then CUDA (Vulkan runs every layer kind but Embedding), and
 the `ANN_GPU` environment variable picks one: `ANN_GPU=cuda` uses CUDA on such a build. The float-only limitation above applies to every backend.

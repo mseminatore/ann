@@ -2,7 +2,7 @@
 
 The Vulkan backend runs GPU **inference and training** on any GPU with a Vulkan 1.1 driver
 (AMD, Intel and NVIDIA) on Windows and Linux, through the same `GpuBackend` vtable as the Metal
-and CUDA backends. Like Metal, it runs every layer kind: dense, conv (grouped and depthwise too), max pool, upsample, flatten,
+and CUDA backends. Like Metal, it runs every layer kind but Embedding (whose networks stay on the CPU): dense, conv (grouped and depthwise too), max pool, global max pool, upsample, flatten,
 reshape, global average pooling and batch norm. It consists of:
 
 - `tensor_vulkan.c`: device setup, buffers, command recording, and the inference and training

@@ -52,10 +52,11 @@
 #endif
 
 // 2 added ANN_RT_UPSAMPLE2D, 3 ANN_RT_GLOBAL_AVGPOOL2D, 4 grouped convolutions
-// (ann_rt_layer.groups), 5 non-square windows (size_w, stride_w, pad_w).
+// (ann_rt_layer.groups), 5 non-square windows (size_w, stride_w, pad_w),
+// 6 ANN_RT_GLOBAL_MAXPOOL2D.
 // Generated headers need at least the version that wrote them (they initialize
 // every field); older headers still build with newer versions.
-#define ANN_RT_VERSION 5
+#define ANN_RT_VERSION 6
 
 #if defined(_MSC_VER) && !defined(__cplusplus)
 #	define ANN_RT_FUNC static __inline
@@ -72,7 +73,8 @@ enum {
 	ANN_RT_MAXPOOL2D,		// 2-D max pooling, per channel
 	ANN_RT_FLATTEN,			// no-op: values are already stored flat (also used for reshapes)
 	ANN_RT_UPSAMPLE2D,		// nearest-neighbour upsampling by size, per channel
-	ANN_RT_GLOBAL_AVGPOOL2D	// each channel's mean: (C, H, W) to (C, 1, 1)
+	ANN_RT_GLOBAL_AVGPOOL2D,	// each channel's mean: (C, H, W) to (C, 1, 1)
+	ANN_RT_GLOBAL_MAXPOOL2D	// each channel's largest value: (C, H, W) to (C, 1, 1)
 };
 
 enum {
@@ -288,6 +290,23 @@ ANN_RT_FUNC void ann_rt_global_avgpool_q(const ann_rt_layer *l, const int8_t *x,
 }
 
 //------------------------------
+// global max pooling: each channel's largest value (int8 values keep their quantization)
+//------------------------------
+ANN_RT_FUNC void ann_rt_global_maxpool_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
+{
+	int32_t c, i, area = l->in_h * l->in_w;
+
+	for (c = 0; c < l->out_c; c++)
+	{
+		int8_t best = x[c * area];
+		for (i = 1; i < area; i++)
+			if (x[c * area + i] > best)
+				best = x[c * area + i];
+		y[c] = best;
+	}
+}
+
+//------------------------------
 // int8 inference: input_size int8 values in, output_size int8 values out.
 // workspace holds 2 * max_size int8 values. Returns 0, or -1 for a bad layer.
 //------------------------------
@@ -308,6 +327,7 @@ ANN_RT_FUNC int ann_rt_predict_q(const ann_rt_model *m, const int8_t *input, int
 		case ANN_RT_MAXPOOL2D:	ann_rt_maxpool_q(l, src, dst); break;
 		case ANN_RT_UPSAMPLE2D:	ann_rt_upsample_q(l, src, dst); break;
 		case ANN_RT_GLOBAL_AVGPOOL2D: ann_rt_global_avgpool_q(l, src, dst); break;
+		case ANN_RT_GLOBAL_MAXPOOL2D: ann_rt_global_maxpool_q(l, src, dst); break;
 		case ANN_RT_FLATTEN:	continue;
 		default:				return -1;
 		}
@@ -502,6 +522,20 @@ ANN_RT_FUNC void ann_rt_global_avgpool_f(const ann_rt_layer *l, const float *x, 
 	}
 }
 
+ANN_RT_FUNC void ann_rt_global_maxpool_f(const ann_rt_layer *l, const float *x, float *y)
+{
+	int32_t c, i, area = l->in_h * l->in_w;
+
+	for (c = 0; c < l->out_c; c++)
+	{
+		float best = x[c * area];
+		for (i = 1; i < area; i++)
+			if (x[c * area + i] > best)
+				best = x[c * area + i];
+		y[c] = best;
+	}
+}
+
 //------------------------------
 // float inference: workspace holds 2 * max_size floats. Returns 0, or -1 for a bad layer.
 //------------------------------
@@ -528,6 +562,7 @@ ANN_RT_FUNC int ann_rt_predict_f(const ann_rt_model *m, const float *input, floa
 		case ANN_RT_MAXPOOL2D:	ann_rt_maxpool_f(l, src, dst); break;
 		case ANN_RT_UPSAMPLE2D:	ann_rt_upsample_f(l, src, dst); break;
 		case ANN_RT_GLOBAL_AVGPOOL2D: ann_rt_global_avgpool_f(l, src, dst); break;
+		case ANN_RT_GLOBAL_MAXPOOL2D: ann_rt_global_maxpool_f(l, src, dst); break;
 		case ANN_RT_FLATTEN:	continue;
 		default:				return -1;
 		}

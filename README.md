@@ -362,6 +362,8 @@ ann_add_upsample2d | nearest-neighbour upsampling by an integer scale, per chann
 ann_add_reshape | give the previous layer's values a (channels, height, width) shape
 ann_add_global_avgpool2d | each channel's mean: (C, H, W) to (C, 1, 1)
 ann_add_batchnorm | batch normalization per channel (per node after a dense layer), then an optional activation
+ann_add_embedding | token ids to learned vectors: L ids become the sequence (dim, 1, L)
+ann_add_global_maxpool2d | each channel's largest value: (C, H, W) to (C, 1, 1)
 
 Output sizes are `(H + 2*padding - kernel) / stride + 1` for convolutions,
 `(H - pool) / stride + 1` for pooling and `H * scale` for upsampling, and
@@ -383,6 +385,23 @@ ann_add_conv1d(net, 32, 3, 1, 1, ACTIVATION_RELU);   // 32x1x64
 ann_add_global_avgpool2d(net);                       // 32
 ann_add_layer(net, 4, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 ```
+
+Text works the same way after an embedding, which turns each sample's token
+ids (integers stored as reals, e.g. padded to a fixed length with id 0) into
+a sequence of learned vectors. Global max pooling then keeps each feature's
+strongest response wherever it occurs in the text:
+
+```c
+ann_add_layer(net, 200, LAYER_INPUT, ACTIVATION_NULL);   // 200 token ids per sample
+ann_add_embedding(net, 10000, 64, 0);                    // 64x1x200; id 0 pads (always zeros)
+ann_add_conv1d(net, 128, 5, 1, 2, ACTIVATION_RELU);      // 128x1x200: 5-token phrases
+ann_add_global_maxpool2d(net);                           // 128
+ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+```
+
+Ids outside the vocabulary also give zeros. Networks with an embedding train
+on the CPU (GPU backends keep them there) and cannot be quantized or exported
+as C headers yet.
 
 Global average pooling replaces flatten + a large dense layer at the end of a
 CNN: each channel becomes its mean, so the classifier sees one value per
@@ -449,10 +468,11 @@ A dense bottleneck turns back into an image with `ann_add_reshape`, e.g.
 `... -> ann_add_layer(net, 392, ...) -> ann_add_reshape(net, 8, 7, 7) -> ann_add_upsample2d(net, 2) -> ...`.
 
 Convolutional networks, including ones with upsample, reshape, global
-average pooling and batch norm layers, train and run on the GPU with the Metal and Vulkan backends (the CUDA backend returns
+average and max pooling and batch norm layers, train and run on the GPU with the Metal and Vulkan backends (the CUDA backend returns
 `ERR_INVALID` from `ann_gpu_upload_network()` for them, so they stay on the
 CPU there), save in model format v2, and export to and import
-from ONNX as `Conv`, `MaxPool`, `GlobalAveragePool`, `BatchNormalization`, `Flatten`, `Resize` (nearest) and `Reshape`
+from ONNX as `Conv`, `MaxPool`, `GlobalAveragePool`, `GlobalMaxPool`, `BatchNormalization`, `Flatten`, `Resize` (nearest) and `Reshape`
+(embeddings as `Cast`, `Gather`, `Transpose` and `Unsqueeze`)
 with a `[batch, C, H, W]` input.
 The importer also reads simple CNNs and MLPs exported by other tools, such as
 PyTorch (see [ONNX Export & Import](docs/ONNX_EXPORT.md)). The `fashion_cnn`

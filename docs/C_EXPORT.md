@@ -6,8 +6,8 @@ runtime. The int8 path is integer-only, so it runs on cores without an FPU. It n
 beyond `<stddef.h>` and `<stdint.h>`, never calls `malloc`, and never recurses. A float32 export
 is also available for targets with an FPU.
 
-Supported layers: dense, conv2d (any kernel, stride, padding), maxpool2d, global average
-pooling, flatten, upsample2d and reshape, with every activation (softmax only on the output
+Supported layers: dense, conv2d (any kernel, stride, padding), maxpool2d, global average and
+max pooling, flatten, upsample2d and reshape, with every activation (softmax only on the output
 layer). Global average pooling keeps its input's int8 quantization and rounds each mean half
 away from the zero point. Batch norm layers are folded into the dense or conv layer before them
 (`W' = s * W`, `b' = s * (b - mean) + beta` with `s = gamma / sqrt(var + 1e-5)`, the batch
@@ -21,8 +21,9 @@ conv and pool windows non-square, including 1-D convs and pools (`ann_add_conv2d
 
 A generated header initializes every `ann_rt_layer` field, so it builds without
 missing-initializer warnings, and checks that `ann_rt.h` is at least the version that wrote it
-(5: version 2 added upsampling, 3 global average pooling, 4 grouped convolutions, 5 non-square
-windows). Copy `ann_rt.h` from the libann that exported the model. Headers written by older
+(6: version 2 added upsampling, 3 global average pooling, 4 grouped convolutions, 5 non-square
+windows, 6 global max pooling). Networks with an embedding are rejected (`ERR_INVALID`): the int8
+path quantizes its inputs, and token ids do not fit in 8 bits. Copy `ann_rt.h` from the libann that exported the model. Headers written by older
 versions still build with the newer runtime (the fields they leave out read as 0, which means
 one group and a square window), but
 compilers warn about the missing initializers with `-Wextra`. Headers exported by libann 0.7

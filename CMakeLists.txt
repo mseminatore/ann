@@ -34,6 +34,7 @@ add_test(NAME test_comprehensive_callbacks COMMAND test_comprehensive_callbacks)
 add_test(NAME test_training_options COMMAND test_training_options)
 add_test(NAME test_conv COMMAND test_conv)
 add_test(NAME test_batchnorm COMMAND test_batchnorm)
+add_test(NAME test_embedding COMMAND test_embedding)
 add_test(NAME test_threads COMMAND test_threads)
 add_test(NAME test_noise COMMAND test_noise)
 
@@ -184,7 +185,7 @@ if ( USE_VULKAN )
     set(VULKAN_SHADERS gemm bias_act softmax act_deriv softmax_jacobian output_delta_loss
                        bias_grad_sum optimizer dropout
                        conv_im2col conv_output conv_grad_rows conv_col2im
-                       maxpool_forward maxpool_backward upsample global_avgpool batchnorm sum_partials
+                       maxpool_forward maxpool_backward upsample global_avgpool global_maxpool batchnorm sum_partials
                        conv_direct_forward conv_direct_input_grad conv_direct_weight_grad conv_grouped)
     set(VULKAN_SPV_DIR ${CMAKE_CURRENT_BINARY_DIR}/vk_spv)
     file(MAKE_DIRECTORY ${VULKAN_SPV_DIR})
@@ -377,6 +378,9 @@ target_link_libraries(test_conv libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_batchnorm tests/test_batchnorm.c testy/test_main.c)
 target_link_libraries(test_batchnorm libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_embedding tests/test_embedding.c testy/test_main.c)
+target_link_libraries(test_embedding libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_threads tests/test_threads.c testy/test_main.c)
 target_link_libraries(test_threads libann ${BLAS_LIB} ${MATH_LIB} Threads::Threads)

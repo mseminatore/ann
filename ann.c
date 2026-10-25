@@ -1849,6 +1849,216 @@ static void batchnorm_backward(PLayer layer, const PTensor X, const PTensor dZ, 
 }
 
 //------------------------------
+// Embedding: token ids (one per input value, rounded to the nearest integer)
+// to learned vectors. W is [vocab x D]; the output is the sequence (D, 1, L)
+// for L input ids, y[d][t] = W[id_t][d]. config holds the vocabulary size and
+// padding id + 1 (0 for none): the padding id, and ids outside the
+// vocabulary, give zeros and train nothing.
+//------------------------------
+enum { EMB_VOCAB, EMB_PADDING, EMB_CONFIG_COUNT };
+
+static int embedding_id(const PLayer layer, real x)
+{
+	double r = floor((double)x + 0.5);
+	int vocab = layer->config[EMB_VOCAB];
+	if (r < 0.0 || r >= (double)vocab || (int)r == layer->config[EMB_PADDING] - 1)
+		return -1;
+	return (int)r;
+}
+
+static int embedding_setup(PNetwork pnet, int layer)
+{
+	PLayer cur = &pnet->layers[layer];
+	int vocab = cur->config[EMB_VOCAB], padding = cur->config[EMB_PADDING] - 1;
+
+	if (cur->activation != ACTIVATION_NULL || vocab < 1 || padding < -1 || padding >= vocab ||
+		cur->in_shape.h != 1 || cur->in_shape.w != 1 || cur->shape.h != 1 || cur->shape.w != cur->in_shape.c ||
+		cur->shape.c < 1)
+		return ERR_INVALID;
+
+	if (add_param(cur, vocab, cur->shape.c, 0) != ERR_OK)
+	{
+		free_layer_params(cur);
+		return ERR_ALLOC;
+	}
+	return ERR_OK;
+}
+
+// N(0, 1), as PyTorch starts nn.Embedding; the padding row stays zero
+static void embedding_init_weights(PNetwork pnet, int layer, Weight_init_type init_type)
+{
+	PLayer cur = &pnet->layers[layer];
+	PTensor W = cur->params[0].value;
+	int padding = cur->config[EMB_PADDING] - 1;
+	(void)init_type;
+
+	tensor_random_normal(W, (real)0.0, (real)1.0);
+	if (padding >= 0)
+		memset(W->values + (size_t)padding * W->cols, 0, W->cols * sizeof(real));
+}
+
+typedef struct {
+	PLayer layer;
+	const real *x;		// ids (forward and backward)
+	real *y;			// output (forward) or dZ (backward)
+	int rows;
+} embedding_job;
+
+static void embedding_forward_samples(void *arg, int begin, int end)
+{
+	const embedding_job *job = (const embedding_job *)arg;
+	PLayer layer = job->layer;
+	const real *W = layer->params[0].value->values;
+	int dim = layer->shape.c, steps = layer->shape.w;
+
+	for (int b = begin; b < end; b++)
+	{
+		const real *ids = job->x + (size_t)b * steps;
+		real *y = job->y + (size_t)b * layer->node_count;
+		for (int t = 0; t < steps; t++)
+		{
+			int id = embedding_id(layer, ids[t]);
+			for (int d = 0; d < dim; d++)
+				y[d * steps + t] = id < 0 ? (real)0.0 : W[(size_t)id * dim + d];
+		}
+	}
+}
+
+static void embedding_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	embedding_job job;
+
+	job.layer = layer;
+	job.x = X->values;
+	job.y = Y->values;
+	job.rows = rows;
+	ann_parallel_for(rows, 1, embedding_forward_samples, &job);
+}
+
+// dW[id][d] += dz[d][t] for each position, split across threads by d (each
+// d summed over the batch in order, so the result is the same for any thread count)
+static void embedding_backward_dims(void *arg, int begin, int end)
+{
+	const embedding_job *job = (const embedding_job *)arg;
+	PLayer layer = job->layer;
+	real *dW = layer->params[0].grad->values;
+	int dim = layer->shape.c, steps = layer->shape.w;
+
+	for (int b = 0; b < job->rows; b++)
+	{
+		const real *ids = job->x + (size_t)b * steps;
+		const real *dz = job->y + (size_t)b * layer->node_count;
+		for (int t = 0; t < steps; t++)
+		{
+			int id = embedding_id(layer, ids[t]);
+			if (id < 0)
+				continue;
+			for (int d = begin; d < end; d++)
+				dW[(size_t)id * dim + d] += dz[d * steps + t];
+		}
+	}
+}
+
+// ids have no gradient: the layer below gets zeros
+static void embedding_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
+{
+	embedding_job job;
+
+	job.layer = layer;
+	job.x = X->values;
+	job.y = dZ->values;
+	job.rows = rows;
+	ann_parallel_for(layer->shape.c, 1, embedding_backward_dims, &job);
+	if (dX)
+		memset(dX->values, 0, (size_t)rows * layer->in_shape.c * sizeof(real));
+}
+
+//------------------------------
+// GlobalMaxPool2D: no parameters; each channel's largest value, so
+// (C, H, W) becomes (C, 1, 1). The forward pass records which input each
+// output took (the first on ties) in t_scratch[0] for the backward pass.
+//------------------------------
+static int global_maxpool_setup(PNetwork pnet, int layer)
+{
+	PLayer cur = &pnet->layers[layer];
+
+	if (cur->activation != ACTIVATION_NULL || cur->shape.c != cur->in_shape.c ||
+		cur->shape.h != 1 || cur->shape.w != 1)
+		return ERR_INVALID;
+	return ERR_OK;
+}
+
+static void global_maxpool_forward_samples(void *arg, int begin, int end)
+{
+	const pool_job *job = (const pool_job *)arg;
+	PLayer layer = job->layer;
+	int area = layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = begin; b < end; b++)
+	{
+		const real *x = job->x + (size_t)b * layer->node_count * area;
+		real *y = job->y + (size_t)b * layer->node_count;
+		real *arg_max = layer->t_scratch[0]->values + (size_t)b * layer->node_count;
+
+		for (int c = 0; c < layer->node_count; c++)
+		{
+			const real *xc = x + (size_t)c * area;
+			int best = 0;
+			for (int i = 1; i < area; i++)
+				if (xc[i] > xc[best])
+					best = i;
+			y[c] = xc[best];
+			arg_max[c] = (real)(c * area + best);	// exact: far below 2^24
+		}
+	}
+}
+
+static void global_maxpool_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
+{
+	pool_job job;
+
+	if (ensure_rows(&layer->t_scratch[0], rows, layer->node_count) != ERR_OK)
+		return;
+
+	job.layer = layer;
+	job.x = X->values;
+	job.y = Y->values;
+	ann_parallel_for(rows, 1, global_maxpool_forward_samples, &job);
+}
+
+// each channel's gradient goes to the input it took
+static void global_maxpool_backward_samples(void *arg, int begin, int end)
+{
+	const pool_job *job = (const pool_job *)arg;
+	PLayer layer = job->layer;
+	int in_nodes = layer->in_shape.c * layer->in_shape.h * layer->in_shape.w;
+
+	for (int b = begin; b < end; b++)
+	{
+		const real *dz = job->x + (size_t)b * layer->node_count;
+		const real *arg_max = layer->t_scratch[0]->values + (size_t)b * layer->node_count;
+		real *dx = job->y + (size_t)b * in_nodes;
+
+		memset(dx, 0, in_nodes * sizeof(real));
+		for (int c = 0; c < layer->node_count; c++)
+			dx[(int)arg_max[c]] = dz[c];
+	}
+}
+
+static void global_maxpool_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
+{
+	pool_job job;
+	(void)X;
+	if (!dX)
+		return;
+
+	job.layer = layer;
+	job.x = dZ->values;
+	job.y = dX->values;
+	ann_parallel_for(rows, 1, global_maxpool_backward_samples, &job);
+}
+
+//------------------------------
 // Operations every layer kind provides
 //------------------------------
 typedef struct {
@@ -1900,6 +2110,11 @@ static void global_avgpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer
 static void batchnorm_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
 static void batchnorm_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
                                  char *output, size_t output_size, int *first);
+static void embedding_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first);
+static void embedding_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                                 char *output, size_t output_size, int *first);
+static void global_maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                                      char *output, size_t output_size, int *first);
 
 // indexed by Layer_kind
 static const Layer_ops g_layer_ops[] = {
@@ -1919,6 +2134,10 @@ static const Layer_ops g_layer_ops[] = {
 	  no_onnx_initializers, global_avgpool_onnx_nodes, NULL },
 	{ "BatchNorm", 0, batchnorm_setup, batchnorm_init_weights, batchnorm_forward, NULL, batchnorm_backward,
 	  batchnorm_onnx_initializers, batchnorm_onnx_nodes, batchnorm_forward_train },
+	{ "Embedding", EMB_CONFIG_COUNT, embedding_setup, embedding_init_weights, embedding_forward, NULL,
+	  embedding_backward, embedding_onnx_initializers, embedding_onnx_nodes, NULL },
+	{ "GlobalMaxPool2D", 0, global_maxpool_setup, NULL, global_maxpool_forward, NULL, global_maxpool_backward,
+	  no_onnx_initializers, global_maxpool_onnx_nodes, NULL },
 };
 
 static const Layer_ops *layer_ops(const Layer *layer)
@@ -3314,6 +3533,42 @@ int ann_add_global_avgpool2d(PNetwork pnet)
 }
 
 //------------------------------
+// add an embedding layer over the previous layer's token ids
+//------------------------------
+int ann_add_embedding(PNetwork pnet, int vocab_size, int embed_dim, int padding_idx)
+{
+	const Layer_shape *in = last_shape(pnet);
+	Layer_shape shape;
+	int config[EMB_CONFIG_COUNT];
+
+	if (in && (in->h != 1 || in->w != 1 || vocab_size < 1 || padding_idx < -1 || padding_idx >= vocab_size))
+	{
+		invoke_error_callback(ERR_INVALID, "ann_add_embedding");
+		return ERR_INVALID;
+	}
+	config[EMB_VOCAB] = vocab_size;
+	config[EMB_PADDING] = padding_idx + 1;
+	shape.c = embed_dim;
+	shape.h = 1;
+	shape.w = in ? in->c : 1;
+	return add_layer(pnet, LAYER_KIND_EMBEDDING, shape, config, EMB_CONFIG_COUNT, LAYER_HIDDEN, ACTIVATION_NULL);
+}
+
+//------------------------------
+// add a global max pooling layer
+//------------------------------
+int ann_add_global_maxpool2d(PNetwork pnet)
+{
+	const Layer_shape *in = last_shape(pnet);
+	Layer_shape shape;
+
+	shape.c = in ? in->c : 1;
+	shape.h = 1;
+	shape.w = 1;
+	return add_layer(pnet, LAYER_KIND_GLOBAL_MAXPOOL2D, shape, NULL, 0, LAYER_HIDDEN, ACTIVATION_NULL);
+}
+
+//------------------------------
 // add a batch normalization layer
 //------------------------------
 int ann_add_batchnorm(PNetwork pnet, Activation_type activation)
@@ -4647,6 +4902,11 @@ int ann_get_layer_settings(const PNetwork pnet, int layer, int *size, int *strid
 	}
 	else if (cur->kind == LAYER_KIND_UPSAMPLE2D)
 		*size = *stride = cur->config[UPSAMPLE_SCALE];
+	else if (cur->kind == LAYER_KIND_EMBEDDING)
+	{
+		*size = cur->config[EMB_VOCAB];
+		*padding = cur->config[EMB_PADDING] - 1;
+	}
 	return ERR_OK;
 }
 
@@ -5754,6 +6014,85 @@ static void batchnorm_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, con
 }
 
 //-----------------------------------------------
+// Embedding ONNX initializers: emb_N_weight [vocab, D], and emb_N_axes [2]
+// for the Unsqueeze
+//-----------------------------------------------
+static void embedding_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first)
+{
+	PTensor W = pnet->layers[layer].params[0].value;
+	int dims[2], axes[1] = { 2 };
+	char name[48];
+	dims[0] = W->rows;
+	dims[1] = W->cols;
+
+	if (!*first) fprintf(fptr, ",\n");
+	*first = 0;
+	fprintf(fptr, "      {\n");
+	fprintf(fptr, "        \"name\": \"emb_%d_weight\",\n", layer - 1);
+	fprintf(fptr, "        \"data_type\": 1,\n");
+	fprintf(fptr, "        \"dims\": ");
+	write_json_int_array(fptr, dims, 2);
+	fprintf(fptr, ",\n");
+	fprintf(fptr, "        \"float_data\": ");
+	write_json_float_array(fptr, W->values, dims[0] * dims[1]);
+	fprintf(fptr, "\n");
+	fprintf(fptr, "      }");
+	snprintf(name, sizeof(name), "emb_%d_axes", layer - 1);
+	write_onnx_constant(fptr, name, 7, axes, 1, first);
+}
+
+//-----------------------------------------------
+// Embedding ONNX nodes: Cast the ids [batch, L] to int64, Gather the rows
+// [batch, L, D], Transpose to the sequence [batch, D, L] and Unsqueeze to the
+// image one row high [batch, D, 1, L] the conv nodes after it read. (ONNX's
+// Cast truncates toward zero where libann rounds, and Gather rejects ids
+// outside the vocabulary where libann gives zeros: the same for valid ids.)
+//-----------------------------------------------
+static void embedding_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                                 char *output, size_t output_size, int *first)
+{
+	char name[40], ids[40], weight[40], rows[40], seq[40], axes[40];
+	const char *inputs[2];
+	int index = layer - 1;
+	(void)pnet;
+
+	snprintf(ids, sizeof(ids), "emb_%d_ids", index);
+	snprintf(name, sizeof(name), "emb_%d_cast", index);
+	write_onnx_node(fptr, "Cast", name, input, ids, "[{\"name\": \"to\", \"type\": 2, \"i\": 7}]", first);
+
+	snprintf(weight, sizeof(weight), "emb_%d_weight", index);
+	snprintf(rows, sizeof(rows), "emb_%d_rows", index);
+	snprintf(name, sizeof(name), "emb_%d_gather", index);
+	inputs[0] = weight;
+	inputs[1] = ids;
+	write_onnx_node_inputs(fptr, "Gather", name, inputs, 2, rows, "[{\"name\": \"axis\", \"type\": 2, \"i\": 0}]", first);
+
+	snprintf(seq, sizeof(seq), "emb_%d_seq", index);
+	snprintf(name, sizeof(name), "emb_%d_transpose", index);
+	write_onnx_node(fptr, "Transpose", name, rows, seq, "[{\"name\": \"perm\", \"type\": 7, \"ints\": [0, 2, 1]}]", first);
+
+	snprintf(axes, sizeof(axes), "emb_%d_axes", index);
+	snprintf(name, sizeof(name), "emb_%d_unsqueeze", index);
+	snprintf(output, output_size, "emb_%d_out", index);
+	inputs[0] = seq;
+	inputs[1] = axes;
+	write_onnx_node_inputs(fptr, "Unsqueeze", name, inputs, 2, output, NULL, first);
+}
+
+//-----------------------------------------------
+// GlobalMaxPool ONNX node: [batch, C, H, W] -> [batch, C, 1, 1]
+//-----------------------------------------------
+static void global_maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
+                                      char *output, size_t output_size, int *first)
+{
+	char name[32];
+	(void)pnet;
+	snprintf(name, sizeof(name), "global_maxpool_%d", layer - 1);
+	snprintf(output, output_size, "global_maxpool_%d_out", layer - 1);
+	write_onnx_node(fptr, "GlobalMaxPool", name, input, output, NULL, first);
+}
+
+//-----------------------------------------------
 // GlobalAveragePool ONNX node: [batch, C, H, W] -> [batch, C, 1, 1]
 //-----------------------------------------------
 static void global_avgpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
@@ -5854,12 +6193,12 @@ static void reshape_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const
 static int onnx_needs_image(Layer_kind kind)
 {
 	return kind == LAYER_KIND_CONV2D || kind == LAYER_KIND_MAXPOOL2D || kind == LAYER_KIND_UPSAMPLE2D ||
-	       kind == LAYER_KIND_GLOBAL_AVGPOOL2D;
+	       kind == LAYER_KIND_GLOBAL_AVGPOOL2D || kind == LAYER_KIND_GLOBAL_MAXPOOL2D;
 }
 
 static int onnx_makes_image(Layer_kind kind)
 {
-	return onnx_needs_image(kind) || kind == LAYER_KIND_RESHAPE;
+	return onnx_needs_image(kind) || kind == LAYER_KIND_RESHAPE || kind == LAYER_KIND_EMBEDDING;
 }
 
 //-----------------------------------------------
@@ -5878,11 +6217,12 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 	}
 
 	// The ONNX input is an image [batch, C, H, W] when the input layer has a
-	// 2-D shape or conv/pool/upsample layers follow (before any Reshape, which
-	// makes its own image); dense layers take [batch, n], so the tensor is
+	// 2-D shape or conv/pool/upsample layers follow (before any Reshape or
+	// Embedding, which make their own image); dense layers take [batch, n], so the tensor is
 	// flattened before them. Conv/pool/upsample need an image input.
 	int image_input = !onnx_is_flat(&pnet->layers[0].shape);
-	for (int layer = 1; layer < pnet->layer_count && pnet->layers[layer].kind != LAYER_KIND_RESHAPE; layer++)
+	for (int layer = 1; layer < pnet->layer_count && pnet->layers[layer].kind != LAYER_KIND_RESHAPE &&
+	                    pnet->layers[layer].kind != LAYER_KIND_EMBEDDING; layer++)
 	{
 		if (onnx_needs_image(pnet->layers[layer].kind))
 			image_input = 1;
@@ -6539,6 +6879,9 @@ PNetwork ann_import_onnx(const char *filename)
 		const char *output = onnx_io(node, "output", 0);
 		const char *in0 = onnx_io(node, "input", 0);
 
+		// a Gather reads the chain as its second input (the ids; the first is its table)
+		if (op && strcmp(op, "Gather") == 0 && onnx_io(node, "input", 1))
+			in0 = onnx_io(node, "input", 1);
 		if (!op || !output || !in0 || !current || strcmp(in0, current) != 0)
 		{
 			error = "ann_import_onnx: only a single chain of nodes is supported";
@@ -6682,6 +7025,78 @@ PNetwork ann_import_onnx(const char *filename)
 				goto fail;
 			}
 			kind = LAYER_KIND_BATCHNORM;
+		}
+		else if (strcmp(op, "Cast") == 0)
+		{
+			// the cast of the ids to integers before an embedding's Gather
+			JsonValue *next = i + 1 < count ? json_at(nodes, i + 1) : NULL;
+			const char *next_op = next ? json_string(onnx_get(next, "op_type")) : NULL;
+			const char *next_ids = next ? onnx_io(next, "input", 1) : NULL;
+			if (image || !next_op || strcmp(next_op, "Gather") != 0 || !next_ids || strcmp(next_ids, output) != 0)
+			{
+				error = "ann_import_onnx: unsupported Cast (only of the ids before an embedding's Gather)";
+				goto fail;
+			}
+			current = output;
+			continue;
+		}
+		else if (strcmp(op, "Gather") == 0)
+		{
+			// an embedding: Gather(weight [vocab, D], ids [batch, L]) -> [batch, L, D],
+			// then Transpose to [batch, D, L], the sequence libann stores as (D, 1, L)
+			int dims[2], axis = 0;
+			JsonValue *attr = onnx_attribute(node, "axis");
+			JsonValue *next = i + 1 < count ? json_at(nodes, i + 1) : NULL;
+			const char *next_op = next ? json_string(onnx_get(next, "op_type")) : NULL;
+			const char *next_in = next ? onnx_io(next, "input", 0) : NULL;
+			int perm[3] = { 0, 0, 0 };
+			if (attr && !onnx_int(onnx_get(attr, "i"), &axis))
+				axis = -1;
+			weight = onnx_initializer(graph, onnx_io(node, "input", 0));
+			if (image || axis != 0 || onnx_dims(weight, dims, 2) != 2 || !onnx_io(node, "input", 1) ||
+				strcmp(onnx_io(node, "input", 1), current) != 0 || !next_op || strcmp(next_op, "Transpose") != 0 ||
+				!next_in || strcmp(next_in, output) != 0 || onnx_attribute_ints(next, "perm", perm, 3) != 3 ||
+				perm[0] != 0 || perm[1] != 2 || perm[2] != 1)
+			{
+				error = "ann_import_onnx: unsupported Gather (needs an embedding: Gather(weight [vocab, D], ids) "
+				        "on the flat ids, then Transpose perm [0, 2, 1])";
+				goto fail;
+			}
+			kind = LAYER_KIND_EMBEDDING;
+			units = dims[1];
+			kernel = dims[0];
+			output = onnx_io(next, "output", 0);
+			i++;
+			spatial = 1;
+		}
+		else if (strcmp(op, "Unsqueeze") == 0)
+		{
+			// a sequence [batch, C, L] to [batch, C, 1, L], the same values: nothing to do
+			int axes[8], n = onnx_attribute_ints(node, "axes", axes, 8);
+			if (n == 0 && onnx_io(node, "input", 1))
+			{
+				double v[8];
+				n = onnx_constant_values(onnx_initializer(graph, onnx_io(node, "input", 1)), v, 8);
+				for (int a = 0; a < n; a++)
+					axes[a] = (int)v[a];
+			}
+			if (!image || spatial != 1 || n != 1 || (axes[0] != 2 && axes[0] != -2))
+			{
+				error = "ann_import_onnx: unsupported Unsqueeze (only of a sequence [batch, C, L] at axis 2)";
+				goto fail;
+			}
+			spatial = 2;
+			current = output;
+			continue;
+		}
+		else if (strcmp(op, "GlobalMaxPool") == 0)
+		{
+			if (!image)
+			{
+				error = "ann_import_onnx: GlobalMaxPool needs a [batch, C, H, W] input";
+				goto fail;
+			}
+			kind = LAYER_KIND_GLOBAL_MAXPOOL2D;
 		}
 		else if (strcmp(op, "GlobalAveragePool") == 0)
 		{
@@ -6850,6 +7265,8 @@ PNetwork ann_import_onnx(const char *filename)
 		case LAYER_KIND_UPSAMPLE2D:	err = ann_add_upsample2d(pnet, kernel); break;
 		case LAYER_KIND_RESHAPE:	err = ann_add_reshape(pnet, dims4[1], dims4[2], dims4[3]); break;
 		case LAYER_KIND_GLOBAL_AVGPOOL2D: err = ann_add_global_avgpool2d(pnet); break;
+		case LAYER_KIND_GLOBAL_MAXPOOL2D: err = ann_add_global_maxpool2d(pnet); break;
+		case LAYER_KIND_EMBEDDING:	err = ann_add_embedding(pnet, kernel, units, -1); break;
 		case LAYER_KIND_BATCHNORM:	err = ann_add_batchnorm(pnet, act); break;
 		default:					err = ann_add_flatten(pnet); break;
 		}

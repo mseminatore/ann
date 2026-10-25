@@ -203,6 +203,60 @@ static int cnn_gpu_matches_cpu(PNetwork net, const PTensor inputs, real tol)
 
 #define TOLERANCE 1e-4f
 
+//-----------------------------------------------------------
+// Text helpers: CNN_SAMPLES rows of TEXT_LEN token ids from a vocabulary of
+// TEXT_VOCAB, 0 padding them (after the text, or before it in every third
+// row; one row is all padding)
+//-----------------------------------------------------------
+#define TEXT_LEN   12
+#define TEXT_VOCAB 20
+
+static void make_text_data(PTensor *ids, PTensor *targets)
+{
+    srand(77);
+    *ids = tensor_zeros(CNN_SAMPLES, TEXT_LEN);
+    *targets = tensor_zeros(CNN_SAMPLES, CNN_CLASSES);
+    for (int i = 0; i < CNN_SAMPLES; i++) {
+        int len = i == 5 ? 0 : 1 + rand() % TEXT_LEN, start = i % 3 == 0 ? TEXT_LEN - len : 0;
+        for (int t = 0; t < len; t++)
+            (*ids)->values[i * TEXT_LEN + start + t] = (real)(1 + rand() % (TEXT_VOCAB - 1));
+        (*targets)->values[i * CNN_CLASSES + rand() % CNN_CLASSES] = 1.0f;
+    }
+}
+
+// 0: embedding -> conv1d -> global max pool; 1: masked embedding -> conv1d
+// -> batch norm -> conv1d (whose windows read masked steps, which must be
+// zero) -> max pool -> conv1d -> global average pool; 2: as 1 with global
+// max pooling and dropout after the first conv
+static PNetwork make_text_net(int variant)
+{
+    PNetwork net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+    ann_add_layer(net, TEXT_LEN, LAYER_INPUT, ACTIVATION_NULL);
+    if (variant == 0)
+        ann_add_embedding(net, TEXT_VOCAB, 5, 0);
+    else
+        ann_add_embedding_masked(net, TEXT_VOCAB, 5, 0);   // 5x1x12
+    ann_add_conv1d(net, 6, 3, 1, 1, ACTIVATION_RELU);      // 6x1x12
+    if (variant > 0) {
+        ann_add_batchnorm(net, ACTIVATION_RELU);
+        ann_add_conv1d(net, 6, 3, 1, 1, ACTIVATION_RELU);  // 6x1x12
+        ann_add_maxpool1d(net, 2, 2);                       // 6x1x6
+        ann_add_conv1d(net, 4, 3, 1, 0, ACTIVATION_TANH);  // 4x1x4
+    }
+    if (variant == 1)
+        ann_add_global_avgpool2d(net);
+    else
+        ann_add_global_maxpool2d(net);
+    ann_add_layer(net, CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    ann_set_learning_rate(net, 0.01f);
+    ann_set_convergence(net, 0.0f);
+    ann_set_epoch_limit(net, 4);
+    ann_set_batch_size(net, 8);
+    if (variant == 2)
+        ann_set_layer_dropout(net, 2, 0.25f);
+    return net;
+}
+
 static void quiet(const char *s) { (void)s; }
 
 static real rand_unit(void)
@@ -956,16 +1010,44 @@ void test_main(int argc, char *argv[])
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 
-        // embeddings stay on the CPU
-        PNetwork emb = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
-        ann_add_layer(emb, 8, LAYER_INPUT, ACTIVATION_NULL);
-        ann_add_embedding(emb, 20, 4, 0);
-        ann_add_conv1d(emb, 4, 3, 1, 1, ACTIVATION_RELU);
-        ann_add_global_maxpool2d(emb);
-        ann_add_layer(emb, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
-        TESTEX("A network with an embedding is not uploaded (it trains on the CPU)",
-               ann_gpu_upload_network(emb) == ERR_INVALID);
-        ann_free_network(emb);
+        // embeddings, with and without padding masks
+        {
+            PTensor ids, text_targets;
+            make_text_data(&ids, &text_targets);
+            int uploaded[3], trained[3], inferred[3];
+            for (int v = 0; v < 3; v++) {
+                PNetwork cpu_text = make_text_net(v), gpu_text = make_text_net(v);
+                uploaded[v] = ann_gpu_upload_network(gpu_text) == ERR_OK;
+                srand(42);
+                ann_train_network(cpu_text, ids, text_targets, CNN_SAMPLES);
+                srand(42);
+                ann_train_network(gpu_text, ids, text_targets, CNN_SAMPLES);
+                trained[v] = cnn_nets_close(cpu_text, gpu_text, 1e-3f, 1);
+                inferred[v] = cnn_gpu_matches_cpu(gpu_text, ids, TOLERANCE);
+                ann_free_network(cpu_text);
+                ann_free_network(gpu_text);
+            }
+            TESTEX("A network with an embedding uploads", uploaded[0] && uploaded[1] && uploaded[2]);
+            TESTEX("GPU embedding training matches CPU training", trained[0]);
+            TESTEX("and its inference matches the CPU", inferred[0]);
+            TESTEX("GPU masked embedding, batch norm, pooling and global average pool training matches the CPU", trained[1]);
+            TESTEX("and its inference matches the CPU", inferred[1]);
+            TESTEX("GPU masked training with dropout and global max pooling matches the CPU", trained[2]);
+            TESTEX("and its inference matches the CPU", inferred[2]);
+            tensor_free(ids);
+            tensor_free(text_targets);
+
+            // ids that come from another layer stay on the CPU
+            PNetwork emb = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+            ann_add_layer(emb, 8, LAYER_INPUT, ACTIVATION_NULL);
+            ann_add_layer(emb, 8, LAYER_HIDDEN, ACTIVATION_RELU);
+            ann_add_embedding(emb, 20, 4, 0);
+            ann_add_global_maxpool2d(emb);
+            ann_add_layer(emb, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            TESTEX("An embedding above layer 1 is not uploaded (it trains on the CPU)",
+                   ann_gpu_upload_network(emb) == ERR_INVALID);
+            ann_free_network(emb);
+        }
 
         // pooling straight off the input: the first layer has no parameters
         PNetwork pool_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);

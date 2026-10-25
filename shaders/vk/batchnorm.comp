@@ -12,6 +12,11 @@
 //   4 input grad:    dx = gamma * inv_std * (dz - mean(dz) - x_hat * mean(dz * x_hat))
 // Bindings by mode: 0 x or dz; 1 y or dx; 2 x_hat; 3 stats; 4 gamma (grad: its gradient);
 // 5 beta (grad: its gradient); 6 running mean; 7 running variance.
+// Over a masked sequence (masked = 1) the statistics are the kept steps' (kept of them in
+// the batch), and x_hat and dx are 0 at the masked ones. The mask [batch][area] (1 kept)
+// takes a binding its mode leaves free, as a kernel binds at most 8: 1 (y) for the
+// statistics, 6 (the running mean) for forward train and input grad; the grad mode needs
+// only the count, since dz is 0 at masked steps.
 
 layout(local_size_x = 256) in;
 
@@ -27,7 +32,16 @@ layout(std430, binding = 7) buffer BufVar { float var_run[]; };
 layout(push_constant) uniform Params {
     uint C, area, batch, mode;
     float momentum, eps;
+    uint masked, kept;
 } pc;
+
+// is step j (b * area + i) of the batch kept? (see above for where the mask is bound)
+bool kept_step(uint j)
+{
+    if (pc.masked == 0u)
+        return true;
+    return (pc.mode == 0u ? dst[j] : mean_run[j]) != 0.0;
+}
 
 shared float part[256];
 
@@ -51,7 +65,7 @@ float reduce(float s)
 void main()
 {
     uint t = gl_LocalInvocationID.x;
-    uint n = pc.batch * pc.area, nodes = pc.C * pc.area, C = pc.C;
+    uint all = pc.batch * pc.area, n = pc.masked != 0u ? pc.kept : all, nodes = pc.C * pc.area, C = pc.C;
 
     if (pc.mode == 0u || pc.mode == 3u)
     {
@@ -60,17 +74,25 @@ void main()
             if (pc.mode == 0u)
             {
                 float s = 0.0;
-                for (uint j = t; j < n; j += 256u)
-                    s += src[(j / pc.area) * nodes + c * pc.area + j % pc.area];
-                float mean = reduce(s) / float(n);
+                for (uint j = t; j < all; j += 256u)
+                    if (kept_step(j))
+                        s += src[(j / pc.area) * nodes + c * pc.area + j % pc.area];
+                float total = reduce(s), mean = n > 0u ? total / float(n) : 0.0;
                 s = 0.0;
-                for (uint j = t; j < n; j += 256u)
+                for (uint j = t; j < all; j += 256u)
                 {
                     float v = src[(j / pc.area) * nodes + c * pc.area + j % pc.area] - mean;
-                    s += v * v;
+                    if (kept_step(j))
+                        s += v * v;
                 }
                 float sq = reduce(s);
-                if (t == 0u)
+                if (t == 0u && n == 0u)
+                {
+                    // all padding: nothing to learn the statistics from
+                    stats[c] = 0.0;
+                    stats[C + c] = 1.0 / sqrt(pc.eps);
+                }
+                else if (t == 0u)
                 {
                     float var = sq / float(n);
                     stats[c] = mean;
@@ -82,7 +104,7 @@ void main()
             else
             {
                 float s = 0.0, d = 0.0;
-                for (uint j = t; j < n; j += 256u)
+                for (uint j = t; j < all; j += 256u)
                 {
                     uint i = (j / pc.area) * nodes + c * pc.area + j % pc.area;
                     s += src[i];
@@ -94,8 +116,8 @@ void main()
                 {
                     gamma[c] += dot;
                     beta[c] += sum;
-                    stats[2u * C + c] = sum / float(n);
-                    stats[3u * C + c] = dot / float(n);
+                    stats[2u * C + c] = n > 0u ? sum / float(n) : 0.0;
+                    stats[3u * C + c] = n > 0u ? dot / float(n) : 0.0;
                 }
             }
         }
@@ -105,15 +127,16 @@ void main()
     GRID_LOOP(i, pc.batch * nodes)
     {
         uint c = (i / pc.area) % C;
+        bool kept = pc.mode == 2u || kept_step((i / nodes) * pc.area + i % pc.area);
         if (pc.mode == 1u)
         {
-            float h = (src[i] - stats[c]) * stats[C + c];
+            float h = kept ? (src[i] - stats[c]) * stats[C + c] : 0.0;
             x_hat[i] = h;
             dst[i] = gamma[c] * h + beta[c];
         }
         else if (pc.mode == 2u)
             dst[i] = (src[i] - mean_run[c]) * (gamma[c] / sqrt(var_run[c] + pc.eps)) + beta[c];
         else
-            dst[i] = gamma[c] * stats[C + c] * (src[i] - stats[2u * C + c] - x_hat[i] * stats[3u * C + c]);
+            dst[i] = kept ? gamma[c] * stats[C + c] * (src[i] - stats[2u * C + c] - x_hat[i] * stats[3u * C + c]) : 0.0;
     }
 }

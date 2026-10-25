@@ -637,9 +637,10 @@ ANN_API int ann_add_batchnorm(PNetwork pnet, Activation_type activation);
  * train nothing; padding_idx's row stays zero. Weights start N(0, 1), as
  * PyTorch's nn.Embedding. No gradient reaches the layer below. Maps to ONNX
  * Cast, Gather, Transpose and Unsqueeze nodes (PyTorch's nn.Embedding imports).
- * Networks with an embedding cannot be quantized or exported as C headers yet,
- * and train on the CPU. The layers above still see the padding steps; see
- * ann_add_embedding_masked to leave them out.
+ * Networks with an embedding cannot be quantized or exported as C headers yet.
+ * The Metal and Vulkan backends train and run them when the embedding is layer
+ * 1 (reading the inputs); elsewhere they stay on the CPU. The layers above
+ * still see the padding steps; see ann_add_embedding_masked to leave them out.
  * 
  * @param pnet Network to add the layer to
  * @param vocab_size Number of token ids (> 0)

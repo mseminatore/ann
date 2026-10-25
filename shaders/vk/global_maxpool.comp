@@ -3,17 +3,20 @@
 // Global max pooling. Forward: one invocation per (sample, channel) takes the
 // plane's largest value (the first on ties, as the CPU does) and records its
 // index in the plane in arg. Backward: each input gets its channel's dz if it
-// was the one taken, else 0. Both are gathers (no atomics).
+// was the one taken, else 0. Both are gathers (no atomics). Over a masked
+// sequence (masked = 1; mask [batch][H*W], 1 kept) only kept steps count; with
+// none the output is 0 and the index ~0u, which no input matches.
 
 layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) readonly buffer BufSrc { float src[]; };
 layout(std430, binding = 1) writeonly buffer BufDst { float dst[]; };
 layout(std430, binding = 2) buffer BufArg { uint arg[]; };
+layout(std430, binding = 3) readonly buffer BufMask { float mask[]; };
 
 layout(push_constant) uniform Params {
     WindowDims d;
-    uint backward;
+    uint backward, masked;
 } pc;
 
 void main()
@@ -24,11 +27,12 @@ void main()
     {
         GRID_LOOP(plane, d.batch * d.C)
         {
-            uint best = 0u;
-            for (uint i = 1u; i < area; i++)
-                if (src[plane * area + i] > src[plane * area + best])
+            uint best = 0xFFFFFFFFu, b = plane / d.C;
+            for (uint i = 0u; i < area; i++)
+                if ((pc.masked == 0u || mask[b * area + i] != 0.0) &&
+                    (best == 0xFFFFFFFFu || src[plane * area + i] > src[plane * area + best]))
                     best = i;
-            dst[plane] = src[plane * area + best];
+            dst[plane] = best == 0xFFFFFFFFu ? 0.0 : src[plane * area + best];
             arg[plane] = best;
         }
     }

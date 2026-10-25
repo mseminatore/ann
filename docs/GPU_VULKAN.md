@@ -2,8 +2,10 @@
 
 The Vulkan backend runs GPU **inference and training** on any GPU with a Vulkan 1.1 driver
 (AMD, Intel and NVIDIA) on Windows and Linux, through the same `GpuBackend` vtable as the Metal
-and CUDA backends. Like Metal, it runs every layer kind but Embedding (whose networks stay on the CPU): dense, conv (grouped and depthwise too), max pool, global max pool, upsample, flatten,
-reshape, global average pooling and batch norm. It consists of:
+and CUDA backends. Like Metal, it runs every layer kind: dense, conv (grouped and depthwise too), max pool, global max pool, upsample, flatten,
+reshape, global average pooling, batch norm and embedding (as layer 1, reading the inputs; the
+host indexes each batch's ids so the weight gradient needs no float atomics, and works out the
+padding masks of `ann_add_embedding_masked`, which are uploaded with the batch). It consists of:
 
 - `tensor_vulkan.c`: device setup, buffers, command recording, and the inference and training
   paths
@@ -11,7 +13,8 @@ reshape, global average pooling and batch norm. It consists of:
   derivatives, output delta and loss, bias gradients, the optimizer step (gradient clipping, the
   five optimizers and L1/L2 regularization of a layer's weights and bias in one dispatch),
   dropout; im2col, conv output and gradient rows, col2im, direct convolution, max pooling,
-  upsampling, split-K partial sums), with shared code in `shaders/vk/common.glsl`
+  upsampling, split-K partial sums, embedding lookups and gradients, padding masks), with shared
+  code in `shaders/vk/common.glsl`
 - `cmake/embed_spirv.cmake`: embeds the compiled SPIR-V in a generated `shaders_vk_spv.h`
 - `CMakeLists.txt` option `-DUSE_VULKAN=1`
 

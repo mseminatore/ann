@@ -2,17 +2,28 @@
 #include "common.glsl"
 // Global average pooling: each channel's mean over H x W. Forward: one thread
 // per (sample, channel) sums its plane in the CPU's order. Backward: each
-// input gets its channel's dz / (H*W). Both are gathers (no atomics).
+// input gets its channel's dz / (H*W). Both are gathers (no atomics). Over a
+// masked sequence (masked = 1; mask [batch][H*W], 1 kept) the mean is the kept
+// steps', 0 if none, and masked steps get no gradient.
 
 layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) readonly buffer BufSrc { float src[]; };
 layout(std430, binding = 1) writeonly buffer BufDst { float dst[]; };
+layout(std430, binding = 2) readonly buffer BufMask { float mask[]; };
 
 layout(push_constant) uniform Params {
     WindowDims d;
-    uint backward;
+    uint backward, masked;
 } pc;
+
+uint kept_steps(uint b, uint area)
+{
+    uint n = 0u;
+    for (uint i = 0u; i < area; i++)
+        n += mask[b * area + i] != 0.0 ? 1u : 0u;
+    return n;
+}
 
 void main()
 {
@@ -23,14 +34,23 @@ void main()
         GRID_LOOP(plane, d.batch * d.C)
         {
             float s = 0.0;
+            uint b = plane / d.C;
             for (uint i = 0; i < area; i++)
-                s += src[plane * area + i];
-            dst[plane] = s / float(area);
+                if (pc.masked == 0u || mask[b * area + i] != 0.0)
+                    s += src[plane * area + i];
+            uint kept = pc.masked == 0u ? area : kept_steps(b, area);
+            dst[plane] = kept > 0u ? s / float(kept) : 0.0;
         }
     }
     else
     {
         GRID_LOOP(idx, d.batch * d.C * area)
-            dst[idx] = src[idx / area] / float(area);
+        {
+            uint b = idx / (d.C * area);
+            if (pc.masked == 0u)
+                dst[idx] = src[idx / area] / float(area);
+            else
+                dst[idx] = mask[b * area + idx % area] != 0.0 ? src[idx / area] / float(kept_steps(b, area)) : 0.0;
+        }
     }
 }

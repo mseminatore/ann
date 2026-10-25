@@ -61,6 +61,7 @@ float derivative(float x, uint act)
 struct WindowDims
 {
     uint C, H, W, F, OH, OW, K, S, P, batch;
+    uint KW, SW, PW;    // the window's width settings (K, S and P are the height's)
 };
 
 // Grid-stride loop over n items: the host caps the workgroup count at the

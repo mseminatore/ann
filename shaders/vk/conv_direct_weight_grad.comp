@@ -38,7 +38,7 @@ void main()
     uint t = gl_LocalInvocationID.x;
     uint px = pc.px, ys = 256 / px;
     uint lane = t % px, y = t / px;
-    uint kk = d.K * d.K, P = d.C * kk;
+    uint kk = d.K * d.KW, P = d.C * kk;
     uint p = gl_WorkGroupID.x * px + lane, chunk = gl_WorkGroupID.y;
     uint positions = d.OH * d.OW, rows = d.batch * positions;
     uint r = chunk * pc.chunk_rows + y, r1 = min((chunk + 1) * pc.chunk_rows, rows);
@@ -49,7 +49,7 @@ void main()
 
     if (p <= P && r < r1)
     {
-        uint ci = p / kk, ki = (p % kk) / d.K, kj = p % d.K;
+        uint ci = p / kk, ki = (p % kk) / d.KW, kj = p % d.KW;
         // the row's sample and output position, advanced by ys rows at a time
         uint b = r / positions, oh = (r % positions) / d.OW, ow = r % d.OW;
         for (; r < r1; r += ys)
@@ -57,7 +57,7 @@ void main()
             float c = 1.0;
             if (p < P)
             {
-                int ih = int(oh * d.S + ki) - int(d.P), iw = int(ow * d.S + kj) - int(d.P);
+                int ih = int(oh * d.S + ki) - int(d.P), iw = int(ow * d.SW + kj) - int(d.PW);
                 c = ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W)
                     ? x[((b * d.C + ci) * d.H + uint(ih)) * d.W + uint(iw)] : 0.0;
             }

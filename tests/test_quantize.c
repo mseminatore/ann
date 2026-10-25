@@ -261,9 +261,9 @@ void test_main(int argc, char *argv[])
         err = q ? max_error(net, q, x, 0) : 1e9;
         printf("\t  reshape/upsample: %.2f steps\n", err);
         TESTEX("Reshape, upsample and conv within 3 steps", err <= 3.0);
-        TESTEX("Its header needs the current ann_rt.h (version 4)",
+        TESTEX("Its header needs the current ann_rt.h (version 5)",
                ann_export_c_header(NULL, q, "test_quantize_up.h", "up_q") == ERR_OK &&
-               file_contains("test_quantize_up.h", "ANN_RT_VERSION < 4") &&
+               file_contains("test_quantize_up.h", "ANN_RT_VERSION < 5") &&
                file_contains("test_quantize_up.h", "ANN_RT_UPSAMPLE2D"));
         remove("test_quantize_up.h");
         ann_free_quantized(q);
@@ -281,9 +281,9 @@ void test_main(int argc, char *argv[])
         err = q ? max_error(net, q, x, 0) : 1e9;
         printf("\t  conv/global avg pool: %.2f steps\n", err);
         TESTEX("ReLU conv and global avg pool within 5 steps", err <= 5.0);
-        TESTEX("Its header needs the current ann_rt.h (version 4)",
+        TESTEX("Its header needs the current ann_rt.h (version 5)",
                ann_export_c_header(NULL, q, "test_quantize_gap.h", "gap_q") == ERR_OK &&
-               file_contains("test_quantize_gap.h", "ANN_RT_VERSION < 4") &&
+               file_contains("test_quantize_gap.h", "ANN_RT_VERSION < 5") &&
                file_contains("test_quantize_gap.h", "ANN_RT_GLOBAL_AVGPOOL2D"));
         remove("test_quantize_gap.h");
         ann_free_quantized(q);
@@ -311,7 +311,7 @@ void test_main(int argc, char *argv[])
         TESTEX("Its header has no batch norm layers: conv, pool, dense, dense",
                ann_export_c_header(NULL, q, "test_quantize_bn.h", "bn_q") == ERR_OK &&
                file_contains("test_quantize_bn.h", "bn_q_layers[4]") &&
-               file_contains("test_quantize_bn.h", "ANN_RT_VERSION < 4"));
+               file_contains("test_quantize_bn.h", "ANN_RT_VERSION < 5"));
         TESTEX("and the float header exports", ann_export_c_header(net, NULL, "test_quantize_bn.h", "bn_f") == ERR_OK &&
                file_contains("test_quantize_bn.h", "bn_f_layers[4]"));
         remove("test_quantize_bn.h");
@@ -337,7 +337,7 @@ void test_main(int argc, char *argv[])
         TESTEX("Its header gives the groups", ann_export_c_header(NULL, q, "test_quantize_dw.h", "dw_q") == ERR_OK &&
                file_contains("test_quantize_dw.h", "static const int8_t dw_q_w1[108]") &&
                file_contains("test_quantize_dw.h", "static const int8_t dw_q_w2[54]") &&
-               file_contains("test_quantize_dw.h", "NULL, NULL, 6 }"));
+               file_contains("test_quantize_dw.h", "NULL, NULL, 6, 3, 2, 1 }"));
         remove("test_quantize_dw.h");
         ann_free_quantized(q);
         ann_free_network(net);
@@ -421,7 +421,7 @@ void test_main(int argc, char *argv[])
                file_contains("test_quantize_q.h", "#define BARS_Q_INPUT_ZERO_POINT") &&
                file_contains("test_quantize_q.h", "static const int8_t bars_q_w0[36]") &&
                file_contains("test_quantize_q.h", "ANN_RT_FUNC int bars_q_predict(const int8_t *input") &&
-               file_contains("test_quantize_q.h", "ANN_RT_VERSION < 4"));
+               file_contains("test_quantize_q.h", "ANN_RT_VERSION < 5"));
         TESTEX("float header exports", ann_export_c_header(net, NULL, "test_quantize_f.h", "bars_f") == ERR_OK);
         TESTEX("with float arrays",
                file_contains("test_quantize_f.h", "static const float bars_f_w0[36]") &&

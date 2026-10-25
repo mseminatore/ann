@@ -504,9 +504,10 @@ int tensor_metal_init(void)
         // ----------------------------------------------------------------
         // Conv2D and MaxPool2D. Activations are [batch][C][H][W]; WindowDims
         // describes the layer (C,H,W in; F,OH,OW out; K kernel, S stride,
-        // P padding). A convolution is a GEMM over im2col columns stored one
-        // row per output position: cols [batch*OH*OW x C*K*K], column index
-        // (c*K + i)*K + j, as the CPU path orders them.
+        // P padding for the height, KW, SW, PW for the width). A convolution
+        // is a GEMM over im2col columns stored one row per output position:
+        // cols [batch*OH*OW x C*K*KW], column index (c*K + i)*KW + j, as the
+        // CPU path orders them.
         // ----------------------------------------------------------------
         "kernel void copy_buffer(\n"
         "    device const float *src [[buffer(0)]],\n"
@@ -520,7 +521,7 @@ int tensor_metal_init(void)
         "    uint2 gid [[thread_position_in_grid]],\n"
         "    uint2 dims [[threads_per_grid]]) {\n"
         "    dst[gid.x * dims.y + gid.y] = src[gid.y * dims.x + gid.x]; }\n"
-        "struct WindowDims { uint C, H, W, F, OH, OW, K, S, P, batch; };\n"
+        "struct WindowDims { uint C, H, W, F, OH, OW, K, S, P, batch, KW, SW, PW; };\n"
         // one thread per (sample, channel, output position) writes that
         // position's K*K column values; grid (OW, OH, batch*C)
         "kernel void conv_im2col(\n"
@@ -528,16 +529,16 @@ int tensor_metal_init(void)
         "    device float *cols [[buffer(1)]],\n"
         "    constant WindowDims &d [[buffer(2)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
-        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.K;\n"
+        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.KW;\n"
         "    device const float *xs = x + gid.z * d.H * d.W;\n"
         "    device float *out = cols + ((b * d.OH + gid.y) * d.OW + gid.x) * d.C * kk + c * kk;\n"
-        "    int ih0 = int(gid.y * d.S) - int(d.P), iw0 = int(gid.x * d.S) - int(d.P);\n"
+        "    int ih0 = int(gid.y * d.S) - int(d.P), iw0 = int(gid.x * d.SW) - int(d.PW);\n"
         "    for (uint i = 0; i < d.K; i++) {\n"
         "        int ih = ih0 + int(i);\n"
         "        bool row_in = ih >= 0 && ih < int(d.H);\n"
-        "        for (uint j = 0; j < d.K; j++) {\n"
+        "        for (uint j = 0; j < d.KW; j++) {\n"
         "            int iw = iw0 + int(j);\n"
-        "            out[i * d.K + j] = row_in && iw >= 0 && iw < int(d.W) ? xs[ih * int(d.W) + iw] : 0.0f; } } }\n"
+        "            out[i * d.KW + j] = row_in && iw >= 0 && iw < int(d.W) ? xs[ih * int(d.W) + iw] : 0.0f; } } }\n"
         // rows [batch*P x F] + bias -> y [batch][F][P], activated as in
         // bias_add (z gets the values before activation when save_z);
         // grid (P, F, batch)
@@ -595,7 +596,7 @@ int tensor_metal_init(void)
         "    while (w.ow >= d.OW) { w.ow -= d.OW; if (++w.oh == d.OH) { w.oh = 0; w.b++; } } }\n"
         "inline float col_input(device const float *x, constant WindowDims &d, thread const ColWalk &w,\n"
         "                       uint c, uint i, uint j) {\n"
-        "    int ih = int(w.oh * d.S + i) - int(d.P), iw = int(w.ow * d.S + j) - int(d.P);\n"
+        "    int ih = int(w.oh * d.S + i) - int(d.P), iw = int(w.ow * d.SW + j) - int(d.PW);\n"
         "    return ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W)\n"
         "        ? x[((w.b * d.C + c) * d.H + uint(ih)) * d.W + uint(iw)] : 0.0f; }\n"
         // dW [F x P] += dz_rows^T * cols (P = C*K*K), a sum over batch*OH*OW rows
@@ -697,8 +698,8 @@ int tensor_metal_init(void)
         "    uint2 tid [[thread_position_in_threadgroup]],\n"
         "    uint2 tpg [[threads_per_threadgroup]]) {\n"
         "    threadgroup float4 red[256];\n"
-        "    uint t = tid.x, T = tpg.x, kk = d.K * d.K, P = d.C * kk, p = tg.x;\n"
-        "    uint ci = p / kk, ki = p % kk / d.K, kj = p % d.K;\n"
+        "    uint t = tid.x, T = tpg.x, kk = d.K * d.KW, P = d.C * kk, p = tg.x;\n"
+        "    uint ci = p / kk, ki = p % kk / d.KW, kj = p % d.KW;\n"
         "    uint r = tg.y * n.y + t, r1 = min((tg.y + 1) * n.y, n.x);\n"
         "    ColWalk w = col_walk_start(r, d);\n"
         "    float4 acc = 0.0f;\n"
@@ -738,7 +739,7 @@ int tensor_metal_init(void)
         "    device float *dx [[buffer(1)]],\n"
         "    constant WindowDims &d [[buffer(2)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
-        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.K, ckk = d.C * kk;\n"
+        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.KW, ckk = d.C * kk;\n"
         "    float s = 0.0f;\n"
         "    for (uint i = 0; i < d.K; i++) {\n"
         "        int ty = int(gid.y + d.P) - int(i);\n"
@@ -746,14 +747,14 @@ int tensor_metal_init(void)
         "        uint oh = uint(ty);\n"
         "        if (d.S > 1) { if (oh % d.S) continue; oh /= d.S; }\n"
         "        if (oh >= d.OH) continue;\n"
-        "        for (uint j = 0; j < d.K; j++) {\n"
-        "            int tx = int(gid.x + d.P) - int(j);\n"
+        "        for (uint j = 0; j < d.KW; j++) {\n"
+        "            int tx = int(gid.x + d.PW) - int(j);\n"
         "            if (tx < 0) continue;\n"
         "            uint ow = uint(tx);\n"
-        "            if (d.S > 1) { if (ow % d.S) continue; ow /= d.S; }\n"
+        "            if (d.SW > 1) { if (ow % d.SW) continue; ow /= d.SW; }\n"
         "            if (ow >= d.OW) continue;\n"
         "            uint row = (b * d.OH + oh) * d.OW + ow;\n"
-        "            s += dcols[row * ckk + c * kk + i * d.K + j]; } }\n"
+        "            s += dcols[row * ckk + c * kk + i * d.KW + j]; } }\n"
         "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
         // Direct convolution for layers with few filters, where a GEMM over
         // im2col columns has too few outputs to be efficient: one thread per
@@ -768,8 +769,8 @@ int tensor_metal_init(void)
         "    constant WindowDims &d [[buffer(5)]],\n"
         "    constant uint2 &act_save_z [[buffer(6)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
-        "    uint b = gid.z / d.F, f = gid.z % d.F, kk = d.K * d.K;\n"
-        "    int ih0 = int(gid.y * d.S) - int(d.P), iw0 = int(gid.x * d.S) - int(d.P);\n"
+        "    uint b = gid.z / d.F, f = gid.z % d.F, kk = d.K * d.KW;\n"
+        "    int ih0 = int(gid.y * d.S) - int(d.P), iw0 = int(gid.x * d.SW) - int(d.PW);\n"
         "    float s = 0.0f;\n"
         "    for (uint c = 0; c < d.C; c++) {\n"
         "        device const float *xs = x + (b * d.C + c) * d.H * d.W;\n"
@@ -777,9 +778,9 @@ int tensor_metal_init(void)
         "        for (uint i = 0; i < d.K; i++) {\n"
         "            int ih = ih0 + int(i);\n"
         "            if (ih < 0 || ih >= int(d.H)) continue;\n"
-        "            for (uint j = 0; j < d.K; j++) {\n"
+        "            for (uint j = 0; j < d.KW; j++) {\n"
         "                int iw = iw0 + int(j);\n"
-        "                if (iw >= 0 && iw < int(d.W)) s += xs[ih * int(d.W) + iw] * wf[i * d.K + j]; } } }\n"
+        "                if (iw >= 0 && iw < int(d.W)) s += xs[ih * int(d.W) + iw] * wf[i * d.KW + j]; } } }\n"
         "    uint o = (gid.z * d.OH + gid.y) * d.OW + gid.x;\n"
         "    float v = s + bias[f];\n"
         "    if (act_save_z.y) z[o] = v;\n"
@@ -793,7 +794,7 @@ int tensor_metal_init(void)
         "    device float *dx [[buffer(2)]],\n"
         "    constant WindowDims &d [[buffer(3)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
-        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.K;\n"
+        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.KW;\n"
         "    float s = 0.0f;\n"
         "    for (uint i = 0; i < d.K; i++) {\n"
         "        int ty = int(gid.y + d.P) - int(i);\n"
@@ -801,14 +802,14 @@ int tensor_metal_init(void)
         "        uint oh = uint(ty);\n"
         "        if (d.S > 1) { if (oh % d.S) continue; oh /= d.S; }\n"
         "        if (oh >= d.OH) continue;\n"
-        "        for (uint j = 0; j < d.K; j++) {\n"
-        "            int tx = int(gid.x + d.P) - int(j);\n"
+        "        for (uint j = 0; j < d.KW; j++) {\n"
+        "            int tx = int(gid.x + d.PW) - int(j);\n"
         "            if (tx < 0) continue;\n"
         "            uint ow = uint(tx);\n"
-        "            if (d.S > 1) { if (ow % d.S) continue; ow /= d.S; }\n"
+        "            if (d.SW > 1) { if (ow % d.SW) continue; ow /= d.SW; }\n"
         "            if (ow >= d.OW) continue;\n"
         "            device const float *g = dz_rows + ((b * d.OH + oh) * d.OW + ow) * d.F;\n"
-        "            for (uint f = 0; f < d.F; f++) s += g[f] * w[(f * d.C + c) * kk + i * d.K + j]; } }\n"
+        "            for (uint f = 0; f < d.F; f++) s += g[f] * w[(f * d.C + c) * kk + i * d.KW + j]; } }\n"
         "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
         // Each output takes its window's largest input (the first on ties,
         // scanning as the CPU does) and records its index within the sample;
@@ -820,9 +821,9 @@ int tensor_metal_init(void)
         "    constant WindowDims &d [[buffer(3)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
         "    device const float *xs = x + gid.z * d.H * d.W;\n"
-        "    uint row0 = gid.y * d.S * d.W + gid.x * d.S, best = row0;\n"
+        "    uint row0 = gid.y * d.S * d.W + gid.x * d.SW, best = row0;\n"
         "    for (uint i = 0; i < d.K; i++)\n"
-        "        for (uint j = 0; j < d.K; j++) {\n"
+        "        for (uint j = 0; j < d.KW; j++) {\n"
         "            uint idx = row0 + i * d.W + j;\n"
         "            if (xs[idx] > xs[best]) best = idx; }\n"
         "    uint out = (gid.z * d.OH + gid.y) * d.OW + gid.x;\n"
@@ -838,15 +839,15 @@ int tensor_metal_init(void)
         "    uint3 gid [[thread_position_in_grid]]) {\n"
         "    uint me = ((gid.z % d.C) * d.H + gid.y) * d.W + gid.x;\n"
         "    uint oh0 = gid.y + 1 > d.K ? (gid.y + 1 - d.K + d.S - 1) / d.S : 0;\n"
-        "    uint ow0 = gid.x + 1 > d.K ? (gid.x + 1 - d.K + d.S - 1) / d.S : 0;\n"
-        "    uint oh1 = min(gid.y / d.S + 1, d.OH), ow1 = min(gid.x / d.S + 1, d.OW);\n"
+        "    uint ow0 = gid.x + 1 > d.KW ? (gid.x + 1 - d.KW + d.SW - 1) / d.SW : 0;\n"
+        "    uint oh1 = min(gid.y / d.S + 1, d.OH), ow1 = min(gid.x / d.SW + 1, d.OW);\n"
         "    float s = 0.0f;\n"
         "    for (uint oh = oh0; oh < oh1; oh++)\n"
         "        for (uint ow = ow0; ow < ow1; ow++) {\n"
         "            uint out = (gid.z * d.OH + oh) * d.OW + ow;\n"
         "            if (arg[out] == me) s += dz[out]; }\n"
         "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
-        // The same when K == S: the windows tile the input, so each output
+        // The same when K == S and KW == SW: the windows tile the input, so each output
         // writes its window, dz at the input it took and zero elsewhere; the
         // last row and column of outputs also zero the inputs no window
         // covers. grid (OW, OH, batch*C)
@@ -859,8 +860,8 @@ int tensor_metal_init(void)
         "    uint out = (gid.z * d.OH + gid.y) * d.OW + gid.x;\n"
         "    uint best = arg[out] - (gid.z % d.C) * d.H * d.W;\n"
         "    float g = dz[out];\n"
-        "    uint h0 = gid.y * d.S, w0 = gid.x * d.S;\n"
-        "    uint h1 = gid.y + 1 == d.OH ? d.H : h0 + d.K, w1 = gid.x + 1 == d.OW ? d.W : w0 + d.K;\n"
+        "    uint h0 = gid.y * d.S, w0 = gid.x * d.SW;\n"
+        "    uint h1 = gid.y + 1 == d.OH ? d.H : h0 + d.K, w1 = gid.x + 1 == d.OW ? d.W : w0 + d.KW;\n"
         "    device float *plane = dx + gid.z * d.H * d.W;\n"
         "    for (uint h = h0; h < h1; h++)\n"
         "        for (uint w = w0; w < w1; w++)\n"
@@ -1022,9 +1023,9 @@ int tensor_metal_init(void)
         "    constant uint2 &act_save_z [[buffer(6)]],\n"
         "    constant uint &groups [[buffer(7)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
-        "    uint b = gid.z / d.F, f = gid.z % d.F, kk = d.K * d.K, cg = d.C / groups;\n"
+        "    uint b = gid.z / d.F, f = gid.z % d.F, kk = d.K * d.KW, cg = d.C / groups;\n"
         "    uint c0 = f / (d.F / groups) * cg;\n"
-        "    int ih0 = int(gid.y * d.S) - int(d.P), iw0 = int(gid.x * d.S) - int(d.P);\n"
+        "    int ih0 = int(gid.y * d.S) - int(d.P), iw0 = int(gid.x * d.SW) - int(d.PW);\n"
         "    float s = 0.0f;\n"
         "    for (uint c = 0; c < cg; c++) {\n"
         "        device const float *xs = x + (b * d.C + c0 + c) * d.H * d.W;\n"
@@ -1032,9 +1033,9 @@ int tensor_metal_init(void)
         "        for (uint i = 0; i < d.K; i++) {\n"
         "            int ih = ih0 + int(i);\n"
         "            if (ih < 0 || ih >= int(d.H)) continue;\n"
-        "            for (uint j = 0; j < d.K; j++) {\n"
+        "            for (uint j = 0; j < d.KW; j++) {\n"
         "                int iw = iw0 + int(j);\n"
-        "                if (iw >= 0 && iw < int(d.W)) s += xs[ih * int(d.W) + iw] * wf[i * d.K + j]; } } }\n"
+        "                if (iw >= 0 && iw < int(d.W)) s += xs[ih * int(d.W) + iw] * wf[i * d.KW + j]; } } }\n"
         "    uint o = (gid.z * d.OH + gid.y) * d.OW + gid.x;\n"
         "    float v = s + bias[f];\n"
         "    if (act_save_z.y) z[o] = v;\n"
@@ -1048,7 +1049,7 @@ int tensor_metal_init(void)
         "    constant WindowDims &d [[buffer(3)]],\n"
         "    constant uint &groups [[buffer(4)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
-        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.K, cg = d.C / groups, fg = d.F / groups;\n"
+        "    uint b = gid.z / d.C, c = gid.z % d.C, kk = d.K * d.KW, cg = d.C / groups, fg = d.F / groups;\n"
         "    uint f0 = c / cg * fg, ci = c % cg;\n"
         "    float s = 0.0f;\n"
         "    for (uint i = 0; i < d.K; i++) {\n"
@@ -1057,14 +1058,14 @@ int tensor_metal_init(void)
         "        uint oh = uint(ty);\n"
         "        if (d.S > 1) { if (oh % d.S) continue; oh /= d.S; }\n"
         "        if (oh >= d.OH) continue;\n"
-        "        for (uint j = 0; j < d.K; j++) {\n"
-        "            int tx = int(gid.x + d.P) - int(j);\n"
+        "        for (uint j = 0; j < d.KW; j++) {\n"
+        "            int tx = int(gid.x + d.PW) - int(j);\n"
         "            if (tx < 0) continue;\n"
         "            uint ow = uint(tx);\n"
-        "            if (d.S > 1) { if (ow % d.S) continue; ow /= d.S; }\n"
+        "            if (d.SW > 1) { if (ow % d.SW) continue; ow /= d.SW; }\n"
         "            if (ow >= d.OW) continue;\n"
         "            device const float *g = dz_rows + ((b * d.OH + oh) * d.OW + ow) * d.F;\n"
-        "            for (uint f = f0; f < f0 + fg; f++) s += g[f] * w[(f * cg + ci) * kk + i * d.K + j]; } }\n"
+        "            for (uint f = f0; f < f0 + fg; f++) s += g[f] * w[(f * cg + ci) * kk + i * d.KW + j]; } }\n"
         "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
         // dW[f][p] += sum over rows of dz_rows[r][f] * the input p reads for
         // row r (p = (c, i, j) of the filter's group; p = C/G*K*K is the bias,
@@ -1082,8 +1083,8 @@ int tensor_metal_init(void)
         "    uint2 tpg [[threads_per_threadgroup]]) {\n"
         "    threadgroup float part[256];\n"
         "    uint t = tid.x, T = tpg.x;\n"
-        "    uint kk = d.K * d.K, cg = d.C / groups, P = cg * kk, p = tg.x, f = tg.y;\n"
-        "    uint c = f / (d.F / groups) * cg + p / kk, ki = p % kk / d.K, kj = p % d.K;\n"
+        "    uint kk = d.K * d.KW, cg = d.C / groups, P = cg * kk, p = tg.x, f = tg.y;\n"
+        "    uint c = f / (d.F / groups) * cg + p / kk, ki = p % kk / d.KW, kj = p % d.KW;\n"
         "    uint rows = d.batch * d.OH * d.OW;\n"
         "    ColWalk walk = col_walk_start(t, d);\n"
         "    float s = 0.0f;\n"
@@ -1494,18 +1495,20 @@ static void encode_copy(id<MTLCommandBuffer> cmd, id<MTLBuffer> src, id<MTLBuffe
 //-----------------------------------------------------------
 typedef struct {
     uint32_t C, H, W, F, OH, OW, K, S, P, batch;
+    uint32_t KW, SW, PW;    // the window's width settings (K, S and P are the height's)
 } WindowDims;
 
 static WindowDims window_dims(PNetwork pnet, int layer, int batch_size)
 {
     PLayer l = &pnet->layers[layer];
-    int size = 0, stride = 1, padding = 0;
-    ann_get_layer_settings(pnet, layer, &size, &stride, &padding);
+    int kh = 0, kw = 0, sh = 1, sw = 1, ph = 0, pw = 0;
+    ann_get_layer_window(pnet, layer, &kh, &kw, &sh, &sw, &ph, &pw);
 
     WindowDims d;
     d.C = (uint32_t)l->in_shape.c; d.H = (uint32_t)l->in_shape.h; d.W = (uint32_t)l->in_shape.w;
     d.F = (uint32_t)l->shape.c;    d.OH = (uint32_t)l->shape.h;   d.OW = (uint32_t)l->shape.w;
-    d.K = (uint32_t)size; d.S = (uint32_t)stride; d.P = (uint32_t)padding;
+    d.K = (uint32_t)kh; d.S = (uint32_t)sh; d.P = (uint32_t)ph;
+    d.KW = (uint32_t)kw; d.SW = (uint32_t)sw; d.PW = (uint32_t)pw;
     d.batch = (uint32_t)batch_size;
     return d;
 }
@@ -1577,7 +1580,7 @@ static int encode_conv_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int laye
 {
     PLayer l = &pnet->layers[layer];
     WindowDims d = window_dims(pnet, layer, batch_size);
-    NSUInteger positions = d.OH * d.OW, rows = (NSUInteger)batch_size * positions, patch = d.C * d.K * d.K;
+    NSUInteger positions = d.OH * d.OW, rows = (NSUInteger)batch_size * positions, patch = d.C * d.K * d.KW;
     uint32_t act_save_z[2] = { (uint32_t)l->activation, Z != nil };
     uint32_t groups = (uint32_t)ann_get_layer_groups(pnet, layer);
     if (groups > 1 || conv_direct(&d)) {
@@ -1635,7 +1638,7 @@ static int encode_conv_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
 {
     PLayer l = &pnet->layers[layer];
     WindowDims d = window_dims(pnet, layer, batch_size);
-    NSUInteger positions = d.OH * d.OW, rows = (NSUInteger)batch_size * positions, patch = d.C * d.K * d.K;
+    NSUInteger positions = d.OH * d.OW, rows = (NSUInteger)batch_size * positions, patch = d.C * d.K * d.KW;
     NSUInteger outputs = d.F * patch;
     id<MTLBuffer> W = (__bridge id<MTLBuffer>)l->params[0].value->gpu_buf;
     id<MTLBuffer> dz_rows = layer_scratch(layer, SCRATCH_ROWS, rows * d.F * sizeof(float));
@@ -1823,7 +1826,7 @@ static int encode_maxpool_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int 
     if (!arg)
         return 0;
     id<MTLBuffer> bufs[3] = { dZ, dX, arg };
-    if (d.K == d.S)
+    if (d.K == d.S && d.KW == d.SW)
         encode_grid(cmd, g_metal.pso_maxpool_backward_tiled, bufs, 3, &d, sizeof(d),
                     MTLSizeMake(d.OW, d.OH, (NSUInteger)batch_size * d.C));
     else

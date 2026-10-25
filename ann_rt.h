@@ -52,9 +52,10 @@
 #endif
 
 // 2 added ANN_RT_UPSAMPLE2D, 3 ANN_RT_GLOBAL_AVGPOOL2D, 4 grouped convolutions
-// (ann_rt_layer.groups). Generated headers need at least the version that wrote
-// them (they initialize every field); older headers still build with newer versions.
-#define ANN_RT_VERSION 4
+// (ann_rt_layer.groups), 5 non-square windows (size_w, stride_w, pad_w).
+// Generated headers need at least the version that wrote them (they initialize
+// every field); older headers still build with newer versions.
+#define ANN_RT_VERSION 5
 
 #if defined(_MSC_VER) && !defined(__cplusplus)
 #	define ANN_RT_FUNC static __inline
@@ -87,7 +88,7 @@ enum {
 
 //------------------------------
 // One layer. Dense weights are [out_c][in_c * in_h * in_w]; conv weights are
-// [out_c][in_c / groups][size][size], output channel f reading input channels
+// [out_c][in_c / groups][size][size_w], output channel f reading input channels
 // [g * in_c / groups, (g + 1) * in_c / groups) for g = f / (out_c / groups). Activations are stored channel by channel, row by row.
 //------------------------------
 typedef struct {
@@ -95,7 +96,8 @@ typedef struct {
 	int32_t act;				// ANN_RT_ACT_NONE, ...
 	int32_t in_c, in_h, in_w;	// input shape
 	int32_t out_c, out_h, out_w;// output shape
-	int32_t size, stride, pad;	// conv kernel or pool window (upsampling scale), stride, zero padding
+	int32_t size, stride, pad;	// conv kernel or pool window (upsampling scale), stride, zero padding:
+								// the height's (and the width's when size_w is 0)
 
 	// int8 model (NULL in a float model)
 	const int8_t *w_q;			// weights
@@ -112,7 +114,16 @@ typedef struct {
 	const float *b_f;
 
 	int32_t groups;				// conv groups; 0 (left out, as headers before version 4 do) means 1
+	int32_t size_w, stride_w, pad_w;	// the window's width settings; size_w 0 (left out, as headers
+								// before version 5 do) means the same as the height's
 } ann_rt_layer;
+
+//------------------------------
+// a conv or pool layer's window width, stride and padding along the width
+//------------------------------
+ANN_RT_FUNC int32_t ann_rt_size_w(const ann_rt_layer *l) { return l->size_w > 0 ? l->size_w : l->size; }
+ANN_RT_FUNC int32_t ann_rt_stride_w(const ann_rt_layer *l) { return l->size_w > 0 ? l->stride_w : l->stride; }
+ANN_RT_FUNC int32_t ann_rt_pad_w(const ann_rt_layer *l) { return l->size_w > 0 ? l->pad_w : l->pad; }
 
 //------------------------------
 // a conv layer's input channels per group, and the first one filter f reads
@@ -193,6 +204,7 @@ ANN_RT_FUNC void ann_rt_dense_q(const ann_rt_layer *l, const int8_t *x, int8_t *
 ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
 {
 	int32_t k = l->size, s = l->stride, p = l->pad, cg = ann_rt_group_channels(l);
+	int32_t kw = ann_rt_size_w(l), sw = ann_rt_stride_w(l), pw = ann_rt_pad_w(l);
 	int32_t f, oh, ow, c, i, j;
 
 	for (f = 0; f < l->out_c; f++)
@@ -203,7 +215,7 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 
 				for (c = 0; c < cg; c++)
 				{
-					const int8_t *w = l->w_q + (f * cg + c) * k * k;
+					const int8_t *w = l->w_q + (f * cg + c) * k * kw;
 					const int8_t *xc = x + (ann_rt_first_channel(l, f) + c) * l->in_h * l->in_w;
 
 					for (i = 0; i < k; i++)
@@ -211,12 +223,12 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 						int32_t ih = oh * s - p + i;
 						if (ih < 0 || ih >= l->in_h)
 							continue;	// padding is real 0, which adds nothing
-						for (j = 0; j < k; j++)
+						for (j = 0; j < kw; j++)
 						{
-							int32_t iw = ow * s - p + j;
+							int32_t iw = ow * sw - pw + j;
 							if (iw < 0 || iw >= l->in_w)
 								continue;
-							acc += ((int32_t)xc[ih * l->in_w + iw] - l->in_zp) * (int32_t)w[i * k + j];
+							acc += ((int32_t)xc[ih * l->in_w + iw] - l->in_zp) * (int32_t)w[i * kw + j];
 						}
 					}
 				}
@@ -232,11 +244,11 @@ ANN_RT_FUNC void ann_rt_maxpool_q(const ann_rt_layer *l, const int8_t *x, int8_t
 		for (oh = 0; oh < l->out_h; oh++)
 			for (ow = 0; ow < l->out_w; ow++)
 			{
-				const int8_t *xc = x + (c * l->in_h + oh * l->stride) * l->in_w + ow * l->stride;
+				const int8_t *xc = x + (c * l->in_h + oh * l->stride) * l->in_w + ow * ann_rt_stride_w(l);
 				int8_t best = xc[0];
 
 				for (i = 0; i < l->size; i++)
-					for (j = 0; j < l->size; j++)
+					for (j = 0; j < ann_rt_size_w(l); j++)
 						if (xc[i * l->in_w + j] > best)
 							best = xc[i * l->in_w + j];
 				y[(c * l->out_h + oh) * l->out_w + ow] = best;
@@ -406,6 +418,7 @@ ANN_RT_FUNC float ann_rt_activate_f(int32_t act, float x)
 ANN_RT_FUNC void ann_rt_linear_f(const ann_rt_layer *l, const float *x, float *z)
 {
 	int32_t k = l->size, s = l->stride, p = l->pad, cg = ann_rt_group_channels(l);
+	int32_t kw = ann_rt_size_w(l), sw = ann_rt_stride_w(l), pw = ann_rt_pad_w(l);
 	int32_t n_in = l->in_c * l->in_h * l->in_w;
 	int32_t o, f, oh, ow, c, i, j;
 
@@ -429,18 +442,18 @@ ANN_RT_FUNC void ann_rt_linear_f(const ann_rt_layer *l, const float *x, float *z
 				float acc = l->b_f[f];
 				for (c = 0; c < cg; c++)
 				{
-					const float *w = l->w_f + (f * cg + c) * k * k;
+					const float *w = l->w_f + (f * cg + c) * k * kw;
 					const float *xc = x + (ann_rt_first_channel(l, f) + c) * l->in_h * l->in_w;
 					for (i = 0; i < k; i++)
 					{
 						int32_t ih = oh * s - p + i;
 						if (ih < 0 || ih >= l->in_h)
 							continue;
-						for (j = 0; j < k; j++)
+						for (j = 0; j < kw; j++)
 						{
-							int32_t iw = ow * s - p + j;
+							int32_t iw = ow * sw - pw + j;
 							if (iw >= 0 && iw < l->in_w)
-								acc += xc[ih * l->in_w + iw] * w[i * k + j];
+								acc += xc[ih * l->in_w + iw] * w[i * kw + j];
 						}
 					}
 				}
@@ -456,10 +469,10 @@ ANN_RT_FUNC void ann_rt_maxpool_f(const ann_rt_layer *l, const float *x, float *
 		for (oh = 0; oh < l->out_h; oh++)
 			for (ow = 0; ow < l->out_w; ow++)
 			{
-				const float *xc = x + (c * l->in_h + oh * l->stride) * l->in_w + ow * l->stride;
+				const float *xc = x + (c * l->in_h + oh * l->stride) * l->in_w + ow * ann_rt_stride_w(l);
 				float best = xc[0];
 				for (i = 0; i < l->size; i++)
-					for (j = 0; j < l->size; j++)
+					for (j = 0; j < ann_rt_size_w(l); j++)
 						if (xc[i * l->in_w + j] > best)
 							best = xc[i * l->in_w + j];
 				y[(c * l->out_h + oh) * l->out_w + ow] = best;

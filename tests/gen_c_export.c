@@ -3,8 +3,8 @@
 //
 // Trains a small dense network and a small CNN, quantizes them, and writes
 // into the output directory:
-//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h, bn_q.h, dw_q.h   int8 headers (ann_export_c_header with the int8 model)
-//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h, bn_f.h, dw_f.h   float32 headers (ann_export_c_header without it)
+//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h, bn_q.h, dw_q.h, ts_q.h   int8 headers (ann_export_c_header with the int8 model)
+//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h, bn_f.h, dw_f.h, ts_f.h   float32 headers (ann_export_c_header without it)
 //   expected.h           test inputs and libann's outputs for them:
 //                        ann_quantized_predict_int8, ann_quantized_predict and
 //                        ann_predict
@@ -232,6 +232,18 @@ int main(int argc, char *argv[])
 	ann_add_layer(dw, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 	err |= export_model(dw, argv[1], "dw", expected, 6);
 	ann_free_network(dw);
+
+	// a time-series model: 1-D convs (one strided, one depthwise), a 1-D pool and a 2x3 conv
+	PNetwork ts = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+	ann_add_input(ts, 3, 2, 16);
+	ann_add_conv1d(ts, 4, 5, 1, 2, ACTIVATION_NULL);                   // 4x2x16
+	ann_add_batchnorm(ts, ACTIVATION_RELU);
+	ann_add_maxpool1d(ts, 2, 2);                                       // 4x2x8
+	ann_add_conv2d_ex(ts, 4, 1, 3, 1, 2, 0, 1, 4, ACTIVATION_TANH);    // depthwise 1x3, stride 2: 4x2x4
+	ann_add_conv2d_ex(ts, 5, 2, 3, 1, 1, 0, 0, 1, ACTIVATION_RELU);    // 5x1x2
+	ann_add_layer(ts, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+	err |= export_model(ts, argv[1], "ts", expected, 7);
+	ann_free_network(ts);
 
 	if (fclose(expected) != 0 || err != ERR_OK)
 	{

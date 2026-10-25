@@ -701,8 +701,43 @@ static Tensor tensor_view(real *values, int rows, int cols)
 //------------------------------
 // Conv2D settings, stored in config[]
 //------------------------------
-enum { CONV_KERNEL, CONV_STRIDE, CONV_PADDING, CONV_GROUPS, CONV_CONFIG_COUNT };
-enum { POOL_SIZE, POOL_STRIDE, POOL_CONFIG_COUNT };
+// KERNEL, STRIDE and PADDING are the height's (and the width's too in files
+// from before non-square windows, whose *_W settings read 0)
+enum { CONV_KERNEL, CONV_STRIDE, CONV_PADDING, CONV_GROUPS, CONV_KERNEL_W, CONV_STRIDE_W, CONV_PADDING_W,
+       CONV_CONFIG_COUNT };
+enum { POOL_SIZE, POOL_STRIDE, POOL_SIZE_W, POOL_STRIDE_W, POOL_CONFIG_COUNT };
+
+//------------------------------
+// a conv or pool layer's window: kernel, stride and padding for the height
+// (k, s, p) and the width (kw, sw, pw)
+//------------------------------
+typedef struct {
+	int k, s, p;
+	int kw, sw, pw;
+} Window;
+
+static Window conv_window(const Layer *layer)
+{
+	Window w;
+	w.k = layer->config[CONV_KERNEL];
+	w.s = layer->config[CONV_STRIDE];
+	w.p = layer->config[CONV_PADDING];
+	w.kw = layer->config[CONV_KERNEL_W];
+	w.sw = layer->config[CONV_STRIDE_W];
+	w.pw = layer->config[CONV_PADDING_W];
+	return w;
+}
+
+static Window pool_window(const Layer *layer)
+{
+	Window w;
+	w.k = layer->config[POOL_SIZE];
+	w.s = layer->config[POOL_STRIDE];
+	w.kw = layer->config[POOL_SIZE_W];
+	w.sw = layer->config[POOL_STRIDE_W];
+	w.p = w.pw = 0;
+	return w;
+}
 enum { UPSAMPLE_SCALE, UPSAMPLE_CONFIG_COUNT };
 
 //------------------------------
@@ -746,23 +781,30 @@ static int conv_groups(const Layer *layer)
 // rows of the im2col columns: every input channel's k*k window
 static int conv_col_rows(const Layer *layer)
 {
-	return layer->in_shape.c * layer->config[CONV_KERNEL] * layer->config[CONV_KERNEL];
+	return layer->in_shape.c * layer->config[CONV_KERNEL] * layer->config[CONV_KERNEL_W];
 }
 
 static int conv_setup(PNetwork pnet, int layer)
 {
 	PLayer cur = &pnet->layers[layer];
 	Layer_shape in = cur->in_shape;
-	int k = cur->config[CONV_KERNEL], s = cur->config[CONV_STRIDE], p = cur->config[CONV_PADDING];
 
-	// files written before groups existed have none: one group
+	// files written before groups or non-square windows have none: one
+	// group, and the width's settings are the height's
 	if (cur->config[CONV_GROUPS] == 0)
 		cur->config[CONV_GROUPS] = 1;
+	if (cur->config[CONV_KERNEL_W] == 0 && cur->config[CONV_STRIDE_W] == 0 && cur->config[CONV_PADDING_W] == 0)
+	{
+		cur->config[CONV_KERNEL_W] = cur->config[CONV_KERNEL];
+		cur->config[CONV_STRIDE_W] = cur->config[CONV_STRIDE];
+		cur->config[CONV_PADDING_W] = cur->config[CONV_PADDING];
+	}
 	int groups = cur->config[CONV_GROUPS];
+	Window w = conv_window(cur);
 
 	if (cur->activation == ACTIVATION_SOFTMAX || groups < 1 || in.c % groups != 0 || cur->shape.c % groups != 0 ||
-		window_output_size(in.h, k, s, p) != cur->shape.h ||
-		window_output_size(in.w, k, s, p) != cur->shape.w || cur->shape.h < 1 || cur->shape.w < 1)
+		window_output_size(in.h, w.k, w.s, w.p) != cur->shape.h ||
+		window_output_size(in.w, w.kw, w.sw, w.pw) != cur->shape.w || cur->shape.h < 1 || cur->shape.w < 1)
 		return ERR_INVALID;
 
 	int col_rows = conv_col_rows(cur);
@@ -779,11 +821,11 @@ static int conv_setup(PNetwork pnet, int layer)
 	return ERR_OK;
 }
 
-// fans of W [F, C/G, k, k], as PyTorch counts them
+// fans of W [F, C/G, kh, kw], as PyTorch counts them
 static void conv_init_weights(PNetwork pnet, int layer, Weight_init_type init_type)
 {
 	PLayer cur = &pnet->layers[layer];
-	int kk = cur->config[CONV_KERNEL] * cur->config[CONV_KERNEL];
+	int kk = cur->config[CONV_KERNEL] * cur->config[CONV_KERNEL_W];
 	init_weight_bias(pnet, cur->params[0].value, cur->params[1].value,
 	                 cur->in_shape.c / conv_groups(cur) * kk, cur->shape.c * kk, init_type);
 }
@@ -868,42 +910,42 @@ static void conv_valid_range(int width, int out_width, int s, int p, int j, int 
 }
 
 //------------------------------
-// copy one sample's input patches into columns: col[(c*k + i)*k + j][oh*OW + ow]
-// = x[c][oh*s - p + i][ow*s - p + j], or 0 in the padding; ld is col's row
+// copy one sample's input patches into columns: col[(c*kh + i)*kw + j][oh*OW + ow]
+// = x[c][oh*sh - ph + i][ow*sw - pw + j], or 0 in the padding; ld is col's row
 // stride (OH*OW for one sample's matrix, more when samples sit side by side)
 //------------------------------
 static void conv_im2col(const Layer *layer, const real *x, real *col, size_t ld)
 {
 	Layer_shape in = layer->in_shape;
-	int k = layer->config[CONV_KERNEL], s = layer->config[CONV_STRIDE], p = layer->config[CONV_PADDING];
+	Window w = conv_window(layer);
 	int oh_n = layer->shape.h, ow_n = layer->shape.w;
 
 	for (int c = 0; c < in.c; c++)
-		for (int i = 0; i < k; i++)
-			for (int j = 0; j < k; j++)
+		for (int i = 0; i < w.k; i++)
+			for (int j = 0; j < w.kw; j++)
 			{
-				real *row = col + ((c * k + i) * k + j) * ld;
+				real *row = col + ((c * w.k + i) * w.kw + j) * ld;
 				int lo, hi;
-				conv_valid_range(in.w, ow_n, s, p, j, &lo, &hi);
+				conv_valid_range(in.w, ow_n, w.sw, w.pw, j, &lo, &hi);
 
 				for (int oh = 0; oh < oh_n; oh++)
 				{
 					real *out = row + oh * ow_n;
-					int ih = oh * s - p + i;
+					int ih = oh * w.s - w.p + i;
 					if (ih < 0 || ih >= in.h)
 					{
 						memset(out, 0, ow_n * sizeof(real));
 						continue;
 					}
 
-					const real *src = x + (c * in.h + ih) * in.w + lo * s - p + j;
+					const real *src = x + (c * in.h + ih) * in.w + lo * w.sw - w.pw + j;
 					for (int ow = 0; ow < lo; ow++)
 						out[ow] = (real)0.0;
-					if (s == 1)
+					if (w.sw == 1)
 						memcpy(out + lo, src, (hi - lo) * sizeof(real));
 					else
 						for (int ow = lo; ow < hi; ow++)
-							out[ow] = src[(ow - lo) * s];
+							out[ow] = src[(ow - lo) * w.sw];
 					for (int ow = hi; ow < ow_n; ow++)
 						out[ow] = (real)0.0;
 				}
@@ -916,27 +958,27 @@ static void conv_im2col(const Layer *layer, const real *x, real *col, size_t ld)
 static void conv_col2im(const Layer *layer, const real *col, size_t ld, real *x)
 {
 	Layer_shape in = layer->in_shape;
-	int k = layer->config[CONV_KERNEL], s = layer->config[CONV_STRIDE], p = layer->config[CONV_PADDING];
+	Window w = conv_window(layer);
 	int oh_n = layer->shape.h, ow_n = layer->shape.w;
 
 	for (int c = 0; c < in.c; c++)
-		for (int i = 0; i < k; i++)
-			for (int j = 0; j < k; j++)
+		for (int i = 0; i < w.k; i++)
+			for (int j = 0; j < w.kw; j++)
 			{
-				const real *row = col + ((c * k + i) * k + j) * ld;
+				const real *row = col + ((c * w.k + i) * w.kw + j) * ld;
 				int lo, hi;
-				conv_valid_range(in.w, ow_n, s, p, j, &lo, &hi);
+				conv_valid_range(in.w, ow_n, w.sw, w.pw, j, &lo, &hi);
 
 				for (int oh = 0; oh < oh_n; oh++)
 				{
-					int ih = oh * s - p + i;
+					int ih = oh * w.s - w.p + i;
 					if (ih < 0 || ih >= in.h)
 						continue;
 
 					const real *src = row + oh * ow_n;
-					real *dst = x + (c * in.h + ih) * in.w + lo * s - p + j;
+					real *dst = x + (c * in.h + ih) * in.w + lo * w.sw - w.pw + j;
 					for (int ow = lo; ow < hi; ow++)
-						dst[(ow - lo) * s] += src[ow];
+						dst[(ow - lo) * w.sw] += src[ow];
 				}
 			}
 }
@@ -1252,11 +1294,18 @@ static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTens
 static int maxpool_setup(PNetwork pnet, int layer)
 {
 	PLayer cur = &pnet->layers[layer];
-	int size = cur->config[POOL_SIZE], stride = cur->config[POOL_STRIDE];
+
+	// files written before non-square windows: the width's settings are the height's
+	if (cur->config[POOL_SIZE_W] == 0 && cur->config[POOL_STRIDE_W] == 0)
+	{
+		cur->config[POOL_SIZE_W] = cur->config[POOL_SIZE];
+		cur->config[POOL_STRIDE_W] = cur->config[POOL_STRIDE];
+	}
+	Window w = pool_window(cur);
 
 	if (cur->activation != ACTIVATION_NULL || cur->shape.c != cur->in_shape.c ||
-		window_output_size(cur->in_shape.h, size, stride, 0) != cur->shape.h ||
-		window_output_size(cur->in_shape.w, size, stride, 0) != cur->shape.w || cur->shape.h < 1 || cur->shape.w < 1)
+		window_output_size(cur->in_shape.h, w.k, w.s, 0) != cur->shape.h ||
+		window_output_size(cur->in_shape.w, w.kw, w.sw, 0) != cur->shape.w || cur->shape.h < 1 || cur->shape.w < 1)
 		return ERR_INVALID;
 	return ERR_OK;
 }
@@ -1275,7 +1324,7 @@ static void maxpool_forward_samples(void *arg, int begin, int end)
 	const pool_job *job = (const pool_job *)arg;
 	PLayer layer = job->layer;
 	Layer_shape in = layer->in_shape;
-	int size = layer->config[POOL_SIZE], stride = layer->config[POOL_STRIDE];
+	Window w = pool_window(layer);
 	int in_nodes = in.c * in.h * in.w;
 	int oh_n = layer->shape.h, ow_n = layer->shape.w;
 
@@ -1289,12 +1338,12 @@ static void maxpool_forward_samples(void *arg, int begin, int end)
 			for (int oh = 0; oh < oh_n; oh++)
 			{
 				int out = (c * oh_n + oh) * ow_n;
-				int row0 = (c * in.h + oh * stride) * in.w;
+				int row0 = (c * in.h + oh * w.s) * in.w;
 
 				for (int ow = 0; ow < ow_n; ow++, out++)
 				{
-					int best = row0 + ow * stride;
-					if (size == 2)
+					int best = row0 + ow * w.sw;
+					if (w.k == 2 && w.kw == 2)
 					{
 						// the common 2x2 window, unrolled in the same scan order
 						int idx = best;
@@ -1304,10 +1353,10 @@ static void maxpool_forward_samples(void *arg, int begin, int end)
 					}
 					else
 					{
-						for (int i = 0; i < size; i++)
-							for (int j = 0; j < size; j++)
+						for (int i = 0; i < w.k; i++)
+							for (int j = 0; j < w.kw; j++)
 							{
-								int idx = row0 + ow * stride + i * in.w + j;
+								int idx = row0 + ow * w.sw + i * in.w + j;
 								if (x[idx] > x[best])
 									best = idx;
 							}
@@ -3087,26 +3136,47 @@ int ann_add_conv2d(PNetwork pnet, int filters, int kernel_size, int stride, int 
 int ann_add_conv2d_grouped(PNetwork pnet, int filters, int kernel_size, int stride, int padding, int groups,
                            Activation_type activation)
 {
+	return ann_add_conv2d_ex(pnet, filters, kernel_size, kernel_size, stride, stride, padding, padding, groups,
+	                         activation);
+}
+
+//------------------------------
+// add a 2-D convolution layer with any window
+//------------------------------
+int ann_add_conv2d_ex(PNetwork pnet, int filters, int kernel_h, int kernel_w, int stride_h, int stride_w,
+                      int padding_h, int padding_w, int groups, Activation_type activation)
+{
 	const Layer_shape *in = last_shape(pnet);
 	Layer_shape shape;
 	int config[CONV_CONFIG_COUNT];
 
-	config[CONV_KERNEL] = kernel_size;
-	config[CONV_STRIDE] = stride;
-	config[CONV_PADDING] = padding;
+	config[CONV_KERNEL] = kernel_h;
+	config[CONV_STRIDE] = stride_h;
+	config[CONV_PADDING] = padding_h;
 	config[CONV_GROUPS] = groups;
+	config[CONV_KERNEL_W] = kernel_w;
+	config[CONV_STRIDE_W] = stride_w;
+	config[CONV_PADDING_W] = padding_w;
 	shape.c = filters;
-	shape.h = in ? window_output_size(in->h, kernel_size, stride, padding) : 1;
-	shape.w = in ? window_output_size(in->w, kernel_size, stride, padding) : 1;
+	shape.h = in ? window_output_size(in->h, kernel_h, stride_h, padding_h) : 1;
+	shape.w = in ? window_output_size(in->w, kernel_w, stride_w, padding_w) : 1;
 
 	// a window that does not fit gives a zero size (add_layer rejects a conv
 	// layer in an empty network, and filters < 1; conv_setup bad groups)
 	if (in && (shape.h < 1 || shape.w < 1 || groups < 1))
 	{
-		invoke_error_callback(ERR_INVALID, groups == 1 ? "ann_add_conv2d" : "ann_add_conv2d_grouped");
+		invoke_error_callback(ERR_INVALID, "ann_add_conv2d");
 		return ERR_INVALID;
 	}
 	return add_layer(pnet, LAYER_KIND_CONV2D, shape, config, CONV_CONFIG_COUNT, LAYER_HIDDEN, activation);
+}
+
+//------------------------------
+// add a 1-D convolution layer: a 1 x kernel_size window along the width
+//------------------------------
+int ann_add_conv1d(PNetwork pnet, int filters, int kernel_size, int stride, int padding, Activation_type activation)
+{
+	return ann_add_conv2d_ex(pnet, filters, 1, kernel_size, 1, stride, 0, padding, 1, activation);
 }
 
 //------------------------------
@@ -3135,15 +3205,25 @@ int ann_add_depthwise_conv2d(PNetwork pnet, int depth_multiplier, int kernel_siz
 //------------------------------
 int ann_add_maxpool2d(PNetwork pnet, int pool_size, int stride)
 {
+	return ann_add_maxpool2d_ex(pnet, pool_size, pool_size, stride, stride);
+}
+
+//------------------------------
+// add a 2-D max pooling layer with any window
+//------------------------------
+int ann_add_maxpool2d_ex(PNetwork pnet, int pool_h, int pool_w, int stride_h, int stride_w)
+{
 	const Layer_shape *in = last_shape(pnet);
 	Layer_shape shape;
 	int config[POOL_CONFIG_COUNT];
 
-	config[POOL_SIZE] = pool_size;
-	config[POOL_STRIDE] = stride;
+	config[POOL_SIZE] = pool_h;
+	config[POOL_STRIDE] = stride_h;
+	config[POOL_SIZE_W] = pool_w;
+	config[POOL_STRIDE_W] = stride_w;
 	shape.c = in ? in->c : 1;
-	shape.h = in ? window_output_size(in->h, pool_size, stride, 0) : 1;
-	shape.w = in ? window_output_size(in->w, pool_size, stride, 0) : 1;
+	shape.h = in ? window_output_size(in->h, pool_h, stride_h, 0) : 1;
+	shape.w = in ? window_output_size(in->w, pool_w, stride_w, 0) : 1;
 
 	if (in && (shape.h < 1 || shape.w < 1))
 	{
@@ -3151,6 +3231,14 @@ int ann_add_maxpool2d(PNetwork pnet, int pool_size, int stride)
 		return ERR_INVALID;
 	}
 	return add_layer(pnet, LAYER_KIND_MAXPOOL2D, shape, config, POOL_CONFIG_COUNT, LAYER_HIDDEN, ACTIVATION_NULL);
+}
+
+//------------------------------
+// add a 1-D max pooling layer: a 1 x pool_size window along the width
+//------------------------------
+int ann_add_maxpool1d(PNetwork pnet, int pool_size, int stride)
+{
+	return ann_add_maxpool2d_ex(pnet, 1, pool_size, 1, stride);
 }
 
 //------------------------------
@@ -4563,6 +4651,34 @@ int ann_get_layer_settings(const PNetwork pnet, int layer, int *size, int *strid
 }
 
 //------------------------------
+// get a conv, pooling or upsampling layer's window for the height and the width
+//------------------------------
+int ann_get_layer_window(const PNetwork pnet, int layer, int *kernel_h, int *kernel_w, int *stride_h, int *stride_w,
+                         int *padding_h, int *padding_w)
+{
+	if (!pnet || !kernel_h || !kernel_w || !stride_h || !stride_w || !padding_h || !padding_w)
+		return ERR_NULL_PTR;
+	if (layer < 0 || layer >= pnet->layer_count)
+		return ERR_INVALID;
+
+	const Layer *cur = &pnet->layers[layer];
+	Window w = { 0, 0, 0, 0, 0, 0 };
+	if (cur->kind == LAYER_KIND_CONV2D)
+		w = conv_window(cur);
+	else if (cur->kind == LAYER_KIND_MAXPOOL2D)
+		w = pool_window(cur);
+	else if (cur->kind == LAYER_KIND_UPSAMPLE2D)
+		w.k = w.kw = w.s = w.sw = cur->config[UPSAMPLE_SCALE];
+	*kernel_h = w.k;
+	*kernel_w = w.kw;
+	*stride_h = w.s;
+	*stride_w = w.sw;
+	*padding_h = w.p;
+	*padding_w = w.pw;
+	return ERR_OK;
+}
+
+//------------------------------
 // get a conv layer's number of groups
 //------------------------------
 int ann_get_layer_groups(const PNetwork pnet, int layer)
@@ -4992,10 +5108,22 @@ static int save_network(const PNetwork pnet, const char *filename, int binary, c
 			continue;
 		}
 
-		// a conv layer with one group writes no groups setting, so older libann reads it
+		// conv and pool layers write only the settings they need (none for the
+		// width of a square window, or a single group), so older libann reads them
 		int config_count = layer_ops(cur)->config_count;
-		if (cur->kind == LAYER_KIND_CONV2D && conv_groups(cur) == 1)
-			config_count = CONV_GROUPS;
+		if (cur->kind == LAYER_KIND_CONV2D)
+		{
+			Window w = conv_window(cur);
+			if (w.kw != w.k || w.sw != w.s || w.pw != w.p)
+				config_count = CONV_CONFIG_COUNT;
+			else
+				config_count = conv_groups(cur) == 1 ? CONV_GROUPS : CONV_KERNEL_W;
+		}
+		else if (cur->kind == LAYER_KIND_MAXPOOL2D)
+		{
+			Window w = pool_window(cur);
+			config_count = w.kw != w.k || w.sw != w.s ? POOL_CONFIG_COUNT : POOL_SIZE_W;
+		}
 		ok = write_int(fptr, binary, cur->kind) &&
 		     write_int(fptr, binary, cur->layer_type) &&
 		     write_int(fptr, binary, cur->activation) &&
@@ -5478,13 +5606,14 @@ static void write_onnx_constant(FILE *fptr, const char *name, int data_type, con
 static void conv_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int *first)
 {
 	PLayer cur = &pnet->layers[layer];
-	int index = layer - 1, k = cur->config[CONV_KERNEL];
+	Window w = conv_window(cur);
+	int index = layer - 1;
 	int w_dims[4];
 	int b_dims[1];
 	w_dims[0] = cur->shape.c;
 	w_dims[1] = cur->in_shape.c / conv_groups(cur);
-	w_dims[2] = k;
-	w_dims[3] = k;
+	w_dims[2] = w.k;
+	w_dims[3] = w.kw;
 	b_dims[0] = cur->shape.c;
 
 	if (!*first) fprintf(fptr, ",\n");
@@ -5497,7 +5626,7 @@ static void conv_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, i
 	write_json_int_array(fptr, w_dims, 4);
 	fprintf(fptr, ",\n");
 	fprintf(fptr, "        \"float_data\": ");
-	write_json_float_array(fptr, cur->params[0].value->values, w_dims[0] * w_dims[1] * k * k);
+	write_json_float_array(fptr, cur->params[0].value->values, w_dims[0] * w_dims[1] * w.k * w.kw);
 	fprintf(fptr, "\n");
 	fprintf(fptr, "      },\n");
 	fprintf(fptr, "      {\n");
@@ -5521,7 +5650,7 @@ static void conv_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const ch
 {
 	PLayer cur = &pnet->layers[layer];
 	int index = layer - 1;
-	int k = cur->config[CONV_KERNEL], st = cur->config[CONV_STRIDE], p = cur->config[CONV_PADDING];
+	Window w = conv_window(cur);
 	snprintf(output, output_size, "conv_%d_out", index);
 
 	if (!*first) fprintf(fptr, ",\n");
@@ -5534,7 +5663,8 @@ static void conv_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const ch
 	fprintf(fptr, "        \"output\": [\"%s\"],\n", output);
 	fprintf(fptr, "        \"attribute\": [{\"name\": \"kernel_shape\", \"type\": 7, \"ints\": [%d, %d]}, "
 	              "{\"name\": \"strides\", \"type\": 7, \"ints\": [%d, %d]}, "
-	              "{\"name\": \"pads\", \"type\": 7, \"ints\": [%d, %d, %d, %d]}", k, k, st, st, p, p, p, p);
+	              "{\"name\": \"pads\", \"type\": 7, \"ints\": [%d, %d, %d, %d]}",
+	        w.k, w.kw, w.s, w.sw, w.p, w.pw, w.p, w.pw);
 	if (conv_groups(cur) > 1)
 		fprintf(fptr, ", {\"name\": \"group\", \"type\": 2, \"i\": %d}", conv_groups(cur));
 	fprintf(fptr, "]\n");
@@ -5559,13 +5689,13 @@ static void maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const
                                char *output, size_t output_size, int *first)
 {
 	PLayer cur = &pnet->layers[layer];
-	int size = cur->config[POOL_SIZE], stride = cur->config[POOL_STRIDE];
+	Window w = pool_window(cur);
 	char name[32], attributes[160];
 	snprintf(name, sizeof(name), "maxpool_%d", layer - 1);
 	snprintf(output, output_size, "maxpool_%d_out", layer - 1);
 	snprintf(attributes, sizeof(attributes),
 	         "[{\"name\": \"kernel_shape\", \"type\": 7, \"ints\": [%d, %d]}, "
-	         "{\"name\": \"strides\", \"type\": 7, \"ints\": [%d, %d]}]", size, size, stride, stride);
+	         "{\"name\": \"strides\", \"type\": 7, \"ints\": [%d, %d]}]", w.k, w.kw, w.s, w.sw);
 	write_onnx_node(fptr, "MaxPool", name, input, output, attributes, first);
 }
 
@@ -6061,20 +6191,40 @@ static int onnx_ints_all(const JsonValue *node, const char *name, int expected)
 }
 
 //------------------------------
-// an int list attribute whose entries are all equal: returns 1 and sets *value
-// (fallback when absent), 0 otherwise
+// a window attribute (kernel_shape, strides) with one int per spatial axis:
+// rank 1 (a sequence: the width only, *h gets h_1d) or 2 (height, width).
+// When absent, the axes get fallback. Returns 0 when malformed.
 //------------------------------
-static int onnx_uniform_ints(const JsonValue *node, const char *name, int fallback, int *value)
+static int onnx_window_ints(const JsonValue *node, const char *name, int rank, int fallback, int h_1d, int *h, int *w)
 {
 	int v[8];
 	int count = onnx_attribute_ints(node, name, v, 8);
-	*value = count > 0 ? v[0] : fallback;
-	for (int i = 1; i < count; i++)
-	{
-		if (v[i] != v[0])
+	if (count < 0 || (count > 0 && count != rank))
+		return 0;
+	*w = count ? v[rank - 1] : fallback;
+	*h = rank == 1 ? h_1d : count ? v[0] : fallback;
+	return 1;
+}
+
+//------------------------------
+// the pads attribute ([begins..., ends...] per spatial axis, rank 1 or 2):
+// each axis must be padded equally at both ends. Absent means 0.
+//------------------------------
+static int onnx_window_pads(const JsonValue *node, int rank, int *h, int *w)
+{
+	int v[8];
+	int count = onnx_attribute_ints(node, "pads", v, 8);
+	if (count < 0 || (count > 0 && count != 2 * rank))
+		return 0;
+	*h = *w = 0;
+	if (!count)
+		return 1;
+	for (int i = 0; i < rank; i++)
+		if (v[i] != v[rank + i] || v[i] < 0)
 			return 0;
-	}
-	return count >= 0;
+	*w = v[rank - 1];
+	*h = rank == 2 ? v[0] : 0;
+	return 1;
 }
 
 //------------------------------
@@ -6354,9 +6504,9 @@ PNetwork ann_import_onnx(const char *filename)
 			size[1] = dims[0];
 		}
 	}
-	if (rank != 2 && rank != 4)
+	if (rank != 2 && rank != 3 && rank != 4)
 	{
-		error = "ann_import_onnx: input must be [batch, n] or [batch, C, H, W]";
+		error = "ann_import_onnx: input must be [batch, n], [batch, C, L] or [batch, C, H, W]";
 		goto fail;
 	}
 
@@ -6366,14 +6516,19 @@ PNetwork ann_import_onnx(const char *filename)
 		error = "ann_import_onnx";
 		goto fail;
 	}
+	// a sequence [batch, C, L] is libann's image (C, 1, L)
 	int err = rank == 2 ? ann_add_layer(pnet, size[1], LAYER_INPUT, ACTIVATION_NULL)
+	        : rank == 3 ? ann_add_input(pnet, size[1], 1, size[2])
 	                    : ann_add_input(pnet, size[1], size[2], size[3]);
 	if (err != ERR_OK)
 		goto fail;
 
 	// Walk the chain of nodes
 	const char *current = input ? json_string(onnx_get(input, "name")) : onnx_io(json_at(nodes, 0), "input", 0);
-	int image = rank == 4;
+	int image = rank >= 3;
+	// image axes in the ONNX tensors: 1 for a sequence input, else 2 (a
+	// Reshape to an image makes [batch, C, H, W])
+	int spatial = rank == 3 ? 1 : 2;
 	size_t count = json_array_length(nodes);
 
 	for (size_t i = 0; i < count; i++)
@@ -6393,6 +6548,7 @@ PNetwork ann_import_onnx(const char *filename)
 		PLayer prev = &pnet->layers[pnet->layer_count - 1];
 		Layer_kind kind;
 		int units = 0, kernel = 0, stride = 1, pad = 0, groups = 1;
+		int kernel_w = 0, stride_w = 1, pad_w = 0;	// the width's (kernel etc. are the height's)
 		int dims4[4] = {0, 0, 0, 0};	// Reshape's [batch, C, H, W]
 		int transpose = 0;	// dense weights stored [in, out] (MatMul layout)
 		JsonValue *weight = NULL, *bias = NULL;
@@ -6466,17 +6622,22 @@ PNetwork ann_import_onnx(const char *filename)
 			JsonValue *group = onnx_attribute(node, "group");
 			if (group && !onnx_int(onnx_get(group, "i"), &groups))
 				groups = 0;
+			// weights [F, C/groups, kh, kw], or [F, C/groups, k] for a sequence
 			int dims[4];
 			weight = onnx_initializer(graph, onnx_io(node, "input", 1));
 			bias = onnx_initializer(graph, onnx_io(node, "input", 2));
-			if (!image || groups < 1 || onnx_dims(weight, dims, 4) != 4 || dims[0] % groups != 0 ||
-				dims[1] > INT_MAX / groups || dims[1] * groups != prev->shape.c || dims[2] != dims[3] ||
-				!onnx_uniform_ints(node, "kernel_shape", dims[2], &kernel) || kernel != dims[2] ||
-				!onnx_uniform_ints(node, "strides", 1, &stride) || !onnx_uniform_ints(node, "pads", 0, &pad) ||
+			int nd = onnx_dims(weight, dims, 4);
+			int kh = nd == 4 ? dims[2] : 1, kw = nd >= 3 ? dims[nd - 1] : 0;
+			if (!image || groups < 1 || nd != spatial + 2 || dims[0] % groups != 0 ||
+				dims[1] > INT_MAX / groups || dims[1] * groups != prev->shape.c ||
+				!onnx_window_ints(node, "kernel_shape", spatial, kh, 1, &kernel, &kernel_w) ||
+				kernel != kh || kernel_w != kw ||
+				!onnx_window_ints(node, "strides", spatial, 1, 1, &stride, &stride_w) ||
+				!onnx_window_pads(node, spatial, &pad, &pad_w) ||
 				!onnx_ints_all(node, "dilations", 1) || !onnx_string_is(node, "auto_pad", "NOTSET", "Tk9UU0VU"))
 			{
-				error = "ann_import_onnx: unsupported Conv (needs square kernels, equal strides and pads, no dilation, "
-				        "and groups that divide the channels)";
+				error = "ann_import_onnx: unsupported Conv (needs the same padding at both ends of an axis, no "
+				        "dilation, and groups that divide the channels)";
 				goto fail;
 			}
 			kind = LAYER_KIND_CONV2D;
@@ -6489,11 +6650,12 @@ PNetwork ann_import_onnx(const char *filename)
 			if (ceil && !onnx_int(onnx_get(ceil, "i"), &ceil_mode))
 				ceil_mode = 1;
 			if (!image || !onnx_attribute(node, "kernel_shape") ||
-				!onnx_uniform_ints(node, "kernel_shape", 0, &kernel) || !onnx_uniform_ints(node, "strides", 1, &stride) ||
+				!onnx_window_ints(node, "kernel_shape", spatial, 0, 1, &kernel, &kernel_w) ||
+				!onnx_window_ints(node, "strides", spatial, 1, 1, &stride, &stride_w) ||
 				!onnx_ints_all(node, "pads", 0) || !onnx_ints_all(node, "dilations", 1) || ceil_mode != 0 ||
 				!onnx_string_is(node, "auto_pad", "NOTSET", "Tk9UU0VU"))
 			{
-				error = "ann_import_onnx: unsupported MaxPool (needs square windows, equal strides, no padding)";
+				error = "ann_import_onnx: unsupported MaxPool (needs no padding or dilation, ceil_mode 0)";
 				goto fail;
 			}
 			kind = LAYER_KIND_MAXPOOL2D;
@@ -6681,8 +6843,10 @@ PNetwork ann_import_onnx(const char *filename)
 		switch (kind)
 		{
 		case LAYER_KIND_DENSE:		err = ann_add_layer(pnet, units, LAYER_HIDDEN, act); break;
-		case LAYER_KIND_CONV2D:		err = ann_add_conv2d_grouped(pnet, units, kernel, stride, pad, groups, act); break;
-		case LAYER_KIND_MAXPOOL2D:	err = ann_add_maxpool2d(pnet, kernel, stride); break;
+		case LAYER_KIND_CONV2D:
+			err = ann_add_conv2d_ex(pnet, units, kernel, kernel_w, stride, stride_w, pad, pad_w, groups, act);
+			break;
+		case LAYER_KIND_MAXPOOL2D:	err = ann_add_maxpool2d_ex(pnet, kernel, kernel_w, stride, stride_w); break;
 		case LAYER_KIND_UPSAMPLE2D:	err = ann_add_upsample2d(pnet, kernel); break;
 		case LAYER_KIND_RESHAPE:	err = ann_add_reshape(pnet, dims4[1], dims4[2], dims4[3]); break;
 		case LAYER_KIND_GLOBAL_AVGPOOL2D: err = ann_add_global_avgpool2d(pnet); break;

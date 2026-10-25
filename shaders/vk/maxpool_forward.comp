@@ -22,9 +22,9 @@ void main()
         uint plane = t / d.OH;      // sample * C + channel
         uint xs = plane * d.H * d.W;
 
-        uint row0 = oh * d.S * d.W + ow * d.S, best = row0;
+        uint row0 = oh * d.S * d.W + ow * d.SW, best = row0;
         for (uint i = 0; i < d.K; i++)
-            for (uint j = 0; j < d.K; j++)
+            for (uint j = 0; j < d.KW; j++)
             {
                 uint idx = row0 + i * d.W + j;
                 if (x[xs + idx] > x[xs + best])

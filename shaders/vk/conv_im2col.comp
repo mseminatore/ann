@@ -21,11 +21,11 @@ layout(push_constant) uniform Params { WindowDims d; } pc;
 void main()
 {
     WindowDims d = pc.d;
-    uint kk = d.K * d.K, ckk = d.C * kk;
+    uint kk = d.K * d.KW, ckk = d.C * kk;
     uint col = gl_GlobalInvocationID.x;
     if (col >= ckk)
         return;
-    uint c = col / kk, i = (col % kk) / d.K, j = col % d.K;
+    uint c = col / kk, i = (col % kk) / d.KW, j = col % d.KW;
     uint plane = d.H * d.W;
 
     uint rows = d.batch * d.OH * d.OW;
@@ -41,7 +41,7 @@ void main()
     uint step_oh = step_t % d.OH, step_b = step_t / d.OH;
     for (; row < rows; row += step)
     {
-        int ih = int(oh * d.S + i) - int(d.P), iw = int(ow * d.S + j) - int(d.P);
+        int ih = int(oh * d.S + i) - int(d.P), iw = int(ow * d.SW + j) - int(d.PW);
         cols[row * ckk + col] = ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W)
             ? x[(b * d.C + c) * plane + uint(ih) * d.W + uint(iw)] : 0.0;
 

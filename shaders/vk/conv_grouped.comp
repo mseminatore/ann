@@ -31,7 +31,7 @@ shared float part[256];
 void main()
 {
     WindowDims d = pc.d;
-    uint kk = d.K * d.K, cg = d.C / pc.groups, fg = d.F / pc.groups;
+    uint kk = d.K * d.KW, cg = d.C / pc.groups, fg = d.F / pc.groups;
 
     if (pc.mode == 0u)
     {
@@ -41,7 +41,7 @@ void main()
             uint oh = t % d.OH;
             t /= d.OH;
             uint f = t % d.F, b = t / d.F, c0 = f / fg * cg;
-            int ih0 = int(oh * d.S) - int(d.P), iw0 = int(ow * d.S) - int(d.P);
+            int ih0 = int(oh * d.S) - int(d.P), iw0 = int(ow * d.SW) - int(d.PW);
             float s = 0.0;
             for (uint c = 0u; c < cg; c++)
             {
@@ -51,11 +51,11 @@ void main()
                     int ih = ih0 + int(i);
                     if (ih < 0 || ih >= int(d.H))
                         continue;
-                    for (uint j = 0u; j < d.K; j++)
+                    for (uint j = 0u; j < d.KW; j++)
                     {
                         int iw = iw0 + int(j);
                         if (iw >= 0 && iw < int(d.W))
-                            s += b0[xs + uint(ih) * d.W + uint(iw)] * b1[wf + i * d.K + j];
+                            s += b0[xs + uint(ih) * d.W + uint(iw)] * b1[wf + i * d.KW + j];
                     }
                 }
             }
@@ -83,18 +83,18 @@ void main()
                 if (d.S > 1u) { if (oh % d.S != 0u) continue; oh /= d.S; }
                 if (oh >= d.OH)
                     continue;
-                for (uint j = 0u; j < d.K; j++)
+                for (uint j = 0u; j < d.KW; j++)
                 {
-                    int tx = int(iw + d.P) - int(j);
+                    int tx = int(iw + d.PW) - int(j);
                     if (tx < 0)
                         continue;
                     uint ow = uint(tx);
-                    if (d.S > 1u) { if (ow % d.S != 0u) continue; ow /= d.S; }
+                    if (d.SW > 1u) { if (ow % d.SW != 0u) continue; ow /= d.SW; }
                     if (ow >= d.OW)
                         continue;
                     uint g = ((b * d.OH + oh) * d.OW + ow) * d.F;
                     for (uint f = f0; f < f0 + fg; f++)
-                        s += b0[g + f] * b1[(f * cg + ci) * kk + i * d.K + j];
+                        s += b0[g + f] * b1[(f * cg + ci) * kk + i * d.KW + j];
                 }
             }
             b2[o] = s;
@@ -103,7 +103,7 @@ void main()
     else
     {
         uint t = gl_LocalInvocationID.x, P = cg * kk, p = gl_WorkGroupID.x, f = gl_WorkGroupID.y;
-        uint c = f / fg * cg + p / kk, ki = (p % kk) / d.K, kj = p % d.K;
+        uint c = f / fg * cg + p / kk, ki = (p % kk) / d.KW, kj = p % d.KW;
         uint positions = d.OH * d.OW, rows = d.batch * positions;
         float s = 0.0;
         for (uint r = t; r < rows; r += 256u)
@@ -112,7 +112,7 @@ void main()
             if (p < P)
             {
                 uint b = r / positions, oh = (r % positions) / d.OW, ow = r % d.OW;
-                int ih = int(oh * d.S + ki) - int(d.P), iw = int(ow * d.S + kj) - int(d.P);
+                int ih = int(oh * d.S + ki) - int(d.P), iw = int(ow * d.SW + kj) - int(d.PW);
                 v = ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W)
                     ? b1[((b * d.C + c) * d.H + uint(ih)) * d.W + uint(iw)] : 0.0;
             }

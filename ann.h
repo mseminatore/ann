@@ -461,6 +461,51 @@ ANN_API int ann_add_depthwise_conv2d(PNetwork pnet, int depth_multiplier, int ke
                                      Activation_type activation);
 
 /**
+ * Add a 2-D convolution layer with any window: separate kernel size, stride
+ * and padding for the height and the width, and groups.
+ * 
+ * Output shape is (filters, OH, OW) with OH = (H + 2*padding_h - kernel_h) / stride_h + 1
+ * and OW = (W + 2*padding_w - kernel_w) / stride_w + 1. Weights have shape
+ * [filters, C / groups, kernel_h, kernel_w]. ann_add_conv2d, ann_add_conv2d_grouped
+ * and ann_add_conv1d are special cases.
+ * 
+ * @param pnet Network to add the layer to
+ * @param filters Number of output channels (> 0, a multiple of groups)
+ * @param kernel_h Kernel height (> 0)
+ * @param kernel_w Kernel width (> 0)
+ * @param stride_h Step between windows down the height (> 0)
+ * @param stride_w Step between windows along the width (> 0)
+ * @param padding_h Zeros added above and below (>= 0)
+ * @param padding_w Zeros added left and right (>= 0)
+ * @param groups Number of groups (> 0, dividing the input channels and filters); 1 for an ordinary conv
+ * @param activation Activation applied to the output (not ACTIVATION_SOFTMAX)
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad settings or the kernel does not fit) or ERR_ALLOC
+ */
+ANN_API int ann_add_conv2d_ex(PNetwork pnet, int filters, int kernel_h, int kernel_w, int stride_h, int stride_w,
+                              int padding_h, int padding_w, int groups, Activation_type activation);
+
+/**
+ * Add a 1-D convolution layer, for sequences such as time series.
+ * 
+ * A sequence of L steps with C features (channels) per step is the image
+ * (C, 1, L): ann_add_input(pnet, C, 1, L). The layer slides a window of
+ * kernel_size steps along it; output shape is (filters, 1, OL) with
+ * OL = (L + 2*padding - kernel_size) / stride + 1. The same as
+ * ann_add_conv2d_ex with a 1 x kernel_size window; maps to an ONNX Conv node
+ * with that window (and imports PyTorch's nn.Conv1d).
+ * 
+ * @param pnet Network to add the layer to
+ * @param filters Number of output channels (> 0)
+ * @param kernel_size Window length in steps (> 0)
+ * @param stride Step between windows (> 0)
+ * @param padding Zeros added at each end (>= 0); (kernel_size - 1) / 2 keeps the length at stride 1
+ * @param activation Activation applied to the output (not ACTIVATION_SOFTMAX)
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad settings or the kernel does not fit) or ERR_ALLOC
+ */
+ANN_API int ann_add_conv1d(PNetwork pnet, int filters, int kernel_size, int stride, int padding,
+                           Activation_type activation);
+
+/**
  * Add a 2-D max pooling layer (no padding), applied to each channel.
  * 
  * Output shape is (C, OH, OW) with OH = (H - pool_size) / stride + 1, and likewise for OW.
@@ -471,6 +516,31 @@ ANN_API int ann_add_depthwise_conv2d(PNetwork pnet, int depth_multiplier, int ke
  * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad settings or the window does not fit) or ERR_ALLOC
  */
 ANN_API int ann_add_maxpool2d(PNetwork pnet, int pool_size, int stride);
+
+/**
+ * Add a 2-D max pooling layer with separate window sizes and strides for the
+ * height and the width (no padding).
+ * 
+ * @param pnet Network to add the layer to
+ * @param pool_h Window height (> 0)
+ * @param pool_w Window width (> 0)
+ * @param stride_h Step between windows down the height (> 0)
+ * @param stride_w Step between windows along the width (> 0)
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad settings, first layer, or the window does not fit) or ERR_ALLOC
+ */
+ANN_API int ann_add_maxpool2d_ex(PNetwork pnet, int pool_h, int pool_w, int stride_h, int stride_w);
+
+/**
+ * Add a 1-D max pooling layer over sequences (C, 1, L): windows of pool_size
+ * steps, stride steps apart. The same as ann_add_maxpool2d_ex with a
+ * 1 x pool_size window.
+ * 
+ * @param pnet Network to add the layer to
+ * @param pool_size Window length in steps (> 0)
+ * @param stride Step between windows (> 0)
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad settings, first layer, or the window does not fit) or ERR_ALLOC
+ */
+ANN_API int ann_add_maxpool1d(PNetwork pnet, int pool_size, int stride);
 
 /**
  * Add a flatten layer: reshape (C, H, W) to (C*H*W, 1, 1).
@@ -1485,6 +1555,7 @@ ANN_API int ann_get_layer_shape(const PNetwork pnet, int layer, int *channels, i
  * 
  * Conv2D: kernel size, stride and padding. MaxPool2D: pool size, stride and 0.
  * Upsample2D: the scale, the scale and 0. Other layers report 0 for all three.
+ * For a non-square window these are the height's; see ann_get_layer_window.
  * 
  * @param pnet Network to query (must not be NULL)
  * @param layer Layer index (0 = input layer)
@@ -1492,6 +1563,24 @@ ANN_API int ann_get_layer_shape(const PNetwork pnet, int layer, int *channels, i
  * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for a bad layer index
  */
 ANN_API int ann_get_layer_settings(const PNetwork pnet, int layer, int *size, int *stride, int *padding);
+
+/**
+ * Get a convolution, pooling or upsampling layer's window for the height and
+ * the width.
+ * 
+ * Conv2D: kernel, stride and padding. MaxPool2D: pool size and stride, padding 0.
+ * Upsample2D: the scale as kernel and stride, padding 0. Other layers report 0
+ * for all six. (ann_get_layer_settings gives the height's values.)
+ * 
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @param kernel_h, kernel_w Receive the window's height and width
+ * @param stride_h, stride_w Receive the strides
+ * @param padding_h, padding_w Receive the padding
+ * @return ERR_OK, ERR_NULL_PTR or ERR_INVALID (layer out of range)
+ */
+ANN_API int ann_get_layer_window(const PNetwork pnet, int layer, int *kernel_h, int *kernel_w, int *stride_h,
+                                 int *stride_w, int *padding_h, int *padding_w);
 
 /**
  * Get a convolution layer's number of groups.

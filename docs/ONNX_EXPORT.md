@@ -12,9 +12,9 @@ ann_export_onnx(pnet, "model.onnx.json");
 
 - Outputs JSON (not binary protobuf) - see [Converting to binary ONNX](#converting-to-binary-onnx)
 - Each dense layer becomes: `MatMul` → `Add` → `Activation` nodes
-- Convolutional networks export `Conv` (weights `[F, C/groups, k, k]`, `kernel_shape`,
+- Convolutional networks export `Conv` (weights `[F, C/groups, kh, kw]`, `kernel_shape`,
   `strides`, `pads`, and `group` for grouped and depthwise convs), `MaxPool` and `Flatten` nodes with a `[batch, C, H, W]`
-  input; a `Flatten` is inserted before a dense layer that receives an image
+  input (1-D layers export as 2-D ones with a window one row high, which compute the same); a `Flatten` is inserted before a dense layer that receives an image
 - Upsampling layers export `Resize` (`mode = nearest`, `asymmetric`
   coordinates, `floor` rounding, as PyTorch writes `nn.Upsample`) with a
   `scales` initializer `[1, 1, s, s]`; reshape layers export `Reshape` with a
@@ -52,14 +52,16 @@ if (pnet) {
 ### Import Capabilities
 
 The importer reads the graph as a single chain of nodes starting at its input
-(`[batch, n]` or `[batch, C, H, W]`) and turns each node into a layer:
+(`[batch, n]`, `[batch, C, H, W]`, or a sequence `[batch, C, L]`, which becomes
+libann's `(C, 1, L)` so 1-D `Conv` and `MaxPool` nodes, as PyTorch writes
+`nn.Conv1d` and `nn.MaxPool1d`, import as 1-D layers) and turns each node into a layer:
 
 ONNX node | libann layer
 --------- | ------------
 `MatMul` (+ `Add` of a bias) | dense layer (weights `[in, out]`)
 `Gemm` | dense layer (`transB = 1` as written by PyTorch's `Linear`, or `transB = 0`; `alpha = beta = 1`)
-`Conv` | conv layer (square kernel, equal strides and pads, no dilation; `group` for grouped and depthwise convs; bias optional)
-`MaxPool` | max pooling layer (square window, equal strides, no padding, `ceil_mode = 0`)
+`Conv` | conv layer (any kernel and strides; pads equal at both ends of each axis; no dilation; `group` for grouped and depthwise convs; bias optional)
+`MaxPool` | max pooling layer (any window and strides, no padding, `ceil_mode = 0`)
 `GlobalAveragePool` | global average pooling layer (as PyTorch writes `nn.AdaptiveAvgPool2d(1)`)
 `BatchNormalization` | batch norm layer (inference form: constant `[C]` scale, bias, mean and var, one output; any epsilon, which is moved into the variance since libann's is 1e-5), on `[batch, C]` or `[batch, C, H, W]`
 `Flatten` (axis 1) | flatten layer (libann's own `flatten_input_N` nodes are skipped)

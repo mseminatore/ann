@@ -355,6 +355,8 @@ ann_add_conv2d | 2-D convolution with square kernels, stride and zero padding
 ann_add_conv2d_grouped | the same, with the channels and filters split into groups
 ann_add_depthwise_conv2d | depthwise convolution: each channel convolved with its own filters
 ann_add_maxpool2d | 2-D max pooling per channel
+ann_add_conv2d_ex, ann_add_maxpool2d_ex | the same with separate height and width settings (non-square windows)
+ann_add_conv1d, ann_add_maxpool1d | 1-D convolution and pooling over sequences shaped (C, 1, L)
 ann_add_flatten | reshape an image to a vector (optional: dense layers flatten their input)
 ann_add_upsample2d | nearest-neighbour upsampling by an integer scale, per channel
 ann_add_reshape | give the previous layer's values a (channels, height, width) shape
@@ -362,9 +364,25 @@ ann_add_global_avgpool2d | each channel's mean: (C, H, W) to (C, 1, 1)
 ann_add_batchnorm | batch normalization per channel (per node after a dense layer), then an optional activation
 
 Output sizes are `(H + 2*padding - kernel) / stride + 1` for convolutions,
-`(H - pool) / stride + 1` for pooling and `H * scale` for upsampling. Settings
+`(H - pool) / stride + 1` for pooling and `H * scale` for upsampling, and
+likewise for the width with its own settings in the `_ex` functions. Settings
 that don't fit the input, a reshape to a different size, or an activation
 other than none on pool/flatten/upsample/reshape layers, return `ERR_INVALID`.
+
+Sequences such as time series are images one row high: L steps of C features
+are the input shape `(C, 1, L)`, and 1-D convolutions and pooling slide along
+the steps:
+
+```c
+// x: rows of 3 features x 128 steps, stored feature by feature
+ann_add_input(net, 3, 1, 128);
+ann_add_conv1d(net, 16, 5, 1, 2, ACTIVATION_NULL);   // 16x1x128: windows of 5 steps
+ann_add_batchnorm(net, ACTIVATION_RELU);
+ann_add_maxpool1d(net, 2, 2);                        // 16x1x64
+ann_add_conv1d(net, 32, 3, 1, 1, ACTIVATION_RELU);   // 32x1x64
+ann_add_global_avgpool2d(net);                       // 32
+ann_add_layer(net, 4, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+```
 
 Global average pooling replaces flatten + a large dense layer at the end of a
 CNN: each channel becomes its mean, so the classifier sees one value per

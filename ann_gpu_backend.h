@@ -152,6 +152,28 @@ void ann_mse_output_delta(Activation_type act, real *delta, const real *Y, const
 real ann_cross_entropy_term(Activation_type output_act, real t, real y);
 
 /**
+ * Work out every layer's padding mask (see ann_add_embedding_masked) for
+ * rows samples of input ids, as a forward pass would: sets each layer's
+ * masked flag and fills t_mask (one row per sample) for the masked ones.
+ * Implemented in ann.c and shared with the GPU backends, which upload them.
+ * @return ERR_OK or ERR_ALLOC
+ */
+int ann_compute_masks(PNetwork pnet, const real *inputs, int rows);
+
+/**
+ * Index an embedding layer's ids for its weight gradient: the distinct ids of
+ * rows samples (padding and ids outside the vocabulary left out) in the order
+ * first seen, into unique, and for id u the positions b * L + t that hold it,
+ * in order, at positions[offsets[u] .. offsets[u + 1]). Summing dz over them
+ * adds what the CPU adds, in the same order. unique and offsets need
+ * rows * L + 1 entries, positions rows * L. Implemented in ann.c and shared
+ * with the GPU backends.
+ * @return The number of distinct ids, or -1 when out of memory
+ */
+int ann_embedding_index(const Layer *layer, const real *ids, int rows, unsigned *unique, unsigned *offsets,
+                        unsigned *positions);
+
+/**
  * Active GPU backend.  NULL means no GPU is available or initialized.
  * Set by ann_gpu_init(); read by ann.c dispatch logic and ann_gpu_* public API.
  */

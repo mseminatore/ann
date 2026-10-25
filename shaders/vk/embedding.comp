@@ -1,0 +1,56 @@
+#version 450
+#include "common.glsl"
+// Embedding (vocabulary V, dim D, L steps): ids [batch][L] (reals, rounded), W [V][D],
+// output [batch][D][L]. The padding id (pad, -1 for none) and ids outside the vocabulary
+// give zeros. Two modes:
+//   0 forward:     y[b][d][t] = W[id][d], a gather
+//   1 weight grad: dW[unique[u]][d] += the sum of dz over the positions holding that id
+//                  (positions[offsets[u] .. offsets[u+1]), each b * L + t), in the CPU's
+//                  order; the host indexes the ids (ann_embedding_index), so no two
+//                  invocations add to the same weight and no atomics are needed
+// Bindings by mode: 0 ids or dz; 1 W or dW; 2 y (forward); 3 unique, 4 offsets and
+// 5 positions (weight grad).
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BufSrc { float src[]; };
+layout(std430, binding = 1) buffer BufW { float w[]; };
+layout(std430, binding = 2) writeonly buffer BufDst { float dst[]; };
+layout(std430, binding = 3) readonly buffer BufUnique { uint unique_ids[]; };
+layout(std430, binding = 4) readonly buffer BufOffsets { uint offsets[]; };
+layout(std430, binding = 5) readonly buffer BufPositions { uint positions[]; };
+
+layout(push_constant) uniform Params {
+    uint V, D, L;
+    int pad;
+    uint mode, rows, ids;   // ids: distinct ids indexed (weight grad)
+} pc;
+
+void main()
+{
+    uint DL = pc.D * pc.L;
+    if (pc.mode == 0u)
+    {
+        GRID_LOOP(i, pc.rows * DL)
+        {
+            uint b = i / DL, r = i % DL, d = r / pc.L, t = r % pc.L;
+            float id = floor(src[b * pc.L + t] + 0.5);
+            bool ok = id >= 0.0 && id < float(pc.V) && int(id) != pc.pad;
+            dst[i] = ok ? w[uint(id) * pc.D + d] : 0.0;
+        }
+    }
+    else
+    {
+        GRID_LOOP(i, pc.ids * pc.D)
+        {
+            uint u = i / pc.D, d = i % pc.D;
+            float s = 0.0;
+            for (uint k = offsets[u]; k < offsets[u + 1u]; k++)
+            {
+                uint p = positions[k];
+                s += src[(p / pc.L) * DL + d * pc.L + p % pc.L];
+            }
+            w[unique_ids[u] * pc.D + d] += s;
+        }
+    }
+}

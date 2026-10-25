@@ -400,9 +400,9 @@ ann_add_global_maxpool2d(net);                           // 128
 ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 ```
 
-Ids outside the vocabulary also give zeros. Networks with an embedding train
-on the CPU (GPU backends keep them there) and cannot be quantized or exported
-as C headers yet.
+Ids outside the vocabulary also give zeros. Metal and Vulkan train and run
+these networks when the embedding reads the inputs, as here (CUDA keeps them
+on the CPU). They cannot be quantized or exported as C headers yet.
 
 The padding vectors are zero, but the layers above still see the padding
 steps: a convolution's bias makes them nonzero, and they count in pooling and

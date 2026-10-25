@@ -118,6 +118,7 @@ typedef enum {
     K_CONV_IM2COL, K_CONV_OUTPUT, K_CONV_GRAD_ROWS, K_CONV_COL2IM,
     K_MAXPOOL_FORWARD, K_MAXPOOL_BACKWARD, K_UPSAMPLE, K_GLOBAL_AVGPOOL, K_GLOBAL_MAXPOOL, K_BATCHNORM, K_SUM_PARTIALS,
     K_CONV_DIRECT_FORWARD, K_CONV_DIRECT_INPUT_GRAD, K_CONV_DIRECT_WEIGHT_GRAD, K_CONV_GROUPED,
+    K_EMBEDDING, K_MASK_STEPS,
     K_COUNT
 } Kernel;
 
@@ -153,6 +154,8 @@ static const struct {
     { SPV(conv_direct_input_grad), 0, 0 },
     { SPV(conv_direct_weight_grad), 0, 0 },
     { SPV(conv_grouped), 0, 0 },
+    { SPV(embedding), 0, 0 },
+    { SPV(mask_steps), 0, 0 },
 };
 
 // Kernel names for the ANN_VK_PROFILE report; the last is the copies and fills
@@ -163,6 +166,7 @@ static const char *const g_kernel_names[K_COUNT + 1] = {
     "conv_im2col", "conv_output", "conv_grad_rows", "conv_col2im",
     "maxpool_forward", "maxpool_backward", "upsample", "global_avgpool", "global_maxpool", "batchnorm", "sum_partials",
     "conv_direct_forward", "conv_direct_input_grad", "conv_direct_weight_grad", "conv_grouped",
+    "embedding", "mask_steps",
     "copy / fill",
 };
 #define K_TRANSFER K_COUNT
@@ -250,6 +254,9 @@ typedef struct {
     VkBuf *inputs, *targets, *row_loss;
     VkBuf **masks;              // dropout masks by layer
     int mask_layers;            // layers masks has room for
+    VkBuf **pad;                // padding masks by layer (see pad_prepare)
+    int pad_layers;
+    VkBuf *emb_unique, *emb_offsets, *emb_positions;    // the embedding's id index (see emb_prepare)
     const float *loss_src;      // the step's per-row losses, readable once it completes; NULL
                                 // when the slot's operation is not a training step
     int batch_size;
@@ -286,6 +293,17 @@ typedef struct {
     int barrier_pending;        // a command since the last barrier wrote memory
 
     VkBuf *infer[2];            // inference ping-pong buffers
+    VkBuf **infer_pad;          // inference padding masks by layer
+    int infer_pad_layers;
+    // The pass being recorded: its padding masks by layer (NULL without any) and the steps
+    // each keeps over the batch, and the embedding's id index (see pad_prepare, emb_prepare)
+    VkBuf **pad;
+    int pad_layers;
+    uint32_t *pad_kept;
+    int pad_kept_layers;
+    VkBuf *emb_unique, *emb_offsets, *emb_positions;
+    uint32_t emb_count;
+    uint32_t *emb_host;         // the index on the host until it is uploaded
     VkBuf **scratch;            // per-layer work buffers, scratch[layer * SCRATCH_SLOTS + slot]
     VkBuf *split;               // split-K GEMM partial sums, SPLIT_FLOATS floats
     int scratch_layers;         // layers scratch has room for
@@ -1759,12 +1777,184 @@ static void encode_upsample(PNetwork pnet, int layer, int batch_size, VkBuf *src
 }
 
 //-----------------------------------------------------------
+// A buffer of at least bytes at list[index], growing the list (count entries) as needed;
+// call before cmd_begin()
+//-----------------------------------------------------------
+static VkBuf *list_buf(VkBuf ***list, int *count, int index, size_t bytes)
+{
+    if (index >= *count)
+    {
+        VkBuf **grown = (VkBuf **)realloc(*list, (size_t)(index + 1) * sizeof(*grown));
+        if (!grown)
+            return NULL;
+        memset(grown + *count, 0, (size_t)(index + 1 - *count) * sizeof(*grown));
+        *list = grown;
+        *count = index + 1;
+    }
+    return ensure_buf(&(*list)[index], bytes);
+}
+
+static void free_list(VkBuf ***list, int *count)
+{
+    for (int i = 0; i < *count; i++)
+        buf_destroy((*list)[i]);
+    free(*list);
+    *list = NULL;
+    *count = 0;
+}
+
+//-----------------------------------------------------------
+// Padding masks (see ann_add_embedding_masked). ann.c works them out on the host from the
+// ids (ann_compute_masks); pad_prepare() makes room for each masked layer's in list (a
+// slot's, or the inference ones) and adds the staging they need to *stage, and pad_upload()
+// copies them in once recording has begun. Masked layers' values are zeroed at the masked
+// steps after the activation and dropout, and their gradients before the activation's
+// derivative; batch norm and the global pools read them. Returns 0 if out of memory.
+//-----------------------------------------------------------
+static int pad_prepare(PNetwork pnet, const real *inputs, int rows, VkBuf ***list, int *count, size_t *stage)
+{
+    g_vk.pad = NULL;
+    g_vk.pad_layers = 0;
+    if (!ann_get_layer_masked(pnet, 1))
+        return 1;
+    if (ann_compute_masks(pnet, inputs, rows) != ERR_OK)
+        return 0;
+    if (pnet->layer_count > g_vk.pad_kept_layers)
+    {
+        uint32_t *grown = (uint32_t *)realloc(g_vk.pad_kept, (size_t)pnet->layer_count * sizeof(*grown));
+        if (!grown)
+            return 0;
+        g_vk.pad_kept = grown;
+        g_vk.pad_kept_layers = pnet->layer_count;
+    }
+    for (int layer = 1; layer < pnet->layer_count; layer++)
+    {
+        PLayer l = &pnet->layers[layer];
+        if (!l->masked)
+            continue;
+        size_t n = (size_t)rows * l->shape.w;
+        if (!list_buf(list, count, layer, n * sizeof(float)))
+            return 0;
+        *stage += staged(n * sizeof(float));
+        uint32_t kept = 0;
+        for (size_t i = 0; i < n; i++)
+            kept += l->t_mask->values[i] != 0.0f;
+        g_vk.pad_kept[layer] = kept;
+    }
+    g_vk.pad = *list;
+    g_vk.pad_layers = *count;
+    return 1;
+}
+
+static void pad_upload(PNetwork pnet, int rows)
+{
+    for (int layer = 1; g_vk.pad && layer < pnet->layer_count; layer++)
+        if (pnet->layers[layer].masked)
+            cmd_upload(g_vk.pad[layer], pnet->layers[layer].t_mask->values,
+                       (size_t)rows * pnet->layers[layer].shape.w * sizeof(float));
+}
+
+// the layer's padding mask in the pass being recorded, or NULL
+static VkBuf *pad_of(const PNetwork pnet, int layer)
+{
+    return g_vk.pad && layer < g_vk.pad_layers && pnet->layers[layer].masked ? g_vk.pad[layer] : NULL;
+}
+
+// zero values (or gradients) [rows x nodes] of a masked layer at its masked steps
+static void encode_mask_steps(PLayer l, VkBuf *v, VkBuf *mask, int rows)
+{
+    struct { uint32_t n, steps, nodes; } p = { (uint32_t)rows * l->node_count, (uint32_t)l->shape.w,
+                                              (uint32_t)l->node_count };
+    VkBuf *bufs[2] = { v, mask };
+    cmd_dispatch(K_MASK_STEPS, bufs, 2, &p, sizeof(p), groups_for(p.n, 256), 1);
+}
+
+//-----------------------------------------------------------
+// Embedding (embedding.comp): a gather forward; the weight gradient sums each distinct id's
+// positions in the step's id index (ann_embedding_index), so no two invocations add to the
+// same weight. emb_prepare() indexes the ids on the host into the slot's buffers (before
+// cmd_begin(), adding their staging to *stage) and emb_upload() copies the index in.
+//-----------------------------------------------------------
+typedef struct {
+    uint32_t V, D, L;
+    int32_t pad;
+    uint32_t mode, rows, ids;
+} EmbParams;
+
+static EmbParams emb_params(PNetwork pnet, int layer, int rows, uint32_t mode)
+{
+    PLayer l = &pnet->layers[layer];
+    int vocab = 0, stride = 0, padding = -1;
+    ann_get_layer_settings(pnet, layer, &vocab, &stride, &padding);
+    EmbParams p = { (uint32_t)vocab, (uint32_t)l->shape.c, (uint32_t)l->shape.w, padding, mode, (uint32_t)rows,
+                    g_vk.emb_count };
+    return p;
+}
+
+static void encode_embedding_forward(PNetwork pnet, int layer, int rows, VkBuf *X, VkBuf *Y)
+{
+    EmbParams p = emb_params(pnet, layer, rows, 0);
+    VkBuf *bufs[6] = { X, (VkBuf *)pnet->layers[layer].params[0].value->gpu_buf, Y, X, X, X };
+    cmd_dispatch(K_EMBEDDING, bufs, 6, &p, sizeof(p), groups_for((size_t)rows * p.D * p.L, 256), 1);
+}
+
+static void encode_embedding_backward(PNetwork pnet, int layer, int rows, VkBuf *dZ)
+{
+    if (g_vk.emb_count == 0)
+        return;     // nothing but padding
+    EmbParams p = emb_params(pnet, layer, rows, 1);
+    VkBuf *bufs[6] = { dZ, (VkBuf *)pnet->layers[layer].params[0].grad->gpu_buf, dZ,
+                       g_vk.emb_unique, g_vk.emb_offsets, g_vk.emb_positions };
+    cmd_dispatch(K_EMBEDDING, bufs, 6, &p, sizeof(p), groups_for((size_t)p.ids * p.D, 256), 1);
+}
+
+static int emb_prepare(PNetwork pnet, VkSlot *slot, const real *ids, int rows, size_t *stage)
+{
+    g_vk.emb_count = 0;
+    free(g_vk.emb_host);
+    g_vk.emb_host = NULL;
+    if (pnet->layers[1].kind != LAYER_KIND_EMBEDDING)
+        return 1;
+    size_t n = (size_t)rows * pnet->layers[0].node_count;
+    g_vk.emb_host = (uint32_t *)malloc((3 * n + 2) * sizeof(uint32_t));
+    if (!g_vk.emb_host || !ensure_buf(&slot->emb_unique, (n + 1) * sizeof(uint32_t)) ||
+        !ensure_buf(&slot->emb_offsets, (n + 1) * sizeof(uint32_t)) ||
+        !ensure_buf(&slot->emb_positions, n * sizeof(uint32_t)))
+        return 0;
+    int count = ann_embedding_index(&pnet->layers[1], ids, rows, g_vk.emb_host, g_vk.emb_host + n + 1,
+                                    g_vk.emb_host + 2 * n + 2);
+    if (count < 0)
+        return 0;
+    g_vk.emb_count = (uint32_t)count;
+    g_vk.emb_unique = slot->emb_unique;
+    g_vk.emb_offsets = slot->emb_offsets;
+    g_vk.emb_positions = slot->emb_positions;
+    *stage += staged((size_t)count * sizeof(uint32_t)) + staged(((size_t)count + 1) * sizeof(uint32_t)) +
+              staged(n * sizeof(uint32_t));
+    return 1;
+}
+
+static void emb_upload(PNetwork pnet, int rows)
+{
+    if (!g_vk.emb_host)
+        return;
+    size_t n = (size_t)rows * pnet->layers[0].node_count;
+    const uint32_t *offsets = g_vk.emb_host + n + 1;
+    cmd_upload(g_vk.emb_unique, g_vk.emb_host, (size_t)g_vk.emb_count * sizeof(uint32_t));
+    cmd_upload(g_vk.emb_offsets, offsets, ((size_t)g_vk.emb_count + 1) * sizeof(uint32_t));
+    cmd_upload(g_vk.emb_positions, g_vk.emb_host + 2 * n + 2, (size_t)offsets[g_vk.emb_count] * sizeof(uint32_t));
+    free(g_vk.emb_host);
+    g_vk.emb_host = NULL;
+}
+
+//-----------------------------------------------------------
 // BatchNorm (batchnorm.comp): params are gamma, beta, running mean, running variance.
 // Training keeps x_hat in SCRATCH_COLS and the statistics in SCRATCH_PARTIAL.
 //-----------------------------------------------------------
 typedef struct {
     uint32_t C, area, batch, mode;
     float momentum, eps;
+    uint32_t masked, kept;      // over a masked sequence: its mask's kept steps
 } BnParams;
 
 static VkBuf *bn_param(PLayer l, int p)
@@ -1775,8 +1965,9 @@ static VkBuf *bn_param(PLayer l, int p)
 static void k_batchnorm(PNetwork pnet, int layer, int rows, uint32_t mode, VkBuf **bufs)
 {
     PLayer l = &pnet->layers[layer];
+    int masked = pad_of(pnet, layer) != NULL;
     BnParams p = { (uint32_t)l->shape.c, (uint32_t)(l->shape.h * l->shape.w), (uint32_t)rows, mode,
-                   0.1f, (float)ANN_BATCHNORM_EPSILON };
+                   0.1f, (float)ANN_BATCHNORM_EPSILON, (uint32_t)masked, masked ? g_vk.pad_kept[layer] : 0 };
     // the statistics and gradient modes run a workgroup per channel
     size_t groups = mode == 0 || mode == 3 ? (size_t)p.C * 256 : (size_t)rows * l->node_count;
     cmd_dispatch(K_BATCHNORM, bufs, 8, &p, sizeof(p), groups_for(groups, 256), 1);
@@ -1791,10 +1982,14 @@ static void encode_batchnorm_forward(PNetwork pnet, int layer, int rows, VkBuf *
         k_batchnorm(pnet, layer, rows, 2, bufs);
         return;
     }
+    // a padding mask takes binding 1 for the statistics and 6 for the forward pass (see
+    // batchnorm.comp)
     VkBuf *x_hat = scratch_of(layer, SCRATCH_COLS), *stats = scratch_of(layer, SCRATCH_PARTIAL);
-    VkBuf *sbufs[8] = { X, Y, x_hat, stats, bn_param(l, 0), bn_param(l, 1), bn_param(l, 2), bn_param(l, 3) };
+    VkBuf *pad = pad_of(pnet, layer);
+    VkBuf *sbufs[8] = { X, pad ? pad : Y, x_hat, stats, bn_param(l, 0), bn_param(l, 1), bn_param(l, 2), bn_param(l, 3) };
     k_batchnorm(pnet, layer, rows, 0, sbufs);
-    k_batchnorm(pnet, layer, rows, 1, sbufs);
+    VkBuf *fbufs[8] = { X, Y, x_hat, stats, bn_param(l, 0), bn_param(l, 1), pad ? pad : bn_param(l, 2), bn_param(l, 3) };
+    k_batchnorm(pnet, layer, rows, 1, fbufs);
 }
 
 // gamma and beta gradients, then dX unless it is NULL (layer 1)
@@ -1807,7 +2002,8 @@ static void encode_batchnorm_backward(PNetwork pnet, int layer, int rows, VkBuf 
     k_batchnorm(pnet, layer, rows, 3, gbufs);
     if (dX)
     {
-        VkBuf *bufs[8] = { dZ, dX, x_hat, stats, bn_param(l, 0), dZ, dZ, dZ };
+        VkBuf *pad = pad_of(pnet, layer);
+        VkBuf *bufs[8] = { dZ, dX, x_hat, stats, bn_param(l, 0), dZ, pad ? pad : dZ, dZ };
         k_batchnorm(pnet, layer, rows, 4, bufs);
     }
 }
@@ -1817,20 +2013,22 @@ static void encode_batchnorm_backward(PNetwork pnet, int layer, int rows, VkBuf 
 static void encode_global_maxpool(PNetwork pnet, int layer, int batch_size, VkBuf *src, VkBuf *dst, int backward)
 {
     WindowDims d = window_dims(pnet, layer, batch_size);
-    struct { WindowDims d; uint32_t backward; } p = { d, (uint32_t)backward };
-    VkBuf *bufs[3] = { src, dst, scratch_of(layer, SCRATCH_COLS) };
+    VkBuf *pad = pad_of(pnet, layer - 1);
+    struct { WindowDims d; uint32_t backward, masked; } p = { d, (uint32_t)backward, pad != NULL };
+    VkBuf *bufs[4] = { src, dst, scratch_of(layer, SCRATCH_COLS), pad ? pad : src };
     size_t count = (size_t)batch_size * d.C * (backward ? d.H * d.W : 1);
-    cmd_dispatch(K_GLOBAL_MAXPOOL, bufs, 3, &p, sizeof(p), groups_for(count, 256), 1);
+    cmd_dispatch(K_GLOBAL_MAXPOOL, bufs, 4, &p, sizeof(p), groups_for(count, 256), 1);
 }
 
 // GlobalAvgPool2D forward (src = X, dst = Y) or backward (src = dZ, dst = dX)
 static void encode_global_avgpool(PNetwork pnet, int layer, int batch_size, VkBuf *src, VkBuf *dst, int backward)
 {
     WindowDims d = window_dims(pnet, layer, batch_size);
-    struct { WindowDims d; uint32_t backward; } p = { d, (uint32_t)backward };
-    VkBuf *bufs[2] = { src, dst };
+    VkBuf *pad = pad_of(pnet, layer - 1);
+    struct { WindowDims d; uint32_t backward, masked; } p = { d, (uint32_t)backward, pad != NULL };
+    VkBuf *bufs[3] = { src, dst, pad ? pad : src };
     size_t count = (size_t)batch_size * d.C * (backward ? d.H * d.W : 1);
-    cmd_dispatch(K_GLOBAL_AVGPOOL, bufs, 2, &p, sizeof(p), groups_for(count, 256), 1);
+    cmd_dispatch(K_GLOBAL_AVGPOOL, bufs, 3, &p, sizeof(p), groups_for(count, 256), 1);
 }
 
 //-----------------------------------------------------------
@@ -1879,6 +2077,9 @@ static void encode_layer_forward(PNetwork pnet, int layer, int rows, VkBuf *X, V
     case LAYER_KIND_BATCHNORM:
         encode_batchnorm_forward(pnet, layer, rows, X, Y, training);
         break;
+    case LAYER_KIND_EMBEDDING:
+        encode_embedding_forward(pnet, layer, rows, X, Y);
+        break;
     case LAYER_KIND_FLATTEN:
     case LAYER_KIND_RESHAPE:
         cmd_copy(X, Y, count * sizeof(float));
@@ -1902,6 +2103,8 @@ static void encode_layer_forward(PNetwork pnet, int layer, int rows, VkBuf *X, V
         VkBuf *dbufs[3] = { Y, mask, Y };
         cmd_dispatch(K_DROPOUT, dbufs, 3, &dp, sizeof(dp), groups_for(count, 256), 1);
     }
+    if (pad_of(pnet, layer))
+        encode_mask_steps(dst, Y, pad_of(pnet, layer), rows);
 }
 
 // Conv2D layers apply their activation's derivative in encode_conv_backward (softmax
@@ -1951,12 +2154,16 @@ static void vk_free_network(PNetwork pnet)
         buf_destroy(slot->targets);
         buf_destroy(slot->row_loss);
         slot->inputs = slot->targets = slot->row_loss = NULL;
-        for (int i = 0; i < slot->mask_layers; i++)
-            buf_destroy(slot->masks[i]);
-        free(slot->masks);
-        slot->masks = NULL;
-        slot->mask_layers = 0;
+        free_list(&slot->masks, &slot->mask_layers);
+        free_list(&slot->pad, &slot->pad_layers);
+        buf_destroy(slot->emb_unique);
+        buf_destroy(slot->emb_offsets);
+        buf_destroy(slot->emb_positions);
+        slot->emb_unique = slot->emb_offsets = slot->emb_positions = NULL;
     }
+    free_list(&g_vk.infer_pad, &g_vk.infer_pad_layers);
+    g_vk.pad = NULL;
+    g_vk.pad_layers = 0;
     g_vk.training_buffers_ready = 0;
 }
 
@@ -1965,15 +2172,16 @@ static int vk_upload_network(PNetwork pnet)
     if (!pnet || !g_vk.initialized)
         return ERR_NULL_PTR;
 
-    // Every layer kind in ann.h but Embedding is implemented (its backward pass is a
-    // scatter-add, which needs float atomics); reject it and any added later
+    // Every layer kind in ann.h is implemented; reject any added later, and an embedding
+    // anywhere but layer 1 (its ids, and so its masks and its gradient's id index, come from
+    // the inputs on the host)
     for (int layer = 0; layer < pnet->layer_count; layer++)
     {
         Layer_kind kind = pnet->layers[layer].kind;
         if (kind != LAYER_KIND_DENSE && kind != LAYER_KIND_CONV2D && kind != LAYER_KIND_MAXPOOL2D &&
             kind != LAYER_KIND_FLATTEN && kind != LAYER_KIND_UPSAMPLE2D && kind != LAYER_KIND_RESHAPE &&
             kind != LAYER_KIND_GLOBAL_AVGPOOL2D && kind != LAYER_KIND_BATCHNORM &&
-            kind != LAYER_KIND_GLOBAL_MAXPOOL2D)
+            kind != LAYER_KIND_GLOBAL_MAXPOOL2D && (kind != LAYER_KIND_EMBEDDING || layer != 1))
             return ERR_INVALID;
     }
 
@@ -2089,10 +2297,13 @@ static int forward_infer(PNetwork pnet, const real *inputs, real *outputs, int r
         return 0;
     size_t in_bytes = (size_t)rows * in_nodes * sizeof(float);
     size_t out_bytes = (size_t)rows * out_nodes * sizeof(float);
-    if (!staging_reserve(s, staged(in_bytes) + staged(out_bytes)) || !cmd_begin(s))
+    size_t stage = staged(in_bytes) + staged(out_bytes);
+    if (!pad_prepare(pnet, inputs, rows, &g_vk.infer_pad, &g_vk.infer_pad_layers, &stage) ||
+        !staging_reserve(s, stage) || !cmd_begin(s))
         return 0;
 
     cmd_upload(g_vk.infer[0], inputs, in_bytes);
+    pad_upload(pnet, rows);
     int cur = 0;
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
@@ -2100,6 +2311,7 @@ static int forward_infer(PNetwork pnet, const real *inputs, real *outputs, int r
         cur = 1 - cur;
     }
     const void *result = cmd_download(g_vk.infer[cur], out_bytes);
+    g_vk.pad = NULL;
     if (!cmd_submit_wait())
         return 0;
     memcpy(outputs, result, out_bytes);
@@ -2199,16 +2411,7 @@ static int ensure_training_buffers(PNetwork pnet)
 // The slot's GPU buffer for a layer's dropout mask, of at least bytes; call before cmd_begin()
 static VkBuf *slot_mask(VkSlot *slot, int layer, size_t bytes)
 {
-    if (layer >= slot->mask_layers)
-    {
-        VkBuf **grown = (VkBuf **)realloc(slot->masks, (size_t)(layer + 1) * sizeof(*grown));
-        if (!grown)
-            return NULL;
-        memset(grown + slot->mask_layers, 0, (size_t)(layer + 1 - slot->mask_layers) * sizeof(*grown));
-        slot->masks = grown;
-        slot->mask_layers = layer + 1;
-    }
-    return ensure_buf(&slot->masks[layer], bytes);
+    return list_buf(&slot->masks, &slot->mask_layers, layer, bytes);
 }
 
 // The batch's dropout mask for a hidden layer, which ann.c drew on the host, or NULL when
@@ -2254,9 +2457,14 @@ static void encode_backward(PNetwork pnet, int batch_size, VkSlot *slot)
                 VkBuf *bufs[3] = { (VkBuf *)layer->t_batch_values->gpu_buf, slot->masks[li], dl_dz };
                 cmd_dispatch(K_DROPOUT, bufs, 3, &p, sizeof(p), groups_for(count, 256), 1);
             }
+            // masked steps' outputs are constant zeros
+            if (pad_of(pnet, li))
+                encode_mask_steps(layer, dl_dz, pad_of(pnet, li), batch_size);
             if (!conv_fuses_derivative(layer))
                 k_activation_derivative(layer, batch_size);
         }
+        else if (pad_of(pnet, li))
+            encode_mask_steps(layer, dl_dz, pad_of(pnet, li), batch_size);
 
         switch (layer->kind)
         {
@@ -2301,6 +2509,9 @@ static void encode_backward(PNetwork pnet, int batch_size, VkSlot *slot)
             break;
         case LAYER_KIND_BATCHNORM:
             encode_batchnorm_backward(pnet, li, batch_size, dl_dz, dX);
+            break;
+        case LAYER_KIND_EMBEDDING:
+            encode_embedding_backward(pnet, li, batch_size, dl_dz);     // the ids below get no gradient
             break;
         case LAYER_KIND_FLATTEN:
         case LAYER_KIND_RESHAPE:
@@ -2433,6 +2644,10 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
         return 0;
 
     size_t stage_bytes = staged(input_bytes) + staged(target_bytes) + staged(loss_bytes);
+    const real *ids = pnet->layers[0].t_batch_values->values;
+    if (!pad_prepare(pnet, ids, batch_size, &slot->pad, &slot->pad_layers, &stage_bytes) ||
+        !emb_prepare(pnet, slot, ids, batch_size, &stage_bytes))
+        return 0;
     for (int layer = 1; layer < out_idx; layer++)
     {
         PTensor mask = dropout_mask(pnet, layer, batch_size);
@@ -2455,6 +2670,8 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
         if (mask)
             cmd_upload(slot->masks[layer], mask->values, tensor_bytes(mask));
     }
+    pad_upload(pnet, batch_size);
+    emb_upload(pnet, batch_size);
 
     // Zero the gradients
     for (int layer = 1; layer < pnet->layer_count; layer++)
@@ -2496,6 +2713,7 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
     encode_optimizer(pnet);
 
     const float *row_loss = (const float *)cmd_download(slot->row_loss, loss_bytes);
+    g_vk.pad = NULL;
     if (!cmd_submit())
     {
         pnet->train_iteration--;

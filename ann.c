@@ -1892,7 +1892,7 @@ static void batchnorm_backward(PLayer layer, const PTensor X, const PTensor dZ, 
 //------------------------------
 enum { EMB_VOCAB, EMB_PADDING, EMB_MASK, EMB_CONFIG_COUNT };
 
-static int embedding_id(const PLayer layer, real x)
+static int embedding_id(const Layer *layer, real x)
 {
 	double r = floor((double)x + 0.5);
 	int vocab = layer->config[EMB_VOCAB];
@@ -2175,6 +2175,64 @@ static void layer_mask_forward(PNetwork pnet, int layer, const PTensor X, int ro
 			}
 		}
 	}
+}
+
+//------------------------------
+// every layer's mask for rows samples of input ids, without the forward pass
+// (the GPU backends upload them). Shared with the GPU backends (declared in
+// ann_gpu_backend.h).
+//------------------------------
+int ann_compute_masks(PNetwork pnet, const real *inputs, int rows)
+{
+	Tensor X = tensor_view((real *)inputs, rows, pnet->layers[0].node_count);
+	int err = ERR_OK;
+
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+	{
+		// only an embedding reads X, and only one reading the inputs is uploaded
+		int wanted = mask_follows(&pnet->layers[layer], pnet->layers[layer - 1].masked);
+		layer_mask_forward(pnet, layer, &X, rows);
+		if (wanted && !pnet->layers[layer].masked)
+			err = ERR_ALLOC;
+	}
+	return err;
+}
+
+//------------------------------
+// index an embedding's ids for its weight gradient: the distinct ids of rows
+// samples in the order first seen, and each one's positions (b * L + t) in
+// order, so a sum over them adds what embedding_backward_dims adds, in the
+// same order. Shared with the GPU backends (declared in ann_gpu_backend.h).
+//------------------------------
+int ann_embedding_index(const Layer *layer, const real *ids, int rows, unsigned *unique, unsigned *offsets,
+                        unsigned *positions)
+{
+	int vocab = layer->config[EMB_VOCAB], total = rows * layer->shape.w, count = 0;
+	unsigned *seen = (unsigned *)calloc((size_t)vocab, sizeof(unsigned));	// positions per id, then the next free one
+	if (!seen)
+		return -1;
+
+	for (int p = 0; p < total; p++)
+	{
+		int id = embedding_id(layer, ids[p]);
+		if (id < 0)
+			continue;
+		if (seen[id]++ == 0)
+			unique[count++] = (unsigned)id;
+	}
+	offsets[0] = 0;
+	for (int u = 0; u < count; u++)
+		offsets[u + 1] = offsets[u] + seen[unique[u]];
+	for (int u = 0; u < count; u++)
+		seen[unique[u]] = offsets[u];
+	for (int p = 0; p < total; p++)
+	{
+		int id = embedding_id(layer, ids[p]);
+		if (id >= 0)
+			positions[seen[id]++] = (unsigned)p;
+	}
+	free(seen);
+	return count;
 }
 
 //------------------------------

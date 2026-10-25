@@ -419,6 +419,48 @@ ANN_API int ann_add_conv2d(PNetwork pnet, int filters, int kernel_size, int stri
                            Activation_type activation);
 
 /**
+ * Add a grouped 2-D convolution layer: the input channels and the filters
+ * are split into groups, and each group's filters see only that group's
+ * channels.
+ * 
+ * Like ann_add_conv2d (groups = 1), but weights have shape
+ * [filters, C / groups, kernel_size, kernel_size]: groups times fewer weights
+ * and multiply-adds. groups = C is a depthwise convolution (see
+ * ann_add_depthwise_conv2d). Maps to an ONNX Conv node with a group attribute.
+ * 
+ * @param pnet Network to add the layer to
+ * @param filters Number of output channels (> 0, a multiple of groups)
+ * @param kernel_size Kernel height and width (> 0)
+ * @param stride Step between windows (> 0)
+ * @param padding Zeros added on each side (>= 0)
+ * @param groups Number of groups (> 0, dividing the input channels and filters)
+ * @param activation Activation applied to the output (not ACTIVATION_SOFTMAX)
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad settings or the kernel does not fit) or ERR_ALLOC
+ */
+ANN_API int ann_add_conv2d_grouped(PNetwork pnet, int filters, int kernel_size, int stride, int padding,
+                                   int groups, Activation_type activation);
+
+/**
+ * Add a depthwise 2-D convolution layer: each input channel is convolved
+ * with its own depth_multiplier filters, and channels are not mixed.
+ * 
+ * The first half of a depthwise separable convolution (MobileNet): follow it
+ * with a 1x1 ann_add_conv2d to mix the channels, with batch norm and an
+ * activation after each. Output shape is (C * depth_multiplier, OH, OW).
+ * The same as ann_add_conv2d_grouped with groups = C.
+ * 
+ * @param pnet Network to add the layer to
+ * @param depth_multiplier Filters per input channel (> 0; usually 1)
+ * @param kernel_size Kernel height and width (> 0)
+ * @param stride Step between windows (> 0)
+ * @param padding Zeros added on each side (>= 0)
+ * @param activation Activation applied to the output (not ACTIVATION_SOFTMAX)
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad settings, first layer, or the kernel does not fit) or ERR_ALLOC
+ */
+ANN_API int ann_add_depthwise_conv2d(PNetwork pnet, int depth_multiplier, int kernel_size, int stride, int padding,
+                                     Activation_type activation);
+
+/**
  * Add a 2-D max pooling layer (no padding), applied to each channel.
  * 
  * Output shape is (C, OH, OW) with OH = (H - pool_size) / stride + 1, and likewise for OW.
@@ -1450,6 +1492,16 @@ ANN_API int ann_get_layer_shape(const PNetwork pnet, int layer, int *channels, i
  * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for a bad layer index
  */
 ANN_API int ann_get_layer_settings(const PNetwork pnet, int layer, int *size, int *stride, int *padding);
+
+/**
+ * Get a convolution layer's number of groups.
+ * 
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @return The groups of a Conv2D layer (1 unless grouped or depthwise), 1 for
+ *         other layers, or 0 if pnet is NULL or layer is out of range
+ */
+ANN_API int ann_get_layer_groups(const PNetwork pnet, int layer);
 
 /**
  * Set how many CPU threads libann uses for training and batched inference.

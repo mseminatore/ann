@@ -51,9 +51,10 @@
 #	include <math.h>
 #endif
 
-// 2 added ANN_RT_UPSAMPLE2D, 3 ANN_RT_GLOBAL_AVGPOOL2D; generated headers check
-// for the version they need
-#define ANN_RT_VERSION 3
+// 2 added ANN_RT_UPSAMPLE2D, 3 ANN_RT_GLOBAL_AVGPOOL2D, 4 grouped convolutions
+// (ann_rt_layer.groups). Generated headers need at least the version that wrote
+// them (they initialize every field); older headers still build with newer versions.
+#define ANN_RT_VERSION 4
 
 #if defined(_MSC_VER) && !defined(__cplusplus)
 #	define ANN_RT_FUNC static __inline
@@ -86,7 +87,8 @@ enum {
 
 //------------------------------
 // One layer. Dense weights are [out_c][in_c * in_h * in_w]; conv weights are
-// [out_c][in_c][size][size]. Activations are stored channel by channel, row by row.
+// [out_c][in_c / groups][size][size], output channel f reading input channels
+// [g * in_c / groups, (g + 1) * in_c / groups) for g = f / (out_c / groups). Activations are stored channel by channel, row by row.
 //------------------------------
 typedef struct {
 	int32_t kind;				// ANN_RT_DENSE, ...
@@ -108,7 +110,22 @@ typedef struct {
 	// float model (NULL in an int8 model)
 	const float *w_f;
 	const float *b_f;
+
+	int32_t groups;				// conv groups; 0 (left out, as headers before version 4 do) means 1
 } ann_rt_layer;
+
+//------------------------------
+// a conv layer's input channels per group, and the first one filter f reads
+//------------------------------
+ANN_RT_FUNC int32_t ann_rt_group_channels(const ann_rt_layer *l)
+{
+	return l->groups > 1 ? l->in_c / l->groups : l->in_c;
+}
+
+ANN_RT_FUNC int32_t ann_rt_first_channel(const ann_rt_layer *l, int32_t f)
+{
+	return l->groups > 1 ? f / (l->out_c / l->groups) * ann_rt_group_channels(l) : 0;
+}
 
 typedef struct {
 	int32_t layer_count;
@@ -175,7 +192,7 @@ ANN_RT_FUNC void ann_rt_dense_q(const ann_rt_layer *l, const int8_t *x, int8_t *
 
 ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
 {
-	int32_t k = l->size, s = l->stride, p = l->pad;
+	int32_t k = l->size, s = l->stride, p = l->pad, cg = ann_rt_group_channels(l);
 	int32_t f, oh, ow, c, i, j;
 
 	for (f = 0; f < l->out_c; f++)
@@ -184,10 +201,10 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 			{
 				int32_t acc = l->b_q[f];
 
-				for (c = 0; c < l->in_c; c++)
+				for (c = 0; c < cg; c++)
 				{
-					const int8_t *w = l->w_q + (f * l->in_c + c) * k * k;
-					const int8_t *xc = x + c * l->in_h * l->in_w;
+					const int8_t *w = l->w_q + (f * cg + c) * k * k;
+					const int8_t *xc = x + (ann_rt_first_channel(l, f) + c) * l->in_h * l->in_w;
 
 					for (i = 0; i < k; i++)
 					{
@@ -388,7 +405,7 @@ ANN_RT_FUNC float ann_rt_activate_f(int32_t act, float x)
 //------------------------------
 ANN_RT_FUNC void ann_rt_linear_f(const ann_rt_layer *l, const float *x, float *z)
 {
-	int32_t k = l->size, s = l->stride, p = l->pad;
+	int32_t k = l->size, s = l->stride, p = l->pad, cg = ann_rt_group_channels(l);
 	int32_t n_in = l->in_c * l->in_h * l->in_w;
 	int32_t o, f, oh, ow, c, i, j;
 
@@ -410,10 +427,10 @@ ANN_RT_FUNC void ann_rt_linear_f(const ann_rt_layer *l, const float *x, float *z
 			for (ow = 0; ow < l->out_w; ow++)
 			{
 				float acc = l->b_f[f];
-				for (c = 0; c < l->in_c; c++)
+				for (c = 0; c < cg; c++)
 				{
-					const float *w = l->w_f + (f * l->in_c + c) * k * k;
-					const float *xc = x + c * l->in_h * l->in_w;
+					const float *w = l->w_f + (f * cg + c) * k * k;
+					const float *xc = x + (ann_rt_first_channel(l, f) + c) * l->in_h * l->in_w;
 					for (i = 0; i < k; i++)
 					{
 						int32_t ih = oh * s - p + i;

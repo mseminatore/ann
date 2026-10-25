@@ -707,6 +707,32 @@ void test_main(int argc, char *argv[])
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 
+        // grouped and depthwise convolutions: a depthwise conv (x2, stride 2),
+        // a grouped 1x1 conv, and a depthwise conv straight off the input
+        cpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        gpu_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        PNetwork dw[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            ann_add_input(dw[i], 2, 9, 9);
+            ann_add_depthwise_conv2d(dw[i], 2, 3, 1, 1, ACTIVATION_RELU);     // 4x9x9
+            ann_add_conv2d(dw[i], 6, 3, 1, 1, ACTIVATION_GELU);               // 6x9x9
+            ann_add_depthwise_conv2d(dw[i], 2, 3, 2, 1, ACTIVATION_TANH);     // 12x5x5
+            ann_add_conv2d_grouped(dw[i], 6, 1, 1, 0, 3, ACTIVATION_RELU);    // 6x5x5
+            ann_add_global_avgpool2d(dw[i]);
+            ann_add_layer(dw[i], CNN_CLASSES, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(dw[i], 0.01f);
+            ann_set_convergence(dw[i], 0.0f);
+            ann_set_epoch_limit(dw[i], 3);
+            ann_set_batch_size(dw[i], 8);
+        }
+        TESTEX("A network with grouped and depthwise convs uploads", ann_gpu_upload_network(gpu_net) == ERR_OK);
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("GPU grouped/depthwise conv training matches CPU training", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        TESTEX("and its inference matches the CPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
         // pooling straight off the input: the first layer has no parameters
         PNetwork pool_net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
         ann_add_input(pool_net, 2, 9, 9);

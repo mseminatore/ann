@@ -173,20 +173,78 @@ static PNetwork net_conv_pool(int pool, int stride)
     return net;
 }
 
-// Reference convolution of one sample: out[f][oh][ow] for the conv layer's weights
+// Reference convolution of one sample: out[f][oh][ow] for the conv layer's
+// weights; with G groups (config[3]), filter f reads its group's C/G channels
 static double ref_conv(const Layer *l, const real *x, int f, int oh, int ow)
 {
-    int k = l->config[0], s = l->config[1], p = l->config[2];
+    int k = l->config[0], s = l->config[1], p = l->config[2], groups = l->config[3] > 0 ? l->config[3] : 1;
+    int cg = l->in_shape.c / groups, c0 = f / (l->shape.c / groups) * cg;
     const real *w = l->params[0].value->values;
     double sum = l->params[1].value->values[f];
-    for (int c = 0; c < l->in_shape.c; c++)
+    for (int c = 0; c < cg; c++)
         for (int i = 0; i < k; i++)
             for (int j = 0; j < k; j++) {
                 int ih = oh * s - p + i, iw = ow * s - p + j;
                 if (ih < 0 || ih >= l->in_shape.h || iw < 0 || iw >= l->in_shape.w) continue;
-                sum += w[((f * l->in_shape.c + c) * k + i) * k + j] * x[(c * l->in_shape.h + ih) * l->in_shape.w + iw];
+                sum += w[((f * cg + c) * k + i) * k + j] * x[((c0 + c) * l->in_shape.h + ih) * l->in_shape.w + iw];
             }
     return sum;
+}
+
+// 4x4x4 -> grouped conv(6, k3, padding 1, 2 groups, tanh) -> conv(2, k2) -> dense(2), MSE
+static PNetwork net_grouped(void)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_input(net, 4, 4, 4);
+    ann_add_conv2d_grouped(net, 6, 3, 1, 1, 2, ACTIVATION_TANH);
+    ann_add_conv2d(net, 2, 2, 1, 0, ACTIVATION_NULL);
+    ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_NULL);
+    return net;
+}
+
+// 1x5x5 -> conv(3, k3, padding 1, gelu) -> depthwise (x2, k3, stride 2, padding 1, sigmoid): 6x3x3
+// -> 1x1 conv(2) -> dense(3, softmax), cross-entropy
+static PNetwork net_depthwise(void)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_CATEGORICAL_CROSS_ENTROPY);
+    ann_add_input(net, 1, 5, 5);
+    ann_add_conv2d(net, 3, 3, 1, 1, ACTIVATION_GELU);
+    ann_add_depthwise_conv2d(net, 2, 3, 2, 1, ACTIVATION_SIGMOID);
+    ann_add_conv2d(net, 2, 1, 1, 0, ACTIVATION_NULL);
+    ann_add_layer(net, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    return net;
+}
+
+// a depthwise conv straight off a 3x4x4 input (no gradient to pass down) -> dense(2), MSE
+static PNetwork net_depthwise_input(void)
+{
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_input(net, 3, 4, 4);
+    ann_add_depthwise_conv2d(net, 1, 3, 1, 0, ACTIVATION_RELU);
+    ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_NULL);
+    return net;
+}
+
+// a MobileNet-style classifier for the 1x6x6 bars: conv, then a depthwise
+// separable block (depthwise, 1x1 conv), each followed by batch norm, then
+// global average pooling
+static PNetwork make_bar_mobilenet(void)
+{
+    PNetwork net = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+    net->print_func = quiet;
+    ann_add_input(net, 1, 6, 6);
+    ann_add_conv2d(net, 4, 3, 1, 1, ACTIVATION_NULL);
+    ann_add_batchnorm(net, ACTIVATION_RELU);
+    ann_add_depthwise_conv2d(net, 1, 3, 1, 1, ACTIVATION_NULL);
+    ann_add_batchnorm(net, ACTIVATION_RELU);
+    ann_add_conv2d(net, 8, 1, 1, 0, ACTIVATION_NULL);
+    ann_add_batchnorm(net, ACTIVATION_RELU);
+    ann_add_global_avgpool2d(net);
+    ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+    ann_set_learning_rate(net, 0.02f);
+    ann_set_convergence(net, 0.0f);
+    ann_set_batch_size(net, 8);
+    return net;
 }
 
 // 1x6x6 images of a horizontal (class 0) or vertical (class 1) bar
@@ -1013,6 +1071,155 @@ void test_main(int argc, char *argv[])
         }
         back = ann_import_onnx(onnx);
         TESTEX("GlobalAveragePool on a flat input is rejected", back == NULL);
+        ann_free_network(back);
+        remove(onnx);
+    }
+    SUITE("Grouped and Depthwise Convolution");
+    {
+        PNetwork net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 4, 6, 6);
+        TESTEX("Grouped conv: 6 filters in 2 groups over 4 channels", ann_add_conv2d_grouped(net, 6, 3, 1, 1, 2,
+               ACTIVATION_RELU) == ERR_OK && net->layers[1].shape.c == 6 && net->layers[1].shape.h == 6 &&
+               ann_get_layer_groups(net, 1) == 2);
+        TESTEX("has weights [filters x C/groups*k*k]", net->layers[1].params[0].value->rows == 6 &&
+               net->layers[1].params[0].value->cols == 18);
+        TESTEX("Depthwise conv x2: 12 filters, a group per channel", ann_add_depthwise_conv2d(net, 2, 3, 2, 1,
+               ACTIVATION_NULL) == ERR_OK && net->layers[2].shape.c == 12 && net->layers[2].shape.h == 3 &&
+               ann_get_layer_groups(net, 2) == 6 && net->layers[2].params[0].value->cols == 9);
+        TESTEX("A plain conv has one group", ann_add_conv2d(net, 2, 1, 1, 0, ACTIVATION_NULL) == ERR_OK &&
+               ann_get_layer_groups(net, 3) == 1);
+        TESTEX("Other layers report one group, a bad index 0",
+               ann_get_layer_groups(net, 0) == 1 && ann_get_layer_groups(net, 4) == 0 && ann_get_layer_groups(NULL, 1) == 0);
+        TESTEX("Groups that don't divide the channels are rejected",
+               ann_add_conv2d_grouped(net, 4, 1, 1, 0, 3, ACTIVATION_NULL) == ERR_INVALID);
+        TESTEX("Groups that don't divide the filters are rejected",
+               ann_add_conv2d_grouped(net, 3, 1, 1, 0, 2, ACTIVATION_NULL) == ERR_INVALID);
+        TESTEX("Zero groups are rejected", ann_add_conv2d_grouped(net, 2, 1, 1, 0, 0, ACTIVATION_NULL) == ERR_INVALID);
+        TESTEX("A zero depth multiplier is rejected", ann_add_depthwise_conv2d(net, 0, 1, 1, 0, ACTIVATION_NULL) == ERR_INVALID);
+        TESTEX("Rejected layers are not counted", net->layer_count == 4);
+        ann_free_network(net);
+
+        net = ann_make_network(OPT_ADAM, LOSS_MSE);
+        TESTEX("Depthwise conv as the first layer is rejected", ann_add_depthwise_conv2d(net, 1, 3, 1, 0,
+               ACTIVATION_NULL) == ERR_INVALID);
+        TESTEX("and with no network", ann_add_depthwise_conv2d(NULL, 1, 3, 1, 0, ACTIVATION_NULL) == ERR_NULL_PTR);
+        ann_free_network(net);
+
+        // forward against the reference loop, single and batched
+        net = ann_make_network(OPT_SGD, LOSS_MSE);
+        net->print_func = quiet;
+        ann_add_input(net, 4, 5, 5);
+        ann_add_conv2d_grouped(net, 6, 3, 2, 1, 2, ACTIVATION_NULL);   // 6x3x3
+        ann_add_depthwise_conv2d(net, 1, 3, 1, 1, ACTIVATION_NULL);    // 6x3x3
+        ann_train_begin(net);
+        set_params(net);
+        ann_train_end(net);
+        real x[2 * 100], y[2 * 54], y1[54];
+        for (int i = 0; i < 200; i++) x[i] = (real)cos(0.37 * i) * 1.5f;
+        ann_predict(net, x, y1);
+        double worst = 0.0;
+        const Layer *g = &net->layers[1], *dw = &net->layers[2];
+        for (int f = 0; f < 6; f++)
+            for (int oh = 0; oh < 3; oh++)
+                for (int ow = 0; ow < 3; ow++) {
+                    double d = fabs(g->t_values->values[(f * 3 + oh) * 3 + ow] - ref_conv(g, x, f, oh, ow));
+                    if (d > worst) worst = d;
+                    d = fabs(y1[(f * 3 + oh) * 3 + ow] - ref_conv(dw, g->t_values->values, f, oh, ow));
+                    if (d > worst) worst = d;
+                }
+        TESTEX("Grouped and depthwise outputs match the reference loop", worst < 1e-5);
+        TESTEX("ann_predict_batch matches ann_predict", ann_predict_batch(net, x, y, 2) == ERR_OK &&
+               max_output_diff(net, net, x, 2) == 0.0f && fabs(y[0] - y1[0]) < 1e-6);
+        ann_free_network(net);
+    }
+    TESTEX("Gradients: grouped conv (2 groups) -> conv -> dense", grad_check(net_grouped(), 0) <= 1.0f);
+    TESTEX("Gradients: conv -> depthwise (x2, stride 2) -> 1x1 conv -> softmax", grad_check(net_depthwise(), 1) <= 1.0f);
+    TESTEX("Gradients: depthwise conv on the input", grad_check(net_depthwise_input(), 0) <= 1.0f);
+    {
+        // a MobileNet-style block learns the bars
+        enum { N = 48 };
+        real x[N * 36], labels[N * 2];
+        make_bars(x, labels, N);
+        PTensor tx = tensor_create_from_array(N, 36, x);
+        PTensor ty = tensor_create_from_array(N, 2, labels);
+        PNetwork net = make_bar_mobilenet();
+        ann_set_epoch_limit(net, 100);
+        ann_train_network(net, tx, ty, N);
+        real acc = ann_evaluate_accuracy(net, tx, ty);
+        printf("\t  bars with a depthwise separable block: accuracy %.2f\n", acc);
+        TESTEX("A depthwise separable (MobileNet-style) CNN learns the bars", acc >= 0.95f);
+
+        TESTEX("Text and binary saves succeed", ann_save_network(net, "test_dw.nna") == ERR_OK &&
+               ann_save_network_binary(net, "test_dw.nnb") == ERR_OK);
+        PNetwork text = ann_load_network("test_dw.nna");
+        PNetwork bin = ann_load_network_binary("test_dw.nnb");
+        TESTEX("Loaded networks keep the groups", same_structure(net, text) && same_structure(net, bin) &&
+               ann_get_layer_groups(bin, 3) == 4 && ann_get_layer_groups(text, 1) == 1);
+        TESTEX("Binary load predicts identically", bin && max_pred_diff(net, bin, x, N) == 0.0f);
+        TESTEX("Text load predicts the same (6 decimals)", text && max_pred_diff(net, text, x, N) < 1e-3f);
+        ann_free_network(text);
+        ann_free_network(bin);
+        remove("test_dw.nna");
+        remove("test_dw.nnb");
+
+        const char *onnx = "test_dw.onnx.json";
+        TESTEX("It exports to ONNX", ann_export_onnx(net, onnx) == ERR_OK);
+        TESTEX("with the depthwise conv's group and [F, 1, k, k] weights",
+               file_contains(onnx, "{\"name\": \"group\", \"type\": 2, \"i\": 4}") &&
+               file_contains(onnx, "\"name\": \"weight_2\",\n        \"data_type\": 1,\n        \"dims\": [4, 1, 3, 3]"));
+        PNetwork back = ann_import_onnx(onnx);
+        TESTEX("and imports with the same structure", same_structure(net, back));
+        TESTEX("and predicts identically", back && max_pred_diff(net, back, x, N) == 0.0f);
+        ann_free_network(back);
+        remove(onnx);
+        tensor_free(tx);
+        tensor_free(ty);
+        ann_free_network(net);
+
+        // a PyTorch-style model (protobuf JSON): Conv(4, k2, group 2) on 2x3x3, Relu, Flatten, Gemm
+        static const char *model =
+            "{\"irVersion\":\"8\",\"producerName\":\"pytorch\",\"graph\":{\"node\":["
+            "{\"input\":[\"x\",\"c.w\",\"c.b\"],\"output\":[\"c\"],\"opType\":\"Conv\",\"attribute\":[{\"name\":\"group\",\"i\":\"2\",\"type\":\"INT\"},{\"name\":\"kernel_shape\",\"ints\":[\"2\",\"2\"],\"type\":\"INTS\"}]},"
+            "{\"input\":[\"c\"],\"output\":[\"r\"],\"opType\":\"Relu\"},"
+            "{\"input\":[\"r\"],\"output\":[\"f\"],\"name\":\"/Flatten\",\"opType\":\"Flatten\",\"attribute\":[{\"name\":\"axis\",\"i\":\"1\",\"type\":\"INT\"}]},"
+            "{\"input\":[\"f\",\"fc.w\",\"fc.b\"],\"output\":[\"y\"],\"opType\":\"Gemm\",\"attribute\":[{\"name\":\"transB\",\"i\":\"1\",\"type\":\"INT\"}]}],"
+            "\"name\":\"g\",\"initializer\":["
+            "{\"dims\":[\"4\",\"1\",\"2\",\"2\"],\"dataType\":1,\"name\":\"c.w\",\"floatData\":[0.5,-0.25,0.75,0.125,-0.5,1,0.25,-0.75,1.5,0.5,-1,0.25,0.3,-0.6,0.9,0.1]},"
+            "{\"dims\":[\"4\"],\"dataType\":1,\"name\":\"c.b\",\"floatData\":[0.1,-0.2,0.05,0.3]},"
+            "{\"dims\":[\"1\",\"16\"],\"dataType\":1,\"name\":\"fc.w\",\"floatData\":[1,-1,0.5,2,-1.5,0.25,0.75,-0.5,1,0.5,-0.25,1.25,-1,0.5,0.25,-0.75]},"
+            "{\"dims\":[\"1\"],\"dataType\":1,\"name\":\"fc.b\",\"floatData\":[0.5]}],"
+            "\"input\":[{\"name\":\"x\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"2\"},{\"dimValue\":\"3\"},{\"dimValue\":\"3\"}]}}}}],"
+            "\"output\":[{\"name\":\"y\",\"type\":{\"tensorType\":{\"elemType\":1,\"shape\":{\"dim\":[{\"dimParam\":\"N\"},{\"dimValue\":\"1\"}]}}}}]},"
+            "\"opsetImport\":[{\"domain\":\"\",\"version\":\"17\"}]}";
+        static const double cw[16] = { 0.5, -0.25, 0.75, 0.125, -0.5, 1, 0.25, -0.75, 1.5, 0.5, -1, 0.25, 0.3, -0.6, 0.9, 0.1 };
+        static const double cb[4] = { 0.1, -0.2, 0.05, 0.3 };
+        static const double fw[16] = { 1, -1, 0.5, 2, -1.5, 0.25, 0.75, -0.5, 1, 0.5, -0.25, 1.25, -1, 0.5, 0.25, -0.75 };
+        FILE *f = fopen(onnx, "w");
+        if (f) {
+            fputs(model, f);
+            fclose(f);
+        }
+        back = ann_import_onnx(onnx);
+        real in[18], out[1];
+        for (int i = 0; i < 18; i++) in[i] = (real)sin(1.3 * i + 0.2);
+        // reference: filters 0-1 read channel 0, filters 2-3 channel 1
+        double expected = 0.5;
+        for (int fi = 0; fi < 4; fi++)
+            for (int oh = 0; oh < 2; oh++)
+                for (int ow = 0; ow < 2; ow++) {
+                    double v = cb[fi];
+                    for (int i = 0; i < 2; i++)
+                        for (int j = 0; j < 2; j++)
+                            v += cw[fi * 4 + i * 2 + j] * in[(fi / 2) * 9 + (oh + i) * 3 + ow + j];
+                    expected += fw[(fi * 2 + oh) * 2 + ow] * (v > 0.0 ? v : 0.0);
+                }
+        int close = back != NULL && ann_get_layer_groups(back, 1) == 2;
+        if (close) {
+            ann_predict(back, in, out);
+            close = fabs(out[0] - expected) < 1e-5;
+        }
+        TESTEX("External model with a grouped Conv imports and matches a reference", close);
         ann_free_network(back);
         remove(onnx);
     }

@@ -352,6 +352,8 @@ Function | Description
 -------- | -----------
 ann_add_input | input layer with an image shape (channels, height, width)
 ann_add_conv2d | 2-D convolution with square kernels, stride and zero padding
+ann_add_conv2d_grouped | the same, with the channels and filters split into groups
+ann_add_depthwise_conv2d | depthwise convolution: each channel convolved with its own filters
 ann_add_maxpool2d | 2-D max pooling per channel
 ann_add_flatten | reshape an image to a vector (optional: dense layers flatten their input)
 ann_add_upsample2d | nearest-neighbour upsampling by an integer scale, per channel
@@ -390,6 +392,23 @@ PyTorch); `ann_predict` and evaluation use the running averages. They are
 saved with the model. A layer's bias before a batch norm is redundant, since
 the batch norm subtracts the mean. Quantization and C export fold each batch
 norm into the conv or dense layer before it, which must have no activation.
+
+Depthwise separable convolutions (as in MobileNet) split a convolution into
+a depthwise one, which filters each channel on its own, and a 1x1 one, which
+mixes the channels: several times fewer weights and multiply-adds for about
+the same accuracy, which suits int8 models on small devices.
+`ann_add_conv2d_grouped` is the general form (`groups` = C is depthwise):
+
+```c
+ann_add_conv2d(net, 32, 3, 1, 1, ACTIVATION_NULL);             // 32x28x28
+ann_add_batchnorm(net, ACTIVATION_RELU);
+ann_add_depthwise_conv2d(net, 1, 3, 2, 1, ACTIVATION_NULL);    // 32x14x14: 9 weights per channel
+ann_add_batchnorm(net, ACTIVATION_RELU);
+ann_add_conv2d(net, 64, 1, 1, 0, ACTIVATION_NULL);             // 64x14x14: mixes the channels
+ann_add_batchnorm(net, ACTIVATION_RELU);
+ann_add_global_avgpool2d(net);
+ann_add_layer(net, 10, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+```
 
 Upsampling and reshape layers build decoders, e.g. a convolutional
 autoencoder trained to reproduce (or denoise) its input:

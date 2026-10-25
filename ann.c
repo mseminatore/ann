@@ -701,7 +701,7 @@ static Tensor tensor_view(real *values, int rows, int cols)
 //------------------------------
 // Conv2D settings, stored in config[]
 //------------------------------
-enum { CONV_KERNEL, CONV_STRIDE, CONV_PADDING, CONV_CONFIG_COUNT };
+enum { CONV_KERNEL, CONV_STRIDE, CONV_PADDING, CONV_GROUPS, CONV_CONFIG_COUNT };
 enum { POOL_SIZE, POOL_STRIDE, POOL_CONFIG_COUNT };
 enum { UPSAMPLE_SCALE, UPSAMPLE_CONFIG_COUNT };
 
@@ -730,30 +730,48 @@ static int ensure_rows(PTensor *t, int rows, int cols)
 }
 
 //------------------------------
-// Conv2D: check settings and shape, allocate W [F x C*k*k], b [1 x F]
-// and one sample's column gradient [C*k*k x OH*OW]. The forward pass keeps
-// each sample's im2col columns in t_scratch[0] (one row per sample, or one
-// batch matrix; see conv_job) for the backward pass; it grows to the batch
-// size on first use.
+// Conv2D: check settings and shape, allocate W [F x C/G*k*k] (G groups;
+// group g's F/G filters read its C/G channels), b [1 x F] and one sample's
+// column gradient [C*k*k x OH*OW]. The im2col columns cover every channel,
+// so group g's are rows [g*C/G*k*k, (g+1)*C/G*k*k) and each product is one
+// GEMM per group (conv_group_gemm). The forward pass keeps each sample's
+// columns in t_scratch[0] (one row per sample, or one batch matrix; see
+// conv_job) for the backward pass; it grows to the batch size on first use.
 //------------------------------
+static int conv_groups(const Layer *layer)
+{
+	return layer->config[CONV_GROUPS];
+}
+
+// rows of the im2col columns: every input channel's k*k window
+static int conv_col_rows(const Layer *layer)
+{
+	return layer->in_shape.c * layer->config[CONV_KERNEL] * layer->config[CONV_KERNEL];
+}
+
 static int conv_setup(PNetwork pnet, int layer)
 {
 	PLayer cur = &pnet->layers[layer];
 	Layer_shape in = cur->in_shape;
 	int k = cur->config[CONV_KERNEL], s = cur->config[CONV_STRIDE], p = cur->config[CONV_PADDING];
 
-	if (cur->activation == ACTIVATION_SOFTMAX ||
+	// files written before groups existed have none: one group
+	if (cur->config[CONV_GROUPS] == 0)
+		cur->config[CONV_GROUPS] = 1;
+	int groups = cur->config[CONV_GROUPS];
+
+	if (cur->activation == ACTIVATION_SOFTMAX || groups < 1 || in.c % groups != 0 || cur->shape.c % groups != 0 ||
 		window_output_size(in.h, k, s, p) != cur->shape.h ||
 		window_output_size(in.w, k, s, p) != cur->shape.w || cur->shape.h < 1 || cur->shape.w < 1)
 		return ERR_INVALID;
 
-	int patch = in.c * k * k;
+	int col_rows = conv_col_rows(cur);
 	int positions = cur->shape.h * cur->shape.w;
 
-	if (add_param(cur, cur->shape.c, patch, 1) != ERR_OK ||
+	if (add_param(cur, cur->shape.c, col_rows / groups, 1) != ERR_OK ||
 		add_param(cur, 1, cur->shape.c, 0) != ERR_OK ||
-		!(cur->t_scratch[0] = tensor_zeros(1, patch * positions)) ||
-		!(cur->t_scratch[1] = tensor_zeros(patch, positions)))
+		!(cur->t_scratch[0] = tensor_zeros(1, col_rows * positions)) ||
+		!(cur->t_scratch[1] = tensor_zeros(col_rows, positions)))
 	{
 		free_layer_params(cur);
 		return ERR_ALLOC;
@@ -761,12 +779,75 @@ static int conv_setup(PNetwork pnet, int layer)
 	return ERR_OK;
 }
 
+// fans of W [F, C/G, k, k], as PyTorch counts them
 static void conv_init_weights(PNetwork pnet, int layer, Weight_init_type init_type)
 {
 	PLayer cur = &pnet->layers[layer];
 	int kk = cur->config[CONV_KERNEL] * cur->config[CONV_KERNEL];
 	init_weight_bias(pnet, cur->params[0].value, cur->params[1].value,
-	                 cur->in_shape.c * kk, cur->shape.c * kk, init_type);
+	                 cur->in_shape.c / conv_groups(cur) * kk, cur->shape.c * kk, init_type);
+}
+
+//------------------------------
+// One of a conv layer's products, a GEMM per group on row blocks of its
+// operands (each a whole matrix: every row is contiguous and full width):
+//   CONV_FORWARD:     C [F x n] = W [F x P] * A [G*P x n]          (Y = W * cols)
+//   CONV_WEIGHT_GRAD: C [F x P] += A [F x n] * B [G*P x n]^T, for filters
+//                     [f0, f1) only (dW += dZ * cols^T)
+//   CONV_COLUMN_GRAD: C [G*P x n] = W^T [P x F] * A [F x n]       (dcols = W^T * dZ)
+// with P = C/G*k*k. The GEMMs' shapes depend only on the layer (and, for
+// the weight gradient, on the filter block), never on the thread count.
+//------------------------------
+enum { CONV_FORWARD, CONV_WEIGHT_GRAD, CONV_COLUMN_GRAD };
+
+static Tensor row_block(const Tensor *t, int row0, int rows)
+{
+	return tensor_view(t->values + (size_t)row0 * t->cols, rows, t->cols);
+}
+
+static void conv_group_gemm(const Layer *layer, int product, Tensor *a, Tensor *b, Tensor *c, int f0, int f1)
+{
+	const PTensor W = layer->params[0].value;
+	int groups = conv_groups(layer), fg = layer->shape.c / groups, patch = W->cols;
+
+	if (product == CONV_WEIGHT_GRAD)
+	{
+		// filters [f0, f1), split where they cross into the next group
+		while (f0 < f1)
+		{
+			int g = f0 / fg, end = (g + 1) * fg < f1 ? (g + 1) * fg : f1;
+			Tensor dz = row_block(a, f0, end - f0), cols = row_block(b, g * patch, patch);
+			Tensor dw = row_block(c, f0, end - f0);
+			tensor_gemm_transB((real)1.0, &dz, &cols, (real)1.0, &dw);
+			f0 = end;
+		}
+		return;
+	}
+
+	if (groups == 1)
+	{
+		if (product == CONV_FORWARD)
+			tensor_gemm((real)1.0, W, a, (real)0.0, c);
+		else
+			tensor_gemm_transA((real)1.0, W, a, (real)0.0, c);
+		return;
+	}
+
+	Tensor whole = tensor_view(W->values, W->rows, W->cols);
+	for (int g = 0; g < groups; g++)
+	{
+		Tensor w = row_block(&whole, g * fg, fg);
+		if (product == CONV_FORWARD)
+		{
+			Tensor cols = row_block(a, g * patch, patch), y = row_block(c, g * fg, fg);
+			tensor_gemm((real)1.0, &w, &cols, (real)0.0, &y);
+		}
+		else
+		{
+			Tensor dz = row_block(a, g * fg, fg), dcols = row_block(c, g * patch, patch);
+			tensor_gemm_transA((real)1.0, &w, &dz, (real)0.0, &dcols);
+		}
+	}
 }
 
 //------------------------------
@@ -887,15 +968,15 @@ typedef struct {
 // one sample's im2col columns, kept from the forward pass
 static Tensor conv_columns(const Layer *layer, int b)
 {
-	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
-	return tensor_view(layer->t_scratch[0]->values + (size_t)b * patch * positions, patch, positions);
+	int col_rows = conv_col_rows(layer), positions = layer->shape.h * layer->shape.w;
+	return tensor_view(layer->t_scratch[0]->values + (size_t)b * col_rows * positions, col_rows, positions);
 }
 
 // one sample's column gradient
 static Tensor conv_column_grads(const Layer *layer, int b)
 {
-	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
-	return tensor_view(layer->t_scratch[1]->values + (size_t)b * patch * positions, patch, positions);
+	int col_rows = conv_col_rows(layer), positions = layer->shape.h * layer->shape.w;
+	return tensor_view(layer->t_scratch[1]->values + (size_t)b * col_rows * positions, col_rows, positions);
 }
 
 // add each filter's bias to its row of a sample's output
@@ -922,7 +1003,7 @@ static void conv_forward_samples(void *arg, int begin, int end)
 		Tensor col = conv_columns(layer, b);
 		conv_im2col(layer, job->x + b * in_nodes, col.values, col.cols);
 		Tensor y = tensor_view(job->y + b * layer->node_count, layer->shape.c, col.cols);
-		tensor_gemm((real)1.0, layer->params[0].value, &col, (real)0.0, &y);
+		conv_group_gemm(layer, CONV_FORWARD, &col, NULL, &y, 0, 0);
 		conv_add_bias(layer, y.values);
 	}
 }
@@ -967,13 +1048,11 @@ static void conv_filter_grads(void *arg, int begin, int end)
 		{
 			PTensor dW = layer->params[0].grad;
 			Tensor col = conv_columns(layer, b);
+			Tensor dz_all = tensor_view((real *)dz, layer->shape.c, positions);
+			Tensor dW_all = tensor_view(dW->values, dW->rows, dW->cols);
 			for (int f = first; f < last; f += block)
-			{
-				int count = last - f < block ? last - f : block;
-				Tensor dz_rows = tensor_view((real *)dz + f * positions, count, positions);
-				Tensor dW_rows = tensor_view(dW->values + f * dW->cols, count, dW->cols);
-				tensor_gemm_transB((real)1.0, &dz_rows, &col, (real)1.0, &dW_rows);
-			}
+				conv_group_gemm(layer, CONV_WEIGHT_GRAD, &dz_all, &col, &dW_all, f,
+				                last - f < block ? last : f + block);
 		}
 		for (int f = first; f < last; f++)
 		{
@@ -995,7 +1074,7 @@ static void conv_input_grads(void *arg, int begin, int end)
 	{
 		Tensor dcol = conv_column_grads(layer, b);
 		Tensor dz = tensor_view(job->y + b * layer->node_count, layer->shape.c, dcol.cols);
-		tensor_gemm_transA((real)1.0, layer->params[0].value, &dz, (real)0.0, &dcol);
+		conv_group_gemm(layer, CONV_COLUMN_GRAD, &dz, NULL, &dcol, 0, 0);
 		memset(job->dx + b * in_nodes, 0, in_nodes * sizeof(real));
 		conv_col2im(layer, dcol.values, dcol.cols, job->dx + b * in_nodes);
 	}
@@ -1010,20 +1089,20 @@ static void conv_input_grads(void *arg, int begin, int end)
 //------------------------------
 static Tensor conv_batch_columns(const Layer *layer, int rows)
 {
-	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
-	return tensor_view(layer->t_scratch[0]->values, patch, rows * positions);
+	int col_rows = conv_col_rows(layer), positions = layer->shape.h * layer->shape.w;
+	return tensor_view(layer->t_scratch[0]->values, col_rows, rows * positions);
 }
 
 static Tensor conv_batch_column_grads(const Layer *layer, int rows)
 {
-	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
-	return tensor_view(layer->t_scratch[1]->values, patch, rows * positions);
+	int col_rows = conv_col_rows(layer), positions = layer->shape.h * layer->shape.w;
+	return tensor_view(layer->t_scratch[1]->values, col_rows, rows * positions);
 }
 
 static Tensor conv_batch_outputs(const Layer *layer, int rows)
 {
-	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
-	return tensor_view(layer->t_scratch[1]->values + (size_t)patch * rows * positions, layer->shape.c,
+	int col_rows = conv_col_rows(layer), positions = layer->shape.h * layer->shape.w;
+	return tensor_view(layer->t_scratch[1]->values + (size_t)col_rows * rows * positions, layer->shape.c,
 	                   rows * positions);
 }
 
@@ -1097,7 +1176,7 @@ static void conv_batch_input_grads(void *arg, int begin, int end)
 //------------------------------
 static void conv_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 {
-	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
+	int patch = conv_col_rows(layer), positions = layer->shape.h * layer->shape.w;
 	conv_job job;
 
 	job.layer = layer;
@@ -1116,7 +1195,7 @@ static void conv_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 			return;
 		ann_parallel_for(rows, 1, conv_batch_im2col, &job);
 		Tensor cols = conv_batch_columns(layer, rows), out = conv_batch_outputs(layer, rows);
-		tensor_gemm((real)1.0, layer->params[0].value, &cols, (real)0.0, &out);
+		conv_group_gemm(layer, CONV_FORWARD, &cols, NULL, &out, 0, 0);
 		ann_parallel_for(rows, 1, conv_batch_output, &job);
 		return;
 	}
@@ -1131,7 +1210,7 @@ static void conv_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 //------------------------------
 static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTensor dX, int rows)
 {
-	int patch = layer->params[0].value->cols, positions = layer->shape.h * layer->shape.w;
+	int patch = conv_col_rows(layer), positions = layer->shape.h * layer->shape.w;
 	conv_job job;
 	(void)X;
 
@@ -1148,12 +1227,13 @@ static void conv_backward(PLayer layer, const PTensor X, const PTensor dZ, PTens
 		// the forward pass sized the batch matrices
 		Tensor cols = conv_batch_columns(layer, rows), dz = conv_batch_outputs(layer, rows);
 		ann_parallel_for(rows, 1, conv_batch_gather_grads, &job);
-		tensor_gemm_transB((real)1.0, &dz, &cols, (real)1.0, layer->params[0].grad);
+		Tensor dW = tensor_view(layer->params[0].grad->values, layer->params[0].grad->rows, layer->params[0].grad->cols);
+		conv_group_gemm(layer, CONV_WEIGHT_GRAD, &dz, &cols, &dW, 0, layer->shape.c);
 		ann_parallel_for(conv_filter_blocks(layer), 1, conv_filter_grads, &job);
 		if (!dX)
 			return;
 		Tensor dcols = conv_batch_column_grads(layer, rows);
-		tensor_gemm_transA((real)1.0, layer->params[0].value, &dz, (real)0.0, &dcols);
+		conv_group_gemm(layer, CONV_COLUMN_GRAD, &dz, NULL, &dcols, 0, 0);
 		ann_parallel_for(rows, 1, conv_batch_input_grads, &job);
 		return;
 	}
@@ -2998,6 +3078,15 @@ int ann_add_input(PNetwork pnet, int channels, int height, int width)
 //------------------------------
 int ann_add_conv2d(PNetwork pnet, int filters, int kernel_size, int stride, int padding, Activation_type activation)
 {
+	return ann_add_conv2d_grouped(pnet, filters, kernel_size, stride, padding, 1, activation);
+}
+
+//------------------------------
+// add a grouped 2-D convolution layer
+//------------------------------
+int ann_add_conv2d_grouped(PNetwork pnet, int filters, int kernel_size, int stride, int padding, int groups,
+                           Activation_type activation)
+{
 	const Layer_shape *in = last_shape(pnet);
 	Layer_shape shape;
 	int config[CONV_CONFIG_COUNT];
@@ -3005,18 +3094,40 @@ int ann_add_conv2d(PNetwork pnet, int filters, int kernel_size, int stride, int 
 	config[CONV_KERNEL] = kernel_size;
 	config[CONV_STRIDE] = stride;
 	config[CONV_PADDING] = padding;
+	config[CONV_GROUPS] = groups;
 	shape.c = filters;
 	shape.h = in ? window_output_size(in->h, kernel_size, stride, padding) : 1;
 	shape.w = in ? window_output_size(in->w, kernel_size, stride, padding) : 1;
 
 	// a window that does not fit gives a zero size (add_layer rejects a conv
-	// layer in an empty network, and filters < 1)
-	if (in && (shape.h < 1 || shape.w < 1))
+	// layer in an empty network, and filters < 1; conv_setup bad groups)
+	if (in && (shape.h < 1 || shape.w < 1 || groups < 1))
 	{
-		invoke_error_callback(ERR_INVALID, "ann_add_conv2d");
+		invoke_error_callback(ERR_INVALID, groups == 1 ? "ann_add_conv2d" : "ann_add_conv2d_grouped");
 		return ERR_INVALID;
 	}
 	return add_layer(pnet, LAYER_KIND_CONV2D, shape, config, CONV_CONFIG_COUNT, LAYER_HIDDEN, activation);
+}
+
+//------------------------------
+// add a depthwise 2-D convolution layer: a group per input channel
+//------------------------------
+int ann_add_depthwise_conv2d(PNetwork pnet, int depth_multiplier, int kernel_size, int stride, int padding,
+                             Activation_type activation)
+{
+	const Layer_shape *in = last_shape(pnet);
+
+	if (!pnet)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_add_depthwise_conv2d");
+		return ERR_NULL_PTR;
+	}
+	if (!in || depth_multiplier < 1 || in->c > INT_MAX / depth_multiplier)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_add_depthwise_conv2d");
+		return ERR_INVALID;
+	}
+	return ann_add_conv2d_grouped(pnet, in->c * depth_multiplier, kernel_size, stride, padding, in->c, activation);
 }
 
 //------------------------------
@@ -4452,6 +4563,16 @@ int ann_get_layer_settings(const PNetwork pnet, int layer, int *size, int *strid
 }
 
 //------------------------------
+// get a conv layer's number of groups
+//------------------------------
+int ann_get_layer_groups(const PNetwork pnet, int layer)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return 0;
+	return pnet->layers[layer].kind == LAYER_KIND_CONV2D ? conv_groups(&pnet->layers[layer]) : 1;
+}
+
+//------------------------------
 // set the loss function
 //------------------------------
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
@@ -4871,7 +4992,10 @@ static int save_network(const PNetwork pnet, const char *filename, int binary, c
 			continue;
 		}
 
+		// a conv layer with one group writes no groups setting, so older libann reads it
 		int config_count = layer_ops(cur)->config_count;
+		if (cur->kind == LAYER_KIND_CONV2D && conv_groups(cur) == 1)
+			config_count = CONV_GROUPS;
 		ok = write_int(fptr, binary, cur->kind) &&
 		     write_int(fptr, binary, cur->layer_type) &&
 		     write_int(fptr, binary, cur->activation) &&
@@ -5358,7 +5482,7 @@ static void conv_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, i
 	int w_dims[4];
 	int b_dims[1];
 	w_dims[0] = cur->shape.c;
-	w_dims[1] = cur->in_shape.c;
+	w_dims[1] = cur->in_shape.c / conv_groups(cur);
 	w_dims[2] = k;
 	w_dims[3] = k;
 	b_dims[0] = cur->shape.c;
@@ -5389,7 +5513,8 @@ static void conv_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, i
 }
 
 //-----------------------------------------------
-// Conv ONNX node: Conv(input, weight_N, bias_N) with kernel_shape, strides, pads
+// Conv ONNX node: Conv(input, weight_N, bias_N) with kernel_shape, strides,
+// pads, and group when there is more than one
 //-----------------------------------------------
 static void conv_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const char *input,
                             char *output, size_t output_size, int *first)
@@ -5409,7 +5534,10 @@ static void conv_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const ch
 	fprintf(fptr, "        \"output\": [\"%s\"],\n", output);
 	fprintf(fptr, "        \"attribute\": [{\"name\": \"kernel_shape\", \"type\": 7, \"ints\": [%d, %d]}, "
 	              "{\"name\": \"strides\", \"type\": 7, \"ints\": [%d, %d]}, "
-	              "{\"name\": \"pads\", \"type\": 7, \"ints\": [%d, %d, %d, %d]}]\n", k, k, st, st, p, p, p, p);
+	              "{\"name\": \"pads\", \"type\": 7, \"ints\": [%d, %d, %d, %d]}", k, k, st, st, p, p, p, p);
+	if (conv_groups(cur) > 1)
+		fprintf(fptr, ", {\"name\": \"group\", \"type\": 2, \"i\": %d}", conv_groups(cur));
+	fprintf(fptr, "]\n");
 	fprintf(fptr, "      }");
 }
 
@@ -6264,7 +6392,7 @@ PNetwork ann_import_onnx(const char *filename)
 
 		PLayer prev = &pnet->layers[pnet->layer_count - 1];
 		Layer_kind kind;
-		int units = 0, kernel = 0, stride = 1, pad = 0;
+		int units = 0, kernel = 0, stride = 1, pad = 0, groups = 1;
 		int dims4[4] = {0, 0, 0, 0};	// Reshape's [batch, C, H, W]
 		int transpose = 0;	// dense weights stored [in, out] (MatMul layout)
 		JsonValue *weight = NULL, *bias = NULL;
@@ -6336,23 +6464,19 @@ PNetwork ann_import_onnx(const char *filename)
 		else if (strcmp(op, "Conv") == 0)
 		{
 			JsonValue *group = onnx_attribute(node, "group");
-			int groups = 1;
 			if (group && !onnx_int(onnx_get(group, "i"), &groups))
 				groups = 0;
-			if (groups != 1)
-			{
-				error = "ann_import_onnx: grouped convolutions are not supported";
-				goto fail;
-			}
 			int dims[4];
 			weight = onnx_initializer(graph, onnx_io(node, "input", 1));
 			bias = onnx_initializer(graph, onnx_io(node, "input", 2));
-			if (!image || onnx_dims(weight, dims, 4) != 4 || dims[1] != prev->shape.c || dims[2] != dims[3] ||
+			if (!image || groups < 1 || onnx_dims(weight, dims, 4) != 4 || dims[0] % groups != 0 ||
+				dims[1] > INT_MAX / groups || dims[1] * groups != prev->shape.c || dims[2] != dims[3] ||
 				!onnx_uniform_ints(node, "kernel_shape", dims[2], &kernel) || kernel != dims[2] ||
 				!onnx_uniform_ints(node, "strides", 1, &stride) || !onnx_uniform_ints(node, "pads", 0, &pad) ||
 				!onnx_ints_all(node, "dilations", 1) || !onnx_string_is(node, "auto_pad", "NOTSET", "Tk9UU0VU"))
 			{
-				error = "ann_import_onnx: unsupported Conv (needs square kernels, equal strides and pads, no dilation)";
+				error = "ann_import_onnx: unsupported Conv (needs square kernels, equal strides and pads, no dilation, "
+				        "and groups that divide the channels)";
 				goto fail;
 			}
 			kind = LAYER_KIND_CONV2D;
@@ -6557,7 +6681,7 @@ PNetwork ann_import_onnx(const char *filename)
 		switch (kind)
 		{
 		case LAYER_KIND_DENSE:		err = ann_add_layer(pnet, units, LAYER_HIDDEN, act); break;
-		case LAYER_KIND_CONV2D:		err = ann_add_conv2d(pnet, units, kernel, stride, pad, act); break;
+		case LAYER_KIND_CONV2D:		err = ann_add_conv2d_grouped(pnet, units, kernel, stride, pad, groups, act); break;
 		case LAYER_KIND_MAXPOOL2D:	err = ann_add_maxpool2d(pnet, kernel, stride); break;
 		case LAYER_KIND_UPSAMPLE2D:	err = ann_add_upsample2d(pnet, kernel); break;
 		case LAYER_KIND_RESHAPE:	err = ann_add_reshape(pnet, dims4[1], dims4[2], dims4[3]); break;

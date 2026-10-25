@@ -12,8 +12,8 @@ ann_export_onnx(pnet, "model.onnx.json");
 
 - Outputs JSON (not binary protobuf) - see [Converting to binary ONNX](#converting-to-binary-onnx)
 - Each dense layer becomes: `MatMul` → `Add` → `Activation` nodes
-- Convolutional networks export `Conv` (weights `[F, C, k, k]`, `kernel_shape`,
-  `strides`, `pads`), `MaxPool` and `Flatten` nodes with a `[batch, C, H, W]`
+- Convolutional networks export `Conv` (weights `[F, C/groups, k, k]`, `kernel_shape`,
+  `strides`, `pads`, and `group` for grouped and depthwise convs), `MaxPool` and `Flatten` nodes with a `[batch, C, H, W]`
   input; a `Flatten` is inserted before a dense layer that receives an image
 - Upsampling layers export `Resize` (`mode = nearest`, `asymmetric`
   coordinates, `floor` rounding, as PyTorch writes `nn.Upsample`) with a
@@ -58,7 +58,7 @@ ONNX node | libann layer
 --------- | ------------
 `MatMul` (+ `Add` of a bias) | dense layer (weights `[in, out]`)
 `Gemm` | dense layer (`transB = 1` as written by PyTorch's `Linear`, or `transB = 0`; `alpha = beta = 1`)
-`Conv` | conv layer (square kernel, equal strides and pads, no dilation or groups; bias optional)
+`Conv` | conv layer (square kernel, equal strides and pads, no dilation; `group` for grouped and depthwise convs; bias optional)
 `MaxPool` | max pooling layer (square window, equal strides, no padding, `ceil_mode = 0`)
 `GlobalAveragePool` | global average pooling layer (as PyTorch writes `nn.AdaptiveAvgPool2d(1)`)
 `BatchNormalization` | batch norm layer (inference form: constant `[C]` scale, bias, mean and var, one output; any epsilon, which is moved into the variance since libann's is 1e-5), on `[batch, C]` or `[batch, C, H, W]`
@@ -91,7 +91,7 @@ ann_export_onnx(net, "model.onnx.json");                // 1.1 file
 - Reads JSON, not binary `.onnx` files: convert with `json_format.MessageToJson(onnx.load("model.onnx"))`
 - Anything libann can't reproduce exactly is rejected with `NULL` and an error
   callback message: branching graphs, other ops (e.g. `AveragePool`,
-  `ConvTranspose`), `BatchNormalization` in training form, dilated or grouped convolutions,
+  `ConvTranspose`), `BatchNormalization` in training form, dilated convolutions,
   padded or `ceil_mode` pooling, linear or fractional `Resize`, a `Reshape`
   whose shape is computed in the graph (`Shape` → `Gather` → `Concat`), the
   exact (erf) `Gelu`, or an activation after a pool/flatten/upsample/reshape

@@ -1,0 +1,137 @@
+#version 450
+#include "common.glsl"
+// Grouped convolution (G groups; depthwise when G = C), computed directly: filter f reads
+// channels [g*C/G, (g+1)*C/G) for g = f / (F/G), and W is [F][C/G][K][K]. Three modes:
+//   0 forward:      one invocation per output sums its window, adds the bias and activates
+//                   (z gets the values before activation when save_z is set); y is
+//                   [batch][F][OH][OW]
+//   1 input grad:   dx[b][c][ih][iw] = sum of dz_rows * W over the group's filters and the
+//                   outputs whose windows read it
+//   2 weight grad:  a workgroup per (p, f), p = (c, i, j) of the filter's group or C/G*K*K
+//                   for the bias, sums dz_rows[r][f] times the input p reads for row r, over
+//                   every row (batch*OH*OW), into dW[f][p] or db[f]
+// dz_rows is [batch*OH*OW x F] (conv_grad_rows.comp). Bindings by mode: forward x, w, bias,
+// y, z; input grad dz_rows, w, dx; weight grad dz_rows, x, dw, db.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Buf0 { float b0[]; };
+layout(std430, binding = 1) buffer Buf1 { float b1[]; };
+layout(std430, binding = 2) buffer Buf2 { float b2[]; };
+layout(std430, binding = 3) buffer Buf3 { float b3[]; };
+layout(std430, binding = 4) buffer Buf4 { float b4[]; };
+
+layout(push_constant) uniform Params {
+    WindowDims d;
+    uint groups, mode, act, save_z;
+} pc;
+
+shared float part[256];
+
+void main()
+{
+    WindowDims d = pc.d;
+    uint kk = d.K * d.K, cg = d.C / pc.groups, fg = d.F / pc.groups;
+
+    if (pc.mode == 0u)
+    {
+        GRID_LOOP(o, d.batch * d.F * d.OH * d.OW)
+        {
+            uint ow = o % d.OW, t = o / d.OW;
+            uint oh = t % d.OH;
+            t /= d.OH;
+            uint f = t % d.F, b = t / d.F, c0 = f / fg * cg;
+            int ih0 = int(oh * d.S) - int(d.P), iw0 = int(ow * d.S) - int(d.P);
+            float s = 0.0;
+            for (uint c = 0u; c < cg; c++)
+            {
+                uint xs = (b * d.C + c0 + c) * d.H * d.W, wf = (f * cg + c) * kk;
+                for (uint i = 0u; i < d.K; i++)
+                {
+                    int ih = ih0 + int(i);
+                    if (ih < 0 || ih >= int(d.H))
+                        continue;
+                    for (uint j = 0u; j < d.K; j++)
+                    {
+                        int iw = iw0 + int(j);
+                        if (iw >= 0 && iw < int(d.W))
+                            s += b0[xs + uint(ih) * d.W + uint(iw)] * b1[wf + i * d.K + j];
+                    }
+                }
+            }
+            float v = s + b2[f];
+            if (pc.save_z != 0u)
+                b4[o] = v;
+            b3[o] = activate(v, pc.act);
+        }
+    }
+    else if (pc.mode == 1u)
+    {
+        GRID_LOOP(o, d.batch * d.C * d.H * d.W)
+        {
+            uint iw = o % d.W, t = o / d.W;
+            uint ih = t % d.H;
+            t /= d.H;
+            uint c = t % d.C, b = t / d.C, f0 = c / cg * fg, ci = c % cg;
+            float s = 0.0;
+            for (uint i = 0u; i < d.K; i++)
+            {
+                int ty = int(ih + d.P) - int(i);
+                if (ty < 0)
+                    continue;
+                uint oh = uint(ty);
+                if (d.S > 1u) { if (oh % d.S != 0u) continue; oh /= d.S; }
+                if (oh >= d.OH)
+                    continue;
+                for (uint j = 0u; j < d.K; j++)
+                {
+                    int tx = int(iw + d.P) - int(j);
+                    if (tx < 0)
+                        continue;
+                    uint ow = uint(tx);
+                    if (d.S > 1u) { if (ow % d.S != 0u) continue; ow /= d.S; }
+                    if (ow >= d.OW)
+                        continue;
+                    uint g = ((b * d.OH + oh) * d.OW + ow) * d.F;
+                    for (uint f = f0; f < f0 + fg; f++)
+                        s += b0[g + f] * b1[(f * cg + ci) * kk + i * d.K + j];
+                }
+            }
+            b2[o] = s;
+        }
+    }
+    else
+    {
+        uint t = gl_LocalInvocationID.x, P = cg * kk, p = gl_WorkGroupID.x, f = gl_WorkGroupID.y;
+        uint c = f / fg * cg + p / kk, ki = (p % kk) / d.K, kj = p % d.K;
+        uint positions = d.OH * d.OW, rows = d.batch * positions;
+        float s = 0.0;
+        for (uint r = t; r < rows; r += 256u)
+        {
+            float v = 1.0;
+            if (p < P)
+            {
+                uint b = r / positions, oh = (r % positions) / d.OW, ow = r % d.OW;
+                int ih = int(oh * d.S + ki) - int(d.P), iw = int(ow * d.S + kj) - int(d.P);
+                v = ih >= 0 && ih < int(d.H) && iw >= 0 && iw < int(d.W)
+                    ? b1[((b * d.C + c) * d.H + uint(ih)) * d.W + uint(iw)] : 0.0;
+            }
+            s += b0[r * d.F + f] * v;
+        }
+        part[t] = s;
+        barrier();
+        for (uint w = 128u; w > 0u; w /= 2u)
+        {
+            if (t < w)
+                part[t] += part[t + w];
+            barrier();
+        }
+        if (t == 0u)
+        {
+            if (p < P)
+                b2[f * P + p] += part[0];
+            else
+                b3[f] += part[0];
+        }
+    }
+}

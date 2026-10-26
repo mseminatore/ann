@@ -2572,6 +2572,8 @@ static void encode_optimizer(PNetwork pnet)
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
+        if (l->frozen)
+            continue;	// ann_set_layer_trainable
         for (int i = 0; i < l->param_count; i += 2)
         {
             VkBuf *bufs[8];

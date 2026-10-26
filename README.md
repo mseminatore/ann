@@ -161,6 +161,12 @@ ann_get_layer_activation | get the activation type of a layer
 ann_get_layer_kind | get what a layer computes (`LAYER_KIND_DENSE`, `_CONV2D`, `_MAXPOOL2D`, `_FLATTEN`, `_UPSAMPLE2D`, `_RESHAPE`)
 ann_get_layer_shape | get a layer's output shape (channels, height, width)
 ann_get_layer_settings | get a conv/pool layer's kernel or pool size, stride and padding
+ann_get_layer_param_count | get how many parameter tensors a layer has (weights, bias, ...)
+ann_get_layer_param_shape | get a layer parameter's shape as [rows x cols]
+ann_get_layer_param | copy a layer parameter's values out
+ann_set_layer_param | set a layer parameter's values (pre-trained weights, e.g. GloVe vectors)
+ann_set_layer_trainable | freeze a layer (training leaves it alone) or unfreeze it
+ann_get_layer_trainable | check whether a layer is frozen
 ann_set_num_threads | set how many CPU threads libann uses (0 = default)
 ann_get_num_threads | get the CPU thread count
 ann_get_backend_info | report the BLAS library, GPU backend, thread count and number size of this build
@@ -572,6 +578,43 @@ Key differences from `ann_train_network()`:
 - **Does not reinitialize weights** — safe for fine-tuning loaded/pre-trained models
 - **Single sample training** — pass `batch_size=1` to train on individual examples
 - **`ann_predict()` is safe mid-training** — dropout is automatically disabled during inference
+
+## Layer Parameters and Frozen Layers
+
+Each layer's parameters can be read and set as row-major matrices, e.g. to
+start an embedding from pre-trained word vectors (GloVe, word2vec), or to copy
+layers between networks. `ann_get_layer_param_count` gives how many a layer
+has, in this order: dense and Conv2D the weights then the bias, batch norm
+gamma, beta and the running mean and variance, an embedding its vectors.
+`ann_get_layer_param_shape` gives each one's shape: dense weights
+`[nodes x nodes below]`, Conv2D weights `[filters x channels/groups * kh * kw]`
+(the ONNX layout `[F, C/G, kh, kw]` flattened), an embedding `[vocab x dim]`
+(row `i` is id `i`'s vector), biases and batch norm's tensors `[1 x channels]`.
+
+```c
+// ids 0..vocab-1 from your tokenizer; vectors[i * 100 + k] is word i's GloVe vector
+ann_add_layer(net, 200, LAYER_INPUT, ACTIVATION_NULL);
+ann_add_embedding_masked(net, vocab, 100, 0);
+ann_add_conv1d(net, 64, 5, 1, 2, ACTIVATION_RELU);
+ann_add_global_maxpool2d(net);
+ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+
+ann_set_layer_param(net, 1, 0, vectors, vocab * 100);
+ann_set_layer_trainable(net, 1, 0);         // keep the vectors fixed
+ann_train_network(net, inputs, targets, rows);
+```
+
+A layer given values this way counts as initialized: training starts from them
+instead of randomizing them, and still randomizes the other layers. Reading a
+layer that nothing has initialized yet initializes it first, so it reports the
+values training starts from. Values are
+checked (the count must match, and NaN or infinite values are rejected), and a
+network uploaded to a GPU gets them too. A frozen layer's parameters stay as
+they are through training on the CPU or a GPU; gradients still pass through it
+to the layers below, and a frozen batch norm still updates its running
+statistics. Freezing is not saved with the network. To fine-tune the vectors
+afterwards, unfreeze the layer (`ann_set_layer_trainable(net, 1, 1)`) and train
+a few more epochs at a low learning rate (training again keeps the weights).
 
 # Hyperparameter Tuning
 

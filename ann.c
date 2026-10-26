@@ -2342,6 +2342,42 @@ static const Layer_ops *layer_ops(const Layer *layer)
 //------------------------------
 // initialize the weights
 //------------------------------
+static void init_layer_weights(PNetwork pnet, int layer)
+{
+	Activation_type activation = pnet->layers[layer].activation;
+
+	// Determine initialization strategy
+	Weight_init_type init_type = pnet->weight_init;
+
+	if (init_type == WEIGHT_INIT_AUTO)
+	{
+		// Auto-select based on activation function
+		switch (activation)
+		{
+		case ACTIVATION_RELU:
+		case ACTIVATION_LEAKY_RELU:
+		case ACTIVATION_GELU:
+			init_type = WEIGHT_INIT_HE;
+			break;
+		case ACTIVATION_SIGMOID:
+		case ACTIVATION_TANH:
+		case ACTIVATION_SOFTSIGN:
+		case ACTIVATION_SOFTMAX:
+			init_type = WEIGHT_INIT_XAVIER;
+			break;
+		default:
+			init_type = WEIGHT_INIT_UNIFORM;
+			break;
+		}
+	}
+
+	const Layer_ops *ops = layer_ops(&pnet->layers[layer]);
+	if (ops->init_weights)
+		ops->init_weights(pnet, layer, init_type);
+
+	pnet->layers[layer].weights_set = 1;
+}
+
 static void init_weights(PNetwork pnet)
 {
 	if (!pnet)
@@ -2351,39 +2387,10 @@ static void init_weights(PNetwork pnet)
 	if (pnet->weights_set)
 		return;
 
+	// layers given values by ann_set_layer_param keep them
 	for (int layer = 1; layer < pnet->layer_count; layer++)
-	{
-		Activation_type activation = pnet->layers[layer].activation;
-
-		// Determine initialization strategy
-		Weight_init_type init_type = pnet->weight_init;
-
-		if (init_type == WEIGHT_INIT_AUTO)
-		{
-			// Auto-select based on activation function
-			switch (activation)
-			{
-			case ACTIVATION_RELU:
-			case ACTIVATION_LEAKY_RELU:
-			case ACTIVATION_GELU:
-				init_type = WEIGHT_INIT_HE;
-				break;
-			case ACTIVATION_SIGMOID:
-			case ACTIVATION_TANH:
-			case ACTIVATION_SOFTSIGN:
-			case ACTIVATION_SOFTMAX:
-				init_type = WEIGHT_INIT_XAVIER;
-				break;
-			default:
-				init_type = WEIGHT_INIT_UNIFORM;
-				break;
-			}
-		}
-
-		const Layer_ops *ops = layer_ops(&pnet->layers[layer]);
-		if (ops->init_weights)
-			ops->init_weights(pnet, layer, init_type);
-	}
+		if (!pnet->layers[layer].weights_set)
+			init_layer_weights(pnet, layer);
 
 	pnet->weights_set = 1;
 }
@@ -3105,6 +3112,8 @@ static void clip_gradients(PNetwork pnet)
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PLayer cur = &pnet->layers[layer];
+		if (cur->frozen)		// ann_set_layer_trainable
+			continue;
 		for (int p = 0; p < cur->param_count; p++)
 		{
 			if (!cur->params[p].state)
@@ -3131,6 +3140,8 @@ static void apply_regularization(PNetwork pnet)
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PLayer cur = &pnet->layers[layer];
+		if (cur->frozen)
+			continue;
 		for (int p = 0; p < cur->param_count; p++)
 		{
 			if (!cur->params[p].regularize)
@@ -3248,6 +3259,8 @@ static void optimize_sgd(PNetwork pnet)
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PLayer cur = &pnet->layers[layer];
+		if (cur->frozen)
+			continue;
 		for (int p = 0; p < cur->param_count; p++)
 		{
 			// W = W + n * gradients
@@ -3278,6 +3291,8 @@ static void optimize_momentum(PNetwork pnet)
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PLayer cur = &pnet->layers[layer];
+		if (cur->frozen)
+			continue;
 		for (int p = 0; p < cur->param_count; p++)
 		{
 			Layer_param *param = &cur->params[p];
@@ -3311,6 +3326,8 @@ static void optimize_adagrad(PNetwork pnet)
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PLayer cur = &pnet->layers[layer];
+		if (cur->frozen)
+			continue;
 		for (int p = 0; p < cur->param_count; p++)
 		{
 			if (cur->params[p].state)
@@ -3341,6 +3358,8 @@ static void optimize_rmsprop(PNetwork pnet)
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PLayer cur = &pnet->layers[layer];
+		if (cur->frozen)
+			continue;
 		for (int p = 0; p < cur->param_count; p++)
 		{
 			if (cur->params[p].state)
@@ -3376,6 +3395,8 @@ static void optimize_adam(PNetwork pnet)
 	for (int layer = 1; layer < pnet->layer_count; layer++)
 	{
 		PLayer cur = &pnet->layers[layer];
+		if (cur->frozen)
+			continue;
 		for (int p = 0; p < cur->param_count; p++)
 		{
 			if (cur->params[p].state)
@@ -5180,6 +5201,112 @@ int ann_get_layer_masked(const PNetwork pnet, int layer)
 	for (int i = 1; i <= layer; i++)
 		masked = mask_follows(&pnet->layers[i], masked);
 	return masked;
+}
+
+//------------------------------
+// a layer's parameter tensor, or NULL for a bad layer or index
+//------------------------------
+static PTensor layer_param(const PNetwork pnet, int layer, int index)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return NULL;
+	if (index < 0 || index >= pnet->layers[layer].param_count)
+		return NULL;
+	return pnet->layers[layer].params[index].value;
+}
+
+int ann_get_layer_param_count(const PNetwork pnet, int layer)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return -1;
+	return pnet->layers[layer].param_count;
+}
+
+int ann_get_layer_param_shape(const PNetwork pnet, int layer, int index, int *rows, int *cols)
+{
+	if (!pnet || !rows || !cols)
+		return ERR_NULL_PTR;
+
+	PTensor t = layer_param(pnet, layer, index);
+	if (!t)
+		return ERR_INVALID;
+
+	*rows = t->rows;
+	*cols = t->cols;
+	return ERR_OK;
+}
+
+int ann_get_layer_param(const PNetwork pnet, int layer, int index, real *values, int count)
+{
+	if (!pnet || !values)
+		return ERR_NULL_PTR;
+
+	// training on a GPU leaves the CPU copy current (see ann_train_network)
+	PTensor t = layer_param(pnet, layer, index);
+	if (!t || count != t->rows * t->cols)
+		return ERR_INVALID;
+
+	// report the values training would start from
+	if (!pnet->weights_set && !pnet->layers[layer].weights_set)
+	{
+		init_layer_weights(pnet, layer);
+#ifdef USE_GPU
+		if (gpu_ready(pnet))
+			gpu_refresh(pnet);
+#endif
+	}
+
+	memcpy(values, t->values, count * sizeof(real));
+	return ERR_OK;
+}
+
+int ann_set_layer_param(PNetwork pnet, int layer, int index, const real *values, int count)
+{
+	if (!pnet || !values)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_set_layer_param");
+		return ERR_NULL_PTR;
+	}
+
+	PTensor t = layer_param(pnet, layer, index);
+	int finite = t && count == t->rows * t->cols;
+	for (int i = 0; finite && i < count; i++)
+		finite = isfinite(values[i]) != 0;
+	if (!finite)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_set_layer_param");
+		return ERR_INVALID;
+	}
+
+	// the layer's other parameters start as training would start them
+	if (!pnet->weights_set && !pnet->layers[layer].weights_set)
+		init_layer_weights(pnet, layer);
+	memcpy(t->values, values, count * sizeof(real));
+
+#ifdef USE_GPU
+	// a stale GPU copy (online training) is re-uploaded when that ends
+	if (gpu_ready(pnet))
+		gpu_refresh(pnet);
+#endif
+	return ERR_OK;
+}
+
+int ann_set_layer_trainable(PNetwork pnet, int layer, int trainable)
+{
+	if (!pnet)
+		return ERR_NULL_PTR;
+	if (layer < 1 || layer >= pnet->layer_count)
+		return ERR_INVALID;
+
+	pnet->layers[layer].frozen = !trainable;
+	return ERR_OK;
+}
+
+int ann_get_layer_trainable(const PNetwork pnet, int layer)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return 0;
+	return !pnet->layers[layer].frozen;
 }
 
 //------------------------------

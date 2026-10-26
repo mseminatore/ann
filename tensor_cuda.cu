@@ -700,6 +700,8 @@ static void cuda_optimizer_step(PNetwork pnet)
     for (int layer = 1; layer < pnet->layer_count; layer++)
     {
         PLayer l = &pnet->layers[layer];
+        if (l->frozen)
+            continue;	// ann_set_layer_trainable
 
         float *W  = (float *)l->t_weights->gpu_buf;
         float *g  = (float *)l->t_gradients->gpu_buf;

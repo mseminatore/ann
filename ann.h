@@ -263,6 +263,8 @@ struct Layer
 	// named tensors below are the same tensors as params[0] (W) and params[1] (b).
 	int param_count;
 	Layer_param params[ANN_LAYER_MAX_PARAMS];
+	int weights_set;					// params initialized, randomly or by ann_set_layer_param
+	int frozen;							// 1 if training leaves the params alone (ann_set_layer_trainable)
 
 	// Parameters that produce this layer from the layer below (NULL on the input layer)
 	PTensor t_weights;					// weights [node_count x previous layer's node_count]
@@ -1674,6 +1676,98 @@ ANN_API int ann_get_layer_groups(const PNetwork pnet, int layer);
  * @return 1 if the layer's output is masked, 0 if not, pnet is NULL or layer is out of range
  */
 ANN_API int ann_get_layer_masked(const PNetwork pnet, int layer);
+
+/**
+ * Get the number of parameter tensors a layer has.
+ *
+ * In order: dense and Conv2D: the weights, then the bias. Batch norm: gamma,
+ * beta, the running mean and the running variance. Embedding: the vectors.
+ * The input layer, pooling, flatten, reshape and upsampling layers have none.
+ *
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @return The count, or -1 if pnet is NULL or layer is out of range
+ */
+ANN_API int ann_get_layer_param_count(const PNetwork pnet, int layer);
+
+/**
+ * Get a layer parameter's shape, as a row-major [rows x cols] matrix.
+ *
+ * Dense weights: [nodes x the layer below's nodes]; Conv2D weights: [filters x
+ * channels / groups * kernel_h * kernel_w], each row channel by channel, then
+ * row by row of the kernel; Embedding: [vocab x dim], a row per id. Biases and
+ * batch norm's tensors: [1 x channels] (nodes after a dense layer).
+ *
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @param index Parameter index, 0 .. ann_get_layer_param_count() - 1
+ * @param rows, cols Receive the shape (must not be NULL)
+ * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for a bad layer or index
+ */
+ANN_API int ann_get_layer_param_shape(const PNetwork pnet, int layer, int index, int *rows, int *cols);
+
+/**
+ * Copy a layer parameter's values out, row-major.
+ *
+ * The values are current after training on the CPU or a GPU. A layer that
+ * nothing has initialized yet (training, loading or ann_set_layer_param) is
+ * initialized first, as training would start it, so it reports the values
+ * training starts from (later ann_set_weight_init calls don't change it).
+ *
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @param index Parameter index, 0 .. ann_get_layer_param_count() - 1
+ * @param values Receives rows * cols values (see ann_get_layer_param_shape)
+ * @param count Size of values; must be rows * cols
+ * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for a bad layer, index or count
+ */
+ANN_API int ann_get_layer_param(const PNetwork pnet, int layer, int index, real *values, int count);
+
+/**
+ * Set a layer parameter's values, e.g. pre-trained embedding vectors (GloVe,
+ * word2vec) or a layer of another trained network.
+ *
+ * The layer counts as initialized: training keeps the values as its starting
+ * point instead of randomizing them, and randomizes the layer's other
+ * parameters only if nothing initialized them yet. A network uploaded to a GPU
+ * gets the new values too. To keep them fixed while the rest trains, see
+ * ann_set_layer_trainable.
+ *
+ * @param pnet Network to change (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @param index Parameter index, 0 .. ann_get_layer_param_count() - 1
+ * @param values rows * cols values, row-major (see ann_get_layer_param_shape)
+ * @param count Number of values; must be rows * cols
+ * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for a bad layer, index or
+ *         count, or a value that is not finite (nothing is changed)
+ */
+ANN_API int ann_set_layer_param(PNetwork pnet, int layer, int index, const real *values, int count);
+
+/**
+ * Freeze a layer, or let it train again.
+ *
+ * Training (on the CPU or a GPU, ann_train_network or the online steps)
+ * leaves a frozen layer's parameters as they are: optimizers, weight decay
+ * and L1 regularization skip them. Gradients still flow through it to the
+ * layers below. A frozen batch norm layer still updates its running mean and
+ * variance. The setting is not saved with the network.
+ *
+ * @param pnet Network to change (must not be NULL)
+ * @param layer Layer index, 1 .. ann_get_layer_count() - 1
+ * @param trainable 0 to freeze the layer, 1 to train it
+ * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for a bad layer index
+ */
+ANN_API int ann_set_layer_trainable(PNetwork pnet, int layer, int trainable);
+
+/**
+ * Check whether training updates a layer's parameters.
+ *
+ * @param pnet Network to query (must not be NULL)
+ * @param layer Layer index (0 = input layer)
+ * @return 1 unless the layer is frozen (see ann_set_layer_trainable), 0 if it
+ *         is, pnet is NULL or layer is out of range
+ */
+ANN_API int ann_get_layer_trainable(const PNetwork pnet, int layer);
 
 /**
  * Set how many CPU threads libann uses for training and batched inference.

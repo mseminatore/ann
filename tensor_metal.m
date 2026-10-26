@@ -2903,6 +2903,8 @@ static void encode_optimizer(id<MTLCommandBuffer> cmd, PNetwork pnet)
 
     for (int layer = 1; layer < pnet->layer_count; layer++) {
         PLayer l = &pnet->layers[layer];
+        if (l->frozen)
+            continue;	// ann_set_layer_trainable
         for (int p = 0; p < l->param_count; p++) {
             Layer_param *param = &l->params[p];
             if (param->state)

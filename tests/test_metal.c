@@ -210,6 +210,36 @@ static int cnn_gpu_matches_cpu(PNetwork net, const PTensor inputs, real tol)
     return ok;
 }
 
+// Fixed, varied values for every parameter of a layer
+static void set_known_params(PNetwork net, int layer)
+{
+    for (int p = 0; p < ann_get_layer_param_count(net, layer); p++) {
+        int r, c;
+        ann_get_layer_param_shape(net, layer, p, &r, &c);
+        real *v = malloc(r * c * sizeof(real));
+        for (int i = 0; i < r * c; i++)
+            v[i] = 0.3f * (real)sin(1.1 * i + 0.7 * layer + 1.9 * p);
+        ann_set_layer_param(net, layer, p, v, r * c);
+        free(v);
+    }
+}
+
+// 1 if every parameter of a layer still has set_known_params' values
+static int has_known_params(PNetwork net, int layer)
+{
+    int ok = 1;
+    for (int p = 0; ok && p < ann_get_layer_param_count(net, layer); p++) {
+        int r, c;
+        ann_get_layer_param_shape(net, layer, p, &r, &c);
+        real *v = malloc(r * c * sizeof(real));
+        ok = v && ann_get_layer_param(net, layer, p, v, r * c) == ERR_OK;
+        for (int i = 0; ok && i < r * c; i++)
+            ok = v[i] == 0.3f * (real)sin(1.1 * i + 0.7 * layer + 1.9 * p);
+        free(v);
+    }
+    return ok;
+}
+
 #define TOLERANCE 1e-4f
 
 //-----------------------------------------------------------
@@ -931,6 +961,30 @@ void test_main(int argc, char *argv[])
         train_cnn(gpu_net, inputs, targets);
         TESTEX("GPU training through a 2x2 pool with uncovered edges matches CPU training",
                edge_uploaded && cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+        ann_free_network(cpu_net);
+        ann_free_network(gpu_net);
+
+        // frozen layers (a conv and a dense one) stay as set while the rest
+        // trains on the GPU, as on the CPU
+        cpu_net = make_cnn(0.0f);
+        gpu_net = make_cnn(0.0f);
+        PNetwork frozen[2] = { cpu_net, gpu_net };
+        for (int i = 0; i < 2; i++) {
+            set_known_params(frozen[i], 1);
+            set_known_params(frozen[i], 5);
+            ann_set_layer_trainable(frozen[i], 1, 0);
+            ann_set_layer_trainable(frozen[i], 5, 0);
+        }
+        int frozen_uploaded = ann_gpu_upload_network(gpu_net) == ERR_OK;
+        train_cnn(cpu_net, inputs, targets);
+        train_cnn(gpu_net, inputs, targets);
+        TESTEX("Frozen layers keep their values through GPU training",
+               frozen_uploaded && has_known_params(gpu_net, 1) && has_known_params(gpu_net, 5));
+        TESTEX("and the layers around them train as on the CPU", cnn_nets_close(cpu_net, gpu_net, 1e-3f, 1));
+
+        // parameters set while the network is uploaded reach the GPU
+        set_known_params(gpu_net, 6);
+        TESTEX("Parameters set on an uploaded network reach the GPU", cnn_gpu_matches_cpu(gpu_net, inputs, TOLERANCE));
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 

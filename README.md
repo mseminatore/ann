@@ -613,7 +613,10 @@ checked (the count must match, and NaN or infinite values are rejected), and a
 network uploaded to a GPU gets them too. A frozen layer's parameters stay as
 they are through training on the CPU or a GPU; gradients still pass through it
 to the layers below, and a frozen batch norm still updates its running
-statistics. Freezing is not saved with the network. To fine-tune the vectors
+statistics. Layers below the lowest one that trains get no backward pass at
+all, so a frozen embedding also makes training faster (12-30% for text CNNs on
+the CPU, depending on how much of the time the layers above take). Saves (`.nna`, `.nnb`) keep which layers are frozen, in a list after the
+parameters that older libann ignores; ONNX export doesn't. To fine-tune the vectors
 afterwards, unfreeze the layer (`ann_set_layer_trainable(net, 1, 1)`) and train
 a few more epochs at a low learning rate (training again keeps the weights).
 
@@ -1087,6 +1090,9 @@ Only functions marked `ANN_API` are exported from the shared library on every
 platform (`__declspec(dllexport)` on Windows, default visibility with
 `-fvisibility=hidden` on gcc/clang), so the exported symbols are exactly the
 public API.
+
+The headers declare C linkage (`extern "C"`), so C++ programs can include
+them and link against libann directly.
 
 When linking against the DLL from external code, define `ANN_USING_DLL` to enable proper import declarations:
 ```c

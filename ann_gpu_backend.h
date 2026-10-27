@@ -46,6 +46,10 @@
 
 #include "ann.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * GPU backend vtable.
  *
@@ -174,9 +178,23 @@ int ann_embedding_index(const Layer *layer, const real *ids, int rows, unsigned 
                         unsigned *positions);
 
 /**
+ * The lowest layer whose parameters train (have some and are not frozen, see
+ * ann_set_layer_trainable), or 0 when none does. Backward passes stop there:
+ * the layers below it need no gradients, and it needs none for its input.
+ * With a frozen embedding as layer 1, that skips the embedding's weight
+ * gradient and the input gradient of the layer above it.
+ * Implemented in ann.c and shared with the GPU backends.
+ */
+int ann_lowest_trained_layer(const PNetwork pnet);
+
+/**
  * Active GPU backend.  NULL means no GPU is available or initialized.
  * Set by ann_gpu_init(); read by ann.c dispatch logic and ann_gpu_* public API.
  */
 extern GpuBackend *g_gpu_backend;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __ANN_GPU_BACKEND_H */

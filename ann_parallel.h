@@ -26,6 +26,10 @@
 #ifndef __ANN_PARALLEL_H
 #define __ANN_PARALLEL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 //================================================================================================
 // Parallel loops (internal, implemented in tensor.c)
 //
@@ -64,5 +68,9 @@ int  ann_parallel_get_threads(void);
 // The BLAS library tensor.c was built with, for ann_get_backend_info() (internal, implemented
 // in tensor.c, where the BLAS header is included)
 const char *ann_blas_backend_name(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __ANN_PARALLEL_H */

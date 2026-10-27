@@ -265,6 +265,8 @@ static ErrorLogCallback g_error_log_callback = NULL;
 // model file format versions (see save_network)
 static const int ANN_FORMAT_V1 = 1;
 static const int ANN_FORMAT_V2 = 2;
+// starts the optional list of frozen layers after the parameters ("FRZN")
+static const int ANN_FORMAT_FROZEN = 0x46525A4E;
 
 #if defined(_WIN32) && !defined(_WIN64)
 #	define R_MIN -1
@@ -2954,9 +2956,12 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 	if (layer->masked)
 		mask_zero(layer, delta->values, batch_size);
 	
-	// Parameter gradients, and the gradient for the layer below (the input
-	// layer needs none)
-	layer_ops(layer)->backward(layer, A_prev, delta, output_layer > 1 ? prev_layer->t_batch_dl_dz : NULL, batch_size);
+	// Parameter gradients, and the gradient for the layer below unless nothing
+	// below trains (see ann_lowest_trained_layer); none when nothing trains
+	int lowest = ann_lowest_trained_layer(pnet);
+	if (lowest)
+		layer_ops(layer)->backward(layer, A_prev, delta, output_layer > lowest ? prev_layer->t_batch_dl_dz : NULL,
+		                           batch_size);
 	
 	return total_loss;
 }
@@ -2993,7 +2998,7 @@ static void apply_dropout_mask_to_gradient(PLayer layer, int batch_size)
 // activation's derivative (the same one the output layer uses with MSE), then
 // let the layer kind accumulate its parameter gradients and propagate.
 //-------------------------------------------
-static void back_propagate_hidden_batched(PNetwork pnet, int batch_size, int layer_idx)
+static void back_propagate_hidden_batched(PNetwork pnet, int batch_size, int layer_idx, int lowest)
 {
 	PLayer layer = &pnet->layers[layer_idx];
 	PLayer prev_layer = &pnet->layers[layer_idx - 1];
@@ -3010,9 +3015,9 @@ static void back_propagate_hidden_batched(PNetwork pnet, int batch_size, int lay
 	ann_mse_output_delta(layer->activation, dl_dz->values, layer->t_batch_values->values,
 	                     layer->t_batch_z->values, batch_size, layer->node_count);
 	
-	// Gradients, and propagation unless the layer below is the input
+	// Gradients, and propagation unless no layer below trains (the input never does)
 	layer_ops(layer)->backward(layer, prev_layer->t_batch_values, dl_dz,
-	                           layer_idx > 1 ? prev_layer->t_batch_dl_dz : NULL, batch_size);
+	                           layer_idx > lowest ? prev_layer->t_batch_dl_dz : NULL, batch_size);
 }
 
 //-------------------------------------------
@@ -3026,9 +3031,11 @@ static real back_propagate_batched(PNetwork pnet, int batch_size, PTensor target
 	// Output layer backprop (returns loss)
 	real loss = back_propagate_output_batched(pnet, batch_size, targets);
 	
-	// Hidden layers backprop (from output-1 to layer 1)
-	for (int layer = output_layer - 1; layer > 0; layer--)
-		back_propagate_hidden_batched(pnet, batch_size, layer);
+	// Hidden layers backprop, from output-1 down to the lowest layer that trains:
+	// frozen layers below it (e.g. pre-trained embeddings) need no gradients
+	int lowest = ann_lowest_trained_layer(pnet);
+	for (int layer = output_layer - 1; lowest && layer >= lowest; layer--)
+		back_propagate_hidden_batched(pnet, batch_size, layer, lowest);
 	
 	return loss;
 }
@@ -5318,6 +5325,17 @@ int ann_get_layer_trainable(const PNetwork pnet, int layer)
 }
 
 //------------------------------
+// the lowest layer whose parameters train, or 0 when none does
+//------------------------------
+int ann_lowest_trained_layer(const PNetwork pnet)
+{
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+		if (pnet->layers[layer].param_count > 0 && !pnet->layers[layer].frozen)
+			return layer;
+	return 0;
+}
+
+//------------------------------
 // set the loss function
 //------------------------------
 void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
@@ -5721,6 +5739,9 @@ int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, in
 //   version optimizer loss layer_count
 //   per layer:            kind layer_type activation c h w config_count config...
 //   per layer 1..n-1:     each params[] tensor's values, in order
+// either, when some layers are frozen (ann_set_layer_trainable), then:
+//   ANN_FORMAT_FROZEN count layer...
+// which older libann ignores, as it reads nothing after the parameters.
 //================================================================================================
 
 //------------------------------
@@ -5878,6 +5899,18 @@ static int save_network(const PNetwork pnet, const char *filename, int binary, c
 			ok = write_values(fptr, binary, cur->params[p].value);
 	}
 
+	// frozen layers, if any
+	int frozen = 0;
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+		frozen += pnet->layers[layer].frozen != 0;
+	if (ok && frozen)
+	{
+		ok = write_int(fptr, binary, ANN_FORMAT_FROZEN) && write_int(fptr, binary, frozen);
+		for (int layer = 1; ok && layer < pnet->layer_count; layer++)
+			if (pnet->layers[layer].frozen)
+				ok = write_int(fptr, binary, layer);
+	}
+
 	if (fclose(fptr) != 0)
 		ok = 0;
 
@@ -5981,6 +6014,20 @@ static PNetwork load_network(const char *filename, int binary)
 		for (int p = 0; p < cur->param_count; p++)
 		{
 			if (!read_values(fptr, binary, cur->params[p].value))
+				goto fail;
+		}
+	}
+
+	// frozen layers, when listed (files without them end here)
+	int mark, frozen;
+	if (read_int(fptr, binary, &mark))
+	{
+		if (mark != ANN_FORMAT_FROZEN || !read_int(fptr, binary, &frozen) || frozen < 0 || frozen >= layer_count)
+			goto fail;
+		for (int i = 0; i < frozen; i++)
+		{
+			int layer;
+			if (!read_int(fptr, binary, &layer) || ann_set_layer_trainable(pnet, layer, 0) != ERR_OK)
 				goto fail;
 		}
 	}

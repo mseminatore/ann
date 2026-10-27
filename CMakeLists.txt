@@ -41,6 +41,7 @@ add_test(NAME test_batchnorm COMMAND test_batchnorm)
 add_test(NAME test_embedding COMMAND test_embedding)
 add_test(NAME test_layer_params COMMAND test_layer_params)
 add_test(NAME test_csv COMMAND test_csv)
+add_test(NAME test_cxx COMMAND test_cxx)
 add_test(NAME test_threads COMMAND test_threads)
 add_test(NAME test_noise COMMAND test_noise)
 
@@ -394,6 +395,10 @@ target_link_libraries(test_layer_params libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_csv tests/test_csv.c testy/test_main.c)
 target_link_libraries(test_csv libann ${BLAS_LIB} ${MATH_LIB})
+
+# libann from C++ (the CUDA backend is C++ too): checks the headers' extern "C" blocks
+add_executable(test_cxx tests/test_cxx.cpp)
+target_link_libraries(test_cxx libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_threads tests/test_threads.c testy/test_main.c)
 target_link_libraries(test_threads libann ${BLAS_LIB} ${MATH_LIB} Threads::Threads)

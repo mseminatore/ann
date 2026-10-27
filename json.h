@@ -12,6 +12,10 @@
 #include <stddef.h>
 #include "tensor.h"  // for ANN_API
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 //------------------------------
 // JSON value types
 //------------------------------
@@ -153,5 +157,9 @@ ANN_API size_t json_array_length(const JsonValue *val);
  * @return 1 if null, 0 otherwise
  */
 ANN_API int json_is_null(const JsonValue *val);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* JSON_H */

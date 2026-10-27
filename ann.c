@@ -2485,10 +2485,18 @@ void ann_clear_error_log_callback(void)
  * @param error_code The error code that occurred
  * @param function_name The name of the function where error occurred
  */
+static void invoke_error_callback_msg(int error_code, const char *error_message, const char *function_name);
+
 static void invoke_error_callback(int error_code, const char *function_name)
 {
-	const char *error_message = ann_strerror(error_code);
-	
+	invoke_error_callback_msg(error_code, ann_strerror(error_code), function_name);
+}
+
+//------------------------------
+// the same with a message of the caller's (e.g. naming a CSV line)
+//------------------------------
+static void invoke_error_callback_msg(int error_code, const char *error_message, const char *function_name)
+{
 	if (g_error_log_callback != NULL) {
 		g_error_log_callback(error_code, error_message, function_name);
 	} else {
@@ -5359,17 +5367,63 @@ void ann_free_network(PNetwork pnet)
 }
 
 //------------------------------
+// read one line of any length into *buf (grown as needed), without its line
+// break; returns its length, or -1 at the end of the file or out of memory
+// (*oom set)
+//------------------------------
+static long csv_read_line(FILE *f, char **buf, size_t *cap, int *oom)
+{
+	size_t len = 0;
+
+	*oom = 0;
+	for (;;)
+	{
+		if (!fgets(*buf + len, (int)(*cap - len), f))
+		{
+			if (len == 0)
+				return -1;
+			break;		// a last line without a line break
+		}
+		len += strlen(*buf + len);
+		if (len > 0 && (*buf)[len - 1] == '\n')
+		{
+			(*buf)[--len] = '\0';
+			break;
+		}
+		if (len + 1 < *cap)
+			break;		// the end of the file
+
+		// the line goes on: grow the buffer
+		char *grown = realloc(*buf, *cap * 2);
+		if (!grown)
+		{
+			*oom = 1;
+			return -1;
+		}
+		*buf = grown;
+		*cap *= 2;
+	}
+	return (long)len;
+}
+
+// characters between CSV values
+static int csv_separator(char c)
+{
+	return c == ',' || c == ' ' || c == '\t' || c == '\r';
+}
+
+//------------------------------
 // load data from a csv file
 //------------------------------
 int ann_load_csv(const char *filename, int has_header, real **data, int *rows, int *stride)
 {
 	FILE *f;
-	char *s, buf[DEFAULT_BUFFER_SIZE];
-	int size = DEFAULT_BUFFER_SIZE;
+	size_t line_cap = DEFAULT_BUFFER_SIZE, size = DEFAULT_BUFFER_SIZE, count = 0;
+	char *line, msg[512];
 	real *dbuf;
-	int lastStride = 0;
-	uint32_t lineno = 0;
-	int count = 0;
+	int width = 0, width_line = 0, oom = 0, err = ERR_OK;
+	unsigned lineno = 0;
+	long len;
 
 	if (!filename || !data || !rows || !stride)
 	{
@@ -5385,84 +5439,136 @@ int ann_load_csv(const char *filename, int has_header, real **data, int *rows, i
 	}
 
 	*rows = 0;
+	*stride = 0;
 
 	dbuf = malloc(size * sizeof(real));
-	if (!dbuf)
+	line = malloc(line_cap);
+	if (!dbuf || !line)
 	{
+		free(dbuf);
+		free(line);
 		fclose(f);
 		invoke_error_callback(ERR_ALLOC, "ann_load_csv");
 		return ERR_ALLOC;
 	}
 
 	// skip header if present
-	if (has_header && !fgets(buf, DEFAULT_BUFFER_SIZE, f))
+	if (has_header)
 	{
-		free(dbuf);
-		fclose(f);
-		invoke_error_callback(ERR_FAIL, "ann_load_csv");
-		return ERR_FAIL;
+		lineno++;
+		if (csv_read_line(f, &line, &line_cap, &oom) < 0)
+		{
+			err = oom ? ERR_ALLOC : ERR_FAIL;
+			snprintf(msg, sizeof(msg), "%s has no header line", filename);
+			goto fail;
+		}
 	}
 
-	// read a line
-	while (fgets(buf, DEFAULT_BUFFER_SIZE, f))
+	// each line holds the same number of values, separated by commas or spaces
+	while ((len = csv_read_line(f, &line, &line_cap, &oom)) >= 0)
 	{
-		if (buf[0] == 0)
-			continue;
+		char *s = line;
+		int fields = 0;
 
 		lineno++;
+		for (;;)
+		{
+			while (csv_separator(*s))
+				s++;
+			if (!*s)
+				break;
 
-		// tokenize the line
-		*stride = 0;
-		s = strtok(buf, ", \n");
-
-		// parse the line
-		while (s) {
-			dbuf[count++] = (real)atof(s);
-			(*stride)++;
+			// the field, ended at its separator (strtod is faster on a short string);
+			// a number may be quoted, as some tools write every field
+			int quoted = *s == '"';
+			char *field_end = s + quoted;
+			while (*field_end && (quoted ? *field_end != '"' : !csv_separator(*field_end)))
+				field_end++;
+			field_end += quoted && *field_end;
+			char saved = *field_end, *end;
+			*field_end = '\0';
+			double v = strtod(s + quoted, &end);
+			int ok = end != s + quoted && end + quoted == field_end && (!quoted || field_end[-1] == '"');
+			*field_end = saved;
+			if (!ok)
+			{
+				err = ERR_INVALID;
+				// up to 40 characters of it; quoted text shows its own quotes
+				const char *q = quoted ? "" : "\"";
+				int shown = (int)(field_end - s), cut = shown > 40 + quoted;
+				snprintf(msg, sizeof(msg), "%s line %u, value %d: %s%.*s%s%s is not a number", filename, lineno,
+				         fields + 1, q, cut ? 40 + quoted : shown, s, cut ? "..." : "", q);
+				goto fail;
+			}
 
 			if (count >= size)
 			{
 				// double the size
-				size <<= 1;
-
-				real *newbuf = realloc(dbuf, size * sizeof(real));
-				
-				// check for OOM
-				if (!newbuf)
+				real *grown = realloc(dbuf, 2 * size * sizeof(real));
+				if (!grown)
 				{
-					free(dbuf);
-					fclose(f);
-					invoke_error_callback(ERR_ALLOC, "ann_load_csv");
-					return ERR_ALLOC;
+					err = ERR_ALLOC;
+					snprintf(msg, sizeof(msg), "%s", ann_strerror(ERR_ALLOC));
+					goto fail;
 				}
-
-				dbuf = newbuf;
+				dbuf = grown;
+				size *= 2;
 			}
-
-			s = strtok(NULL, ", \n");
+			dbuf[count++] = (real)v;
+			fields++;
+			s = field_end;
 		}
 
-		if (lastStride == 0)
-			lastStride = *stride;
+		// blank lines hold no values
+		if (fields == 0)
+			continue;
 
-		// check that all row strides are the same
-		if (lastStride != *stride)
+		// check that all rows have the same number of values
+		if (width == 0)
 		{
-			printf("Error: malformed CSV file at line %u\n", lineno);
-			free(dbuf);
-			fclose(f);
-			invoke_error_callback(ERR_FAIL, "ann_load_csv");
-			return ERR_FAIL;
+			width = fields;
+			width_line = (int)lineno;
+		}
+		else if (fields != width)
+		{
+			err = ERR_INVALID;
+			snprintf(msg, sizeof(msg), "%s line %u has %d values, but line %d has %d", filename, lineno, fields,
+			         width_line, width);
+			goto fail;
 		}
 
 		(*rows)++;
-
 	}
 
-	*data = dbuf;
+	if (oom || ferror(f))
+	{
+		err = oom ? ERR_ALLOC : ERR_IO;
+		snprintf(msg, sizeof(msg), "%s", ann_strerror(err));
+		goto fail;
+	}
 
+	free(line);
 	fclose(f);
+	*stride = width;
+	*data = dbuf;
 	return ERR_OK;
+
+fail:
+	free(line);
+	free(dbuf);
+	fclose(f);
+	*rows = 0;
+	*stride = 0;
+	invoke_error_callback_msg(err, msg, "ann_load_csv");
+	return err;
+}
+
+//------------------------------
+// free data returned by ann_load_csv
+//------------------------------
+void ann_free_csv(real *data)
+{
+	free(data);
 }
 
 //-----------------------------------

@@ -125,7 +125,8 @@ Function | Description
 ann_make_network | create a new neural network
 ann_add_layer | add a layer to the network
 ann_free_network | free a network
-ann_load_csv | load data from a csv file to a tensor
+ann_load_csv | load a csv file of numbers (errors name the line and value that isn't one)
+ann_free_csv | free the data ann_load_csv returned
 ann_load_network | load a previously saved network (text)
 ann_save_network | save a trained network (text)
 ann_load_network_binary | load a previously saved network (binary)
@@ -1017,7 +1018,7 @@ int main(int argc, char *argv[])
 
     // free resources
     ann_free_network(pnet);
-    free(data);
+    ann_free_csv(data);
 
     return 0;
 }

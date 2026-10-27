@@ -47,6 +47,10 @@
 #	define ANN_API
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 //----------------------------------
 // Note: change to double if desired
 //----------------------------------
@@ -440,5 +444,9 @@ ANN_API void tensor_print(const PTensor t);
  * @return ERR_OK on success, error code on failure
  */
 ANN_API int tensor_save_to_file(const PTensor t, const char *filename);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -1091,6 +1091,9 @@ platform (`__declspec(dllexport)` on Windows, default visibility with
 `-fvisibility=hidden` on gcc/clang), so the exported symbols are exactly the
 public API.
 
+The headers declare C linkage (`extern "C"`), so C++ programs can include
+them and link against libann directly.
+
 When linking against the DLL from external code, define `ANN_USING_DLL` to enable proper import declarations:
 ```c
 #define ANN_USING_DLL

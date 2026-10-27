@@ -46,6 +46,10 @@
 
 #include "ann.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * GPU backend vtable.
  *
@@ -188,5 +192,9 @@ int ann_lowest_trained_layer(const PNetwork pnet);
  * Set by ann_gpu_init(); read by ann.c dispatch logic and ann_gpu_* public API.
  */
 extern GpuBackend *g_gpu_backend;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __ANN_GPU_BACKEND_H */

@@ -26,12 +26,17 @@
 #ifndef __ANN_H
 #define __ANN_H
 
+#include <stdio.h>
 #include "tensor.h"
 
 #ifdef _WIN32
 #	include <malloc.h>
 #else
 #	include <alloca.h>
+#endif
+
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 // ANN_API is defined in tensor.h
@@ -1957,5 +1962,9 @@ ANN_API ErrorLogCallback ann_get_error_log_callback(void);
  * @see ann_set_error_log_callback
  */
 ANN_API void ann_clear_error_log_callback(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

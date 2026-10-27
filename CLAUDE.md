@@ -56,7 +56,7 @@ ctest -R test_tensor              # run a single test by name
 ./test_tensor                     # or run the executable directly
 ```
 
-Test executables: `test_tensor`, `test_network`, `test_activations`, `test_loss_functions`, `test_optimizers`, `test_save_load`, `test_onnx_export`, `test_hypertune`, `test_json`, `test_training_convergence`, `test_online_training`, `test_noise`, `test_unload`, `test_quantize`, `test_conv`, `test_batchnorm`, `test_embedding`, `test_layer_params`, `test_csv`, `test_c_export` (+ `_int8`; built from headers that `gen_c_export` writes at build time).
+Test executables: `test_tensor`, `test_network`, `test_activations`, `test_loss_functions`, `test_optimizers`, `test_save_load`, `test_onnx_export`, `test_hypertune`, `test_json`, `test_training_convergence`, `test_online_training`, `test_noise`, `test_unload`, `test_quantize`, `test_conv`, `test_batchnorm`, `test_embedding`, `test_layer_params`, `test_csv`, `test_cxx`, `test_c_export` (+ `_int8`; built from headers that `gen_c_export` writes at build time).
 
 Test files define `void test_main(int argc, char *argv[])` and use the `MODULE(...)` / `SUITE(...)` / `TESTEX("name", expr)` macros.
 
@@ -74,7 +74,7 @@ Test files define `void test_main(int argc, char *argv[])` and use the `MODULE(.
 
 - ANSI C for portability (Windows/macOS/Linux). Platform-specific code is guarded by `#ifdef _WIN32`.
 - `real` typedef is the scalar type — `float` by default; switch to `double` in `tensor.h`.
-- Public functions are prefixed `ann_*` (runtime) or `tensor_*` (math). Mark every public declaration with `ANN_API`: the shared library is built with hidden visibility, so unmarked functions are not exported (and the `../pyann` CFFI bindings rely on that surface). New enum values go at the end of their enum, since saved models and pyann store the integer values.
+- Public functions are prefixed `ann_*` (runtime) or `tensor_*` (math). The headers wrap their declarations in `extern "C"` for C++ (the CUDA backend is compiled as C++, so a function it calls from `ann.c` must be declared in such a block, e.g. in `ann_gpu_backend.h`); `tests/test_cxx.cpp` links a C++ program against libann. Mark every public declaration with `ANN_API`: the shared library is built with hidden visibility, so unmarked functions are not exported (and the `../pyann` CFFI bindings rely on that surface). New enum values go at the end of their enum, since saved models and pyann store the integer values.
 - All public functions return error codes (`ERR_OK`, `ERR_NULL_PTR`, `ERR_ALLOC`, `ERR_INVALID`, `ERR_IO`, `ERR_FAIL`). Use the `CHECK_OK(...)` / `CHECK_NULL(...)` macros to propagate failures; install an `ErrorLogCallback` via `ann_set_error_log_callback` for custom logging. `ann_strerror(code)` gives a readable message.
 - Tensors are row-major: element at `data[row * stride + col]`.
 - Pair every `tensor_create*()` with `tensor_free()` and `ann_make_network()` with `ann_free_network()`. Data from `ann_load_csv()` is freed with `ann_free_csv()` (or `free()` from code on libann's C runtime). `ann_load_csv` reads numbers only (`strtod`, quoted numbers allowed), separated by commas, spaces, tabs or `\r`, lines of any length; text or ragged rows return `ERR_INVALID` with a message naming the file line through `invoke_error_callback_msg` (tested in `tests/test_csv.c`).

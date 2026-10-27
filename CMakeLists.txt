@@ -36,6 +36,7 @@ add_test(NAME test_conv COMMAND test_conv)
 add_test(NAME test_batchnorm COMMAND test_batchnorm)
 add_test(NAME test_embedding COMMAND test_embedding)
 add_test(NAME test_layer_params COMMAND test_layer_params)
+add_test(NAME test_csv COMMAND test_csv)
 add_test(NAME test_threads COMMAND test_threads)
 add_test(NAME test_noise COMMAND test_noise)
 
@@ -386,6 +387,9 @@ target_link_libraries(test_embedding libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_layer_params tests/test_layer_params.c testy/test_main.c)
 target_link_libraries(test_layer_params libann ${BLAS_LIB} ${MATH_LIB})
+
+add_executable(test_csv tests/test_csv.c testy/test_main.c)
+target_link_libraries(test_csv libann ${BLAS_LIB} ${MATH_LIB})
 
 add_executable(test_threads tests/test_threads.c testy/test_main.c)
 target_link_libraries(test_threads libann ${BLAS_LIB} ${MATH_LIB} Threads::Threads)

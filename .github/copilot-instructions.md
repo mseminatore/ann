@@ -25,7 +25,7 @@ ann_set_error_log_callback(my_handler);  // ErrorLogCallback signature in ann.h
 
 ### Memory Management
 - Always pair `tensor_create*()` with `tensor_free()` and `ann_make_network()` with `ann_free_network()`
-- Data loaded via `ann_load_csv()` must be freed by caller with `free()`
+- Data loaded via `ann_load_csv()` must be freed by caller with `ann_free_csv()` (or `free()`)
 - Tensors use row-major order: `data[row * stride + col]`
 
 ### Network Construction Pattern

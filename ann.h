@@ -706,23 +706,44 @@ ANN_API void ann_free_network(PNetwork pnet);
 // ============================================================================
 
 /**
- * Load training data from CSV file.
+ * Load training data from a CSV file of numbers.
  * 
- * CSV format: Each line is one training example, values comma-separated.
- * First line can be header (skip if has_header=CSV_HAS_HEADER).
+ * CSV format: Each line is one training example, the same number of values
+ * on every line, separated by commas, spaces or tabs (lines may end in \r\n,
+ * and may be of any length). Blank lines are skipped. First line can be
+ * header (skip if has_header=CSV_HAS_HEADER). Every value must be a number
+ * (as strtod reads them): text fields, such as a quoted review or a label
+ * like "positive", are rejected rather than read as 0.
+ * 
+ * Errors go to the error callback with a message naming the file line
+ * (counting the header), e.g. "data.csv line 3, value 2: "abc" is not a number".
  * 
  * @param filename Path to CSV file
  * @param has_header CSV_HAS_HEADER to skip first line, CSV_NO_HEADER otherwise
- * @param data Output pointer to allocated data array (caller must free)
+ * @param data Output pointer to allocated data array (caller frees it with
+ *             ann_free_csv, or free() when linked to the same C runtime)
  * @param rows Output: number of rows/examples in data
  * @param stride Output: number of columns per row (width of data)
  * @return ERR_OK on success
  * @return ERR_NULL_PTR if any parameter pointer is NULL
- * @return ERR_IO if file cannot be opened
+ * @return ERR_IO if file cannot be opened or read
+ * @return ERR_INVALID if a value is not a number or a line has a different
+ *         number of values (nothing is allocated)
+ * @return ERR_FAIL if has_header is set and the file is empty
+ * @return ERR_ALLOC if out of memory
  * 
  * Data is allocated in row-major order: data[row * stride + col]
  */
 ANN_API int ann_load_csv(const char *filename, int has_header, real **data, int *rows, int *stride);
+
+/**
+ * Free data returned by ann_load_csv. Use it rather than free() from code
+ * that may use another C runtime than libann's (e.g. language bindings, or a
+ * Windows DLL).
+ * 
+ * @param data The data array (NULL is ignored)
+ */
+ANN_API void ann_free_csv(real *data);
 
 /**
  * Save trained network to text file (human-readable).

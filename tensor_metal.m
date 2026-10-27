@@ -2841,7 +2841,9 @@ static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, in
 static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_size, id<MTLBuffer> input,
                            NSDictionary<NSNumber *, id<MTLBuffer>> *masks)
 {
-    for (int li = pnet->layer_count - 1; li >= 1; li--) {
+    // down to the lowest layer that trains: frozen layers below it need no gradients
+    int lowest = ann_lowest_trained_layer(pnet);
+    for (int li = pnet->layer_count - 1; lowest && li >= lowest; li--) {
         PLayer layer      = &pnet->layers[li];
         PLayer prev_layer = &pnet->layers[li - 1];
         int nodes      = layer->node_count;
@@ -2850,7 +2852,7 @@ static int encode_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_si
 
         id<MTLBuffer> dl_dz  = (__bridge id<MTLBuffer>)layer->t_batch_dl_dz->gpu_buf;
         id<MTLBuffer> A_prev = li == 1 ? input : (__bridge id<MTLBuffer>)prev_layer->t_batch_values->gpu_buf;
-        id<MTLBuffer> dX = li > 1 ? (__bridge id<MTLBuffer>)prev_layer->t_batch_dl_dz->gpu_buf : nil;
+        id<MTLBuffer> dX = li > lowest ? (__bridge id<MTLBuffer>)prev_layer->t_batch_dl_dz->gpu_buf : nil;
 
         if (li < pnet->layer_count - 1) {
             id<MTLBuffer> mask = masks[@(li)];
@@ -3096,7 +3098,8 @@ static int metal_train_batch(PNetwork pnet, PTensor batch_targets, int batch_siz
     if (!set_pad_masks(pnet, ids, batch_size, g_metal.slots[s].pad))
         return 0;
     g_metal.emb_count = 0;
-    if (pnet->layers[1].kind == LAYER_KIND_EMBEDDING) {
+    // the index only serves the weight gradient, which a frozen embedding skips
+    if (pnet->layers[1].kind == LAYER_KIND_EMBEDDING && !pnet->layers[1].frozen) {
         size_t n = (size_t)batch_size * input_nodes;
         g_metal.slots[s].emb_unique = gpu_scratch(g_metal.slots[s].emb_unique, (n + 1) * sizeof(uint32_t));
         g_metal.slots[s].emb_offsets = gpu_scratch(g_metal.slots[s].emb_offsets, (n + 1) * sizeof(uint32_t));

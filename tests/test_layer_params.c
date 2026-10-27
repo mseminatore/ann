@@ -425,6 +425,50 @@ void test_main(int argc, char *argv[])
         real got[VOCAB * 4];
         ann_get_layer_param(text, 1, 0, got, VOCAB * 4);
         TESTEX("A frozen embedding keeps its vectors", same_values(vec, got, VOCAB * 4));
+
+        // nothing below the conv trains, so backpropagation stops at it: the
+        // embedding gets no weight gradient and the conv writes no input gradient
+        PTensor emb_grad = text->layers[1].params[0].grad, conv_dx = text->layers[1].t_batch_dl_dz;
+        int emb_grad_zero = 1, conv_dx_zero = 1;
+        for (int i = 0; i < emb_grad->rows * emb_grad->cols; i++) emb_grad_zero &= emb_grad->values[i] == 0.0f;
+        for (int i = 0; i < conv_dx->rows * conv_dx->cols; i++) conv_dx_zero &= conv_dx->values[i] == 0.0f;
+        TESTEX("and backpropagation stops above it (no embedding gradient, no input gradient for it)",
+               emb_grad_zero && conv_dx_zero);
+
+        // saves keep which layers are frozen, after the parameters
+        ann_set_layer_trainable(text, 4, 0);
+        int kept = 1;
+        for (int binary = 0; binary < 2; binary++) {
+            const char *path = binary ? "test_frozen.nnb" : "test_frozen.nna";
+            int saved = binary ? ann_save_network_binary(text, path) : ann_save_network(text, path);
+            PNetwork back = binary ? ann_load_network_binary(path) : ann_load_network(path);
+            kept &= saved == ERR_OK && back && !ann_get_layer_trainable(back, 1) && ann_get_layer_trainable(back, 2) &&
+                    !ann_get_layer_trainable(back, 4) && max_pred_diff(text, back, xs, N, SEQ) < 1e-3f;
+            ann_free_network(back);
+        }
+        TESTEX("Saved networks keep their frozen layers (text and binary)", kept);
+
+        // nothing frozen: the file ends after the parameters, as before
+        long with_list, without_list;
+        FILE *f;
+        ann_save_network_binary(text, "test_frozen.nnb");
+        f = fopen("test_frozen.nnb", "rb"); fseek(f, 0, SEEK_END); with_list = ftell(f); fclose(f);
+        ann_set_layer_trainable(text, 1, 1);
+        ann_set_layer_trainable(text, 4, 1);
+        ann_save_network_binary(text, "test_frozen.nnb");
+        f = fopen("test_frozen.nnb", "rb"); fseek(f, 0, SEEK_END); without_list = ftell(f); fclose(f);
+        TESTEX("and write no list when none is", with_list - without_list == 4 * (int)sizeof(int));
+
+        // a list that isn't one is rejected
+        f = fopen("test_frozen.nnb", "ab");
+        int junk[2] = { 12345, 1 };
+        fwrite(junk, sizeof(int), 2, f);
+        fclose(f);
+        PNetwork bad = ann_load_network_binary("test_frozen.nnb");
+        TESTEX("A file with something else after the parameters is rejected", bad == NULL);
+        ann_free_network(bad);
+        remove("test_frozen.nna");
+        remove("test_frozen.nnb");
         TESTEX("while the layers above it learn", ann_evaluate_loss(text, txs, tys) < 0.5f * loss_before);
         ann_free_network(text);
         tensor_free(txs);

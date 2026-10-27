@@ -1138,6 +1138,30 @@ void test_main(int argc, char *argv[])
         ann_free_network(cpu_net);
         ann_free_network(gpu_net);
 
+        // a frozen embedding (pre-trained vectors): backpropagation stops at
+        // the conv above it, and the GPU skips indexing the ids
+        {
+            PTensor ids, text_targets;
+            make_text_data(&ids, &text_targets);
+            PNetwork frozen_text[2] = { make_text_net(1), make_text_net(1) };
+            for (int i = 0; i < 2; i++) {
+                set_known_params(frozen_text[i], 1);
+                ann_set_layer_trainable(frozen_text[i], 1, 0);
+            }
+            int text_uploaded = ann_gpu_upload_network(frozen_text[1]) == ERR_OK;
+            srand(42);
+            ann_train_network(frozen_text[0], ids, text_targets, CNN_SAMPLES);
+            srand(42);
+            ann_train_network(frozen_text[1], ids, text_targets, CNN_SAMPLES);
+            TESTEX("A frozen embedding keeps its vectors through GPU training",
+                   text_uploaded && has_known_params(frozen_text[1], 1));
+            TESTEX("and the layers above it train as on the CPU", cnn_nets_close(frozen_text[0], frozen_text[1], 1e-3f, 1));
+            ann_free_network(frozen_text[0]);
+            ann_free_network(frozen_text[1]);
+            tensor_free(ids);
+            tensor_free(text_targets);
+        }
+
         tensor_free(inputs);
         tensor_free(targets);
 

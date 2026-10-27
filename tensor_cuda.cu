@@ -625,7 +625,9 @@ static int cuda_backward_pass(PNetwork pnet, int batch)
 {
     int layer_count = pnet->layer_count;
 
-    for (int li = layer_count - 1; li >= 1; li--)
+    // down to the lowest layer that trains: frozen layers below it need no gradients
+    int lowest = ann_lowest_trained_layer(pnet);
+    for (int li = layer_count - 1; lowest && li >= lowest; li--)
     {
         PLayer layer      = &pnet->layers[li];
         PLayer prev_layer = &pnet->layers[li - 1];
@@ -663,7 +665,7 @@ static int cuda_backward_pass(PNetwork pnet, int batch)
         cuda_bias_grad_sum<<<cuda_blocks(nodes), CUDA_THREADS>>>(dl_dz, db, batch, nodes);
 
         // Propagate delta to previous layer: dl_dz_prev = dl_dz * W
-        if (li > 1)
+        if (li > lowest)
         {
             float *dl_dz_prev = (float *)prev_layer->t_batch_dl_dz->gpu_buf;
             if (!cuda_gemm_rowmajor(0, 0, batch, prev_nodes, nodes, 1.0f, dl_dz, W, 0.0f, dl_dz_prev))

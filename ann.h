@@ -1771,7 +1771,8 @@ ANN_API int ann_set_layer_param(PNetwork pnet, int layer, int index, const real 
  * leaves a frozen layer's parameters as they are: optimizers, weight decay
  * and L1 regularization skip them. Gradients still flow through it to the
  * layers below. A frozen batch norm layer still updates its running mean and
- * variance. The setting is not saved with the network.
+ * variance. Saves (.nna, .nnb) keep the setting, in a list after the
+ * parameters that older libann ignores; ONNX export does not.
  *
  * @param pnet Network to change (must not be NULL)
  * @param layer Layer index, 1 .. ann_get_layer_count() - 1

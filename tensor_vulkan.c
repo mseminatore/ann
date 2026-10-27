@@ -1913,7 +1913,8 @@ static int emb_prepare(PNetwork pnet, VkSlot *slot, const real *ids, int rows, s
     g_vk.emb_count = 0;
     free(g_vk.emb_host);
     g_vk.emb_host = NULL;
-    if (pnet->layers[1].kind != LAYER_KIND_EMBEDDING)
+    // the index only serves the weight gradient, which a frozen embedding skips
+    if (pnet->layers[1].kind != LAYER_KIND_EMBEDDING || pnet->layers[1].frozen)
         return 1;
     size_t n = (size_t)rows * pnet->layers[0].node_count;
     g_vk.emb_host = (uint32_t *)malloc((3 * n + 2) * sizeof(uint32_t));
@@ -2437,7 +2438,9 @@ static PTensor dropout_mask(PNetwork pnet, int layer, int batch_size)
 //-----------------------------------------------------------
 static void encode_backward(PNetwork pnet, int batch_size, VkSlot *slot)
 {
-    for (int li = pnet->layer_count - 1; li >= 1; li--)
+    // down to the lowest layer that trains: frozen layers below it need no gradients
+    int lowest = ann_lowest_trained_layer(pnet);
+    for (int li = pnet->layer_count - 1; lowest && li >= lowest; li--)
     {
         PLayer layer = &pnet->layers[li];
         PLayer prev = &pnet->layers[li - 1];
@@ -2447,7 +2450,7 @@ static void encode_backward(PNetwork pnet, int batch_size, VkSlot *slot)
 
         VkBuf *dl_dz = (VkBuf *)layer->t_batch_dl_dz->gpu_buf;
         VkBuf *A_prev = li == 1 ? slot->inputs : (VkBuf *)prev->t_batch_values->gpu_buf;
-        VkBuf *dX = li > 1 ? (VkBuf *)prev->t_batch_dl_dz->gpu_buf : NULL;
+        VkBuf *dX = li > lowest ? (VkBuf *)prev->t_batch_dl_dz->gpu_buf : NULL;
 
         if (li < pnet->layer_count - 1)
         {

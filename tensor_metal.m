@@ -1569,6 +1569,27 @@ static MPSMatrix *gpu_matrix(id<MTLBuffer> buf, NSUInteger rows, NSUInteger cols
 }
 
 //-----------------------------------------------------------
+// The [rows x cols] block at (row, col) of a row-major matrix that is
+// stride floats wide, as a view of the same buffer
+//-----------------------------------------------------------
+static MPSMatrix *gpu_submatrix(id<MTLBuffer> buf, NSUInteger stride, NSUInteger row, NSUInteger col,
+                                NSUInteger rows, NSUInteger cols)
+{
+    MPSMatrixDescriptor *desc = [MPSMatrixDescriptor matrixDescriptorWithRows:rows
+                                                                      columns:cols
+                                                                     rowBytes:stride * sizeof(float)
+                                                                     dataType:MPSDataTypeFloat32];
+    return [[MPSMatrix alloc] initWithBuffer:buf offset:(row * stride + col) * sizeof(float) descriptor:desc];
+}
+
+// GEMM dimensions above this are split into blocks: on an Intel Iris Plus
+// 655, MPS runs some large GEMMs through textures, which are at most 16384
+// high, and asserts on bigger ones. The first to fail was a text conv,
+// [26400 x 320] x [320 x 128] (132 samples of 200 steps; 131 ran), while
+// [60000 x 320] x [320 x 24] ran, so it depends on the shape, not only on size
+#define GEMM_MAX_DIM 16384
+
+//-----------------------------------------------------------
 // Encode C = alpha * op(A) * op(B) + beta * C. A, B and C are given with
 // their stored shapes; op() transposes when asked.
 //-----------------------------------------------------------
@@ -1598,10 +1619,31 @@ static void encode_gemm(id<MTLCommandBuffer> cmd,
         }
     }
     end_compute();
-    [gemm_kernel(trans_a, trans_b, M, N, K, alpha, beta) encodeToCommandBuffer:cmd
-                                                                    leftMatrix:gpu_matrix(a, a_rows, a_cols)
-                                                                   rightMatrix:gpu_matrix(b, b_rows, b_cols)
-                                                                  resultMatrix:gpu_matrix(c, M, N)];
+    if (M <= GEMM_MAX_DIM && N <= GEMM_MAX_DIM && K <= GEMM_MAX_DIM) {
+        [gemm_kernel(trans_a, trans_b, M, N, K, alpha, beta) encodeToCommandBuffer:cmd
+                                                                        leftMatrix:gpu_matrix(a, a_rows, a_cols)
+                                                                       rightMatrix:gpu_matrix(b, b_rows, b_cols)
+                                                                      resultMatrix:gpu_matrix(c, M, N)];
+        return;
+    }
+
+    // blocks of C [M x N], each summed over blocks of K (beta applies to the first)
+    for (NSUInteger m0 = 0; m0 < M; m0 += GEMM_MAX_DIM) {
+        NSUInteger mb = MIN(GEMM_MAX_DIM, M - m0);
+        for (NSUInteger n0 = 0; n0 < N; n0 += GEMM_MAX_DIM) {
+            NSUInteger nb = MIN(GEMM_MAX_DIM, N - n0);
+            for (NSUInteger k0 = 0; k0 < K; k0 += GEMM_MAX_DIM) {
+                NSUInteger kb = MIN(GEMM_MAX_DIM, K - k0);
+                MPSMatrix *left = trans_a ? gpu_submatrix(a, a_cols, k0, m0, kb, mb)
+                                          : gpu_submatrix(a, a_cols, m0, k0, mb, kb);
+                MPSMatrix *right = trans_b ? gpu_submatrix(b, b_cols, n0, k0, nb, kb)
+                                           : gpu_submatrix(b, b_cols, k0, n0, kb, nb);
+                [gemm_kernel(trans_a, trans_b, mb, nb, kb, alpha, k0 ? 1.0 : beta)
+                    encodeToCommandBuffer:cmd leftMatrix:left rightMatrix:right
+                             resultMatrix:gpu_submatrix(c, N, m0, n0, mb, nb)];
+            }
+        }
+    }
 }
 
 //-----------------------------------------------------------

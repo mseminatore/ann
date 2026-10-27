@@ -1014,6 +1014,78 @@ void test_main(int argc, char *argv[])
         ann_free_network(big);
         tensor_free(big_in);
         tensor_free(big_out);
+
+        // GEMMs with a dimension over 16384 run as blocks: MPS on Intel GPUs
+        // runs some large ones through textures and asserts when they are more
+        // than 16384 high (this conv's shape does, unsplit). 300 texts of 200
+        // ids make a conv GEMM of 60000 x 320 x 128 when predicting, and
+        // batches of 256 one of 51200 rows forward and over 51200 positions
+        // for the weight gradient
+        enum { TEXTS = 300, STEPS = 200 };
+        PTensor ids = tensor_zeros(TEXTS, STEPS), labels = tensor_zeros(TEXTS, 2);
+        srand(11);
+        for (int i = 0; i < TEXTS; i++) {
+            int len = 20 + rand() % (STEPS - 20);
+            for (int t = 0; t < len; t++)
+                ids->values[i * STEPS + t] = (real)(1 + rand() % 499);
+            labels->values[i * 2 + rand() % 2] = 1.0f;
+        }
+        PNetwork long_text[2];
+        for (int i = 0; i < 2; i++) {
+            long_text[i] = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+            ann_add_layer(long_text[i], STEPS, LAYER_INPUT, ACTIVATION_NULL);
+            ann_add_embedding_masked(long_text[i], 500, 64, 0);              // 64x1x200
+            ann_add_conv1d(long_text[i], 128, 5, 1, 2, ACTIVATION_RELU);     // im2col 200 x 320 per text: 65 MB for 256
+            ann_add_global_maxpool2d(long_text[i]);
+            ann_add_layer(long_text[i], 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(long_text[i], 0.01f);
+            ann_set_convergence(long_text[i], 0.0f);
+            ann_set_epoch_limit(long_text[i], 2);
+            ann_set_batch_size(long_text[i], 256);
+        }
+        int long_uploaded = ann_gpu_upload_network(long_text[1]) == ERR_OK;
+        srand(42);
+        ann_train_network(long_text[0], ids, labels, TEXTS);
+        srand(42);
+        ann_train_network(long_text[1], ids, labels, TEXTS);
+        TESTEX("GPU training in batches of 256 texts of 200 steps (GEMMs split into blocks) matches the CPU",
+               long_uploaded && cnn_nets_close(long_text[0], long_text[1], 1e-3f, 0));
+        TESTEX("and predicting all 300 at once matches the CPU", cnn_gpu_matches_cpu(long_text[1], ids, TOLERANCE));
+        ann_free_network(long_text[0]);
+        ann_free_network(long_text[1]);
+        tensor_free(ids);
+        tensor_free(labels);
+
+        // a dense layer of 20000 nodes: split columns forward, rows and the
+        // inner dimension backward
+        PTensor wide_in = tensor_create(64, 8), wide_out = tensor_zeros(64, 2);
+        for (int i = 0; i < 64 * 8; i++)
+            wide_in->values[i] = (real)rand() / (real)RAND_MAX;
+        for (int i = 0; i < 64; i++)
+            wide_out->values[i * 2 + i % 2] = 1.0f;
+        PNetwork wide_net[2];
+        for (int i = 0; i < 2; i++) {
+            wide_net[i] = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+            ann_add_layer(wide_net[i], 8, LAYER_INPUT, ACTIVATION_NULL);
+            ann_add_layer(wide_net[i], 20000, LAYER_HIDDEN, ACTIVATION_RELU);
+            ann_add_layer(wide_net[i], 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+            ann_set_learning_rate(wide_net[i], 0.001f);
+            ann_set_convergence(wide_net[i], 0.0f);
+            ann_set_epoch_limit(wide_net[i], 2);
+            ann_set_batch_size(wide_net[i], 32);
+        }
+        int wide_uploaded = ann_gpu_upload_network(wide_net[1]) == ERR_OK;
+        srand(42);
+        ann_train_network(wide_net[0], wide_in, wide_out, 64);
+        srand(42);
+        ann_train_network(wide_net[1], wide_in, wide_out, 64);
+        TESTEX("GPU training with a 20000-node dense layer (GEMMs split into blocks) matches the CPU",
+               wide_uploaded && cnn_nets_close(wide_net[0], wide_net[1], 1e-3f, 0));
+        TESTEX("and so does its inference", cnn_gpu_matches_cpu(wide_net[1], wide_in, TOLERANCE));
+        ann_free_network(wide_net[0]);
+        ann_free_network(wide_net[1]);
+        tensor_free(wide_in);
+        tensor_free(wide_out);
     }
 
     run_gpu_consistency_tests();

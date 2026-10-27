@@ -95,7 +95,8 @@ int main(int argc, char *argv[])
 
 	char *filename = DIR_FIX "num5x7.csv";
 
-	PNetwork pnet = ann_make_network(OPT_DEFAULT, LOSS_DEFAULT);
+	// plain SGD, which the high learning rate below suits (Adam diverges at 0.35)
+	PNetwork pnet = ann_make_network(OPT_SGD, LOSS_DEFAULT);
 	if (!pnet)
 		return ERR_FAIL;
 

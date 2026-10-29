@@ -94,6 +94,7 @@ static int names_match(const char *a, const char *b)
 ANN_API int ann_gpu_init(void)
 {
     const char *want = getenv("ANN_GPU");
+    const char *named = NULL;		// the compiled-in backend ANN_GPU names
     if (want && !*want)
         want = NULL;
 
@@ -102,12 +103,29 @@ ANN_API int ann_gpu_init(void)
         GpuBackend *backend = g_gpu_backends[i];
         if (want && !names_match(want, backend->name))
             continue;
+        named = backend->name;
         if (backend->init())
         {
             g_gpu_backend = backend;
             printf("[ann] Using %s GPU backend\n", backend->name);
             return 1;
         }
+    }
+
+    // say why the backend ANN_GPU asked for isn't running
+    if (want && !names_match(want, "none"))
+    {
+        if (named)
+            printf("[ann] ANN_GPU=%s: the %s backend did not start (no supported device or driver); "
+                   "using the CPU\n", want, named);
+        else
+        {
+            printf("[ann] ANN_GPU=%s: this build has no %s backend (it has: ", want, want);
+            for (int i = 0; g_gpu_backends[i]; i++)
+                printf("%s%s", i ? ", " : "", g_gpu_backends[i]->name);
+            printf("%s); using the CPU\n", g_gpu_backends[0] ? "" : "none");
+        }
+        return 0;
     }
     printf("[ann] Using CPU backend\n");
     return 0;

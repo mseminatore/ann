@@ -42,6 +42,12 @@ add_test(NAME test_embedding COMMAND test_embedding)
 add_test(NAME test_layer_params COMMAND test_layer_params)
 add_test(NAME test_csv COMMAND test_csv)
 add_test(NAME test_cxx COMMAND test_cxx)
+add_test(NAME test_gpu_select_missing COMMAND test_gpu_select)
+set_tests_properties(test_gpu_select_missing PROPERTIES ENVIRONMENT "ANN_GPU=opencl"
+    PASS_REGULAR_EXPRESSION "ANN_GPU=opencl: this build has no opencl backend \\(it has: [A-Za-z, ]+\\); using the CPU")
+add_test(NAME test_gpu_select_none COMMAND test_gpu_select)
+set_tests_properties(test_gpu_select_none PROPERTIES ENVIRONMENT "ANN_GPU=None"
+    PASS_REGULAR_EXPRESSION "^\\[ann\\] Using CPU backend")
 add_test(NAME test_threads COMMAND test_threads)
 add_test(NAME test_noise COMMAND test_noise)
 
@@ -397,6 +403,9 @@ add_executable(test_csv tests/test_csv.c testy/test_main.c)
 target_link_libraries(test_csv libann ${BLAS_LIB} ${MATH_LIB})
 
 # libann from C++ (the CUDA backend is C++ too): checks the headers' extern "C" blocks
+add_executable(test_gpu_select tests/test_gpu_select.c)
+target_link_libraries(test_gpu_select libann ${BLAS_LIB} ${MATH_LIB})
+
 add_executable(test_cxx tests/test_cxx.cpp)
 target_link_libraries(test_cxx libann ${BLAS_LIB} ${MATH_LIB})
 

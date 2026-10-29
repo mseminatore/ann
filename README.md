@@ -808,7 +808,10 @@ libann can run training and inference on the GPU. Three backends are supported:
 Metal and Vulkan run every layer kind; CUDA runs dense networks, and keeps CNNs
 on the CPU. A build may include several backends: `ann_gpu_init()` starts the
 first that works (Metal, then Vulkan, then CUDA), and the `ANN_GPU` environment
-variable (`metal`, `vulkan`, `cuda` or `none`) picks one. See
+variable (`metal`, `vulkan`, `cuda` or `none`) picks one. Only the backends a build was
+compiled with can start: when `ANN_GPU` names another, or the one it names finds
+no device, libann prints why and uses the CPU, e.g. `[ann] ANN_GPU=cuda: this
+build has no cuda backend (it has: Vulkan); using the CPU`. See
 [docs/GPU_VULKAN.md](docs/GPU_VULKAN.md) for the Vulkan backend.
 
 When a GPU backend is active, `ann_train_network()` runs each mini-batch

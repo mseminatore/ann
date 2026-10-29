@@ -1122,8 +1122,11 @@ ANN_API int ann_predict(const PNetwork pnet, const real *inputs, real *outputs);
  *
  * Starts the first compiled-in GPU backend that initializes, trying Metal
  * (macOS), Vulkan (AMD, Intel, NVIDIA) and CUDA (NVIDIA) in that order; the
- * ANN_GPU environment variable ("metal", "vulkan", "cuda" or "none") limits
- * it to one backend. Creates the device, command queue, and compiles/loads kernels.
+ * ANN_GPU environment variable ("metal", "vulkan", "cuda" or "none", any
+ * case) limits it to one backend. Only the backends this build was compiled
+ * with can start: when ANN_GPU names another, or the one it names finds no
+ * device, the message printed says so and lists the build's backends.
+ * Creates the device, command queue, and compiles/loads kernels.
  * Must be called before any other ann_gpu_* function.
  *
  * @return 1 on success, 0 if no GPU backend is available or initialization fails

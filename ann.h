@@ -644,7 +644,8 @@ ANN_API int ann_add_batchnorm(PNetwork pnet, Activation_type activation);
  * train nothing; padding_idx's row stays zero. Weights start N(0, 1), as
  * PyTorch's nn.Embedding. No gradient reaches the layer below. Maps to ONNX
  * Cast, Gather, Transpose and Unsqueeze nodes (PyTorch's nn.Embedding imports).
- * Networks with an embedding cannot be quantized or exported as C headers yet.
+ * As the first layer, it quantizes to int8 and exports as a C header that
+ * takes token ids (see ann_quantize and docs/C_EXPORT.md).
  * The Metal and Vulkan backends train and run them when the embedding is layer
  * 1 (reading the inputs); elsewhere they stay on the CPU. The layers above
  * still see the padding steps; see ann_add_embedding_masked to leave them out.
@@ -837,8 +838,13 @@ typedef struct QuantizedNetwork *PQuantizedNetwork;
  *
  * Runs the network over the calibration rows to find each layer's value
  * range; a few hundred representative training samples are usually enough.
- * Supports dense, conv2d, maxpool2d and flatten layers with any activation
- * (softmax only on the output layer). The network is not changed.
+ * Supports dense, conv (also grouped, depthwise and 1-D), max pool,
+ * upsample, flatten, reshape, global average and max pool and batch norm
+ * (folded into the layer before it) layers with any activation (softmax only
+ * on the output layer), and an embedding as the first layer, masked or not.
+ * An embedding model's inputs are token ids, which stay ids: its table
+ * becomes int8 in one scale (a lookup is a copy), and the int8 runtime
+ * leaves padding out as libann does. The network is not changed.
  *
  * @param pnet Trained network
  * @param calibration_inputs Input rows [samples x input nodes]
@@ -855,7 +861,8 @@ ANN_API void ann_free_quantized(PQuantizedNetwork q);
  * Run the int8 model on real inputs: the inputs are quantized, the model
  * runs in integer math, and the outputs are dequantized (with softmax
  * applied if the network's output layer has it). Gives the same results as
- * the exported header's <prefix>_predict_float().
+ * the exported header's <prefix>_predict_float(). For a model that starts
+ * with an embedding the inputs are token ids, as for ann_predict.
  *
  * @return ERR_OK, ERR_NULL_PTR or ERR_INVALID
  */
@@ -866,9 +873,20 @@ ANN_API int ann_quantized_predict(const PQuantizedNetwork q, const real *inputs,
  * are the int8 logits). Gives the same results as the exported header's
  * <prefix>_predict().
  *
- * @return ERR_OK, ERR_NULL_PTR or ERR_INVALID
+ * @return ERR_OK, ERR_NULL_PTR or ERR_INVALID (also for a model that starts
+ *         with an embedding: see ann_quantized_predict_ids)
  */
 ANN_API int ann_quantized_predict_int8(const PQuantizedNetwork q, const signed char *inputs, signed char *outputs);
+
+/**
+ * Run an int8 model that starts with an embedding on token ids, giving int8
+ * outputs (softmax outputs are the int8 logits). Gives the same results as
+ * the exported header's <prefix>_predict().
+ *
+ * @param ids One sample's token ids (the input layer's node count of them)
+ * @return ERR_OK, ERR_NULL_PTR or ERR_INVALID (a model without an embedding)
+ */
+ANN_API int ann_quantized_predict_ids(const PQuantizedNetwork q, const int *ids, signed char *outputs);
 
 /**
  * The int8 model's input and output quantization: real = scale * (q - zero_point).

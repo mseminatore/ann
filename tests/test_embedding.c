@@ -698,11 +698,90 @@ void test_main(int argc, char *argv[])
         TESTEX("and predicts identically", back && max_pred_diff(net, back, xt, NT) == 0.0f);
         ann_free_network(back);
 
+        // int8: the table is int8 and the ids stay ids
         PQuantizedNetwork q = ann_quantize(net, tx);
-        TESTEX("A network with an embedding cannot be quantized yet", q == NULL &&
-               ann_export_c_header(net, NULL, "test_emb.h", "emb") == ERR_INVALID);
+        real fq_worst = 0.0f, fq_acc = q ? ann_quantized_evaluate_accuracy(q, txt, tyt) : 0.0f;
+        for (int r = 0; q && r < NT; r++) {
+            real yf[2], yq[2];
+            ann_predict(net, &xt[r * SEQ], yf);
+            ann_quantized_predict(q, &xt[r * SEQ], yq);
+            for (int k = 0; k < 2; k++)
+                if (fabsf(yf[k] - yq[k]) > fq_worst) fq_worst = fabsf(yf[k] - yq[k]);
+        }
+        printf("\t  int8: test accuracy %.2f (float %.2f), probabilities within %.3f\n", fq_acc, acc, fq_worst);
+        TESTEX("A text network quantizes to int8", q != NULL);
+        TESTEX("with the float model's accuracy (within 2 points) and probabilities (within 0.05)",
+               fq_acc >= acc - 0.02f && fq_worst < 0.05f);
+        signed char ids_q[SEQ], out_q[2];
+        memset(ids_q, 1, sizeof(ids_q));
+        TESTEX("int8 inputs are rejected: token ids don't fit in 8 bits",
+               q && ann_quantized_predict_int8(q, ids_q, out_q) == ERR_INVALID);
+        int row_ids[SEQ], ids_agree = q != NULL;
+        for (int r = 0; q && r < NT; r++) {
+            real yq[2];
+            for (int t = 0; t < SEQ; t++) row_ids[t] = (int)xt[r * SEQ + t];
+            ids_agree &= ann_quantized_predict_ids(q, row_ids, out_q) == ERR_OK &&
+                         ann_quantized_predict(q, &xt[r * SEQ], yq) == ERR_OK &&
+                         (out_q[1] > out_q[0]) == (yq[1] > yq[0]);
+        }
+        TESTEX("int ids give int8 outputs that rank the classes as the real-input path", ids_agree);
+        TESTEX("Its int8 and float32 headers take token ids", q &&
+               ann_export_c_header(NULL, q, "test_emb.h", "emb_q") == ERR_OK &&
+               file_contains("test_emb.h", "ANN_RT_EMBEDDING") && file_contains("test_emb.h", "ANN_RT_VERSION < 7") &&
+               file_contains("test_emb.h", "emb_q_predict(const int32_t *ids, int8_t *output") &&
+               ann_export_c_header(net, NULL, "test_emb.h", "emb_f") == ERR_OK &&
+               file_contains("test_emb.h", "emb_f_predict(const int32_t *ids, float *output"));
         ann_free_quantized(q);
         remove("test_emb.h");
+
+        // an embedding must read the inputs to be quantized
+        PNetwork late = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        late->print_func = quiet;
+        ann_add_layer(late, SEQ, LAYER_INPUT, ACTIVATION_NULL);
+        ann_add_layer(late, SEQ, LAYER_HIDDEN, ACTIVATION_RELU);
+        ann_add_embedding(late, VOCAB, 4, 0);
+        ann_add_global_maxpool2d(late);
+        ann_add_layer(late, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+        ann_train_begin(late);
+        ann_train_end(late);
+        PQuantizedNetwork late_q = ann_quantize(late, tx);
+        TESTEX("but not one above another layer", late_q == NULL);
+        ann_free_quantized(late_q);
+        ann_free_network(late);
+
+        // masked: the int8 model leaves the padding out as the float one does (with
+        // texts of 4 to 16 ids, a wrong mask moves the pooled values far)
+        srand(3);
+        PNetwork mq = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        mq->print_func = quiet;
+        ann_add_layer(mq, SEQ, LAYER_INPUT, ACTIVATION_NULL);
+        ann_add_embedding_masked(mq, VOCAB, 8, 0);
+        ann_add_conv1d(mq, 12, 3, 1, 1, ACTIVATION_NULL);
+        ann_add_batchnorm(mq, ACTIVATION_RELU);
+        ann_add_maxpool1d(mq, 2, 2);
+        ann_add_conv1d(mq, 12, 3, 1, 1, ACTIVATION_TANH);
+        ann_add_global_avgpool2d(mq);
+        ann_add_layer(mq, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+        ann_set_learning_rate(mq, 0.01f);
+        ann_set_convergence(mq, 0.0f);
+        ann_set_batch_size(mq, 16);
+        ann_set_epoch_limit(mq, 40);
+        ann_train_network(mq, tx, ty, N);
+        real m_acc = ann_evaluate_accuracy(mq, txt, tyt);
+        q = ann_quantize(mq, tx);
+        real mq_acc = q ? ann_quantized_evaluate_accuracy(q, txt, tyt) : 0.0f, mq_worst = 0.0f;
+        for (int r = 0; q && r < NT; r++) {
+            real yf[2], yq[2];
+            ann_predict(mq, &xt[r * SEQ], yf);
+            ann_quantized_predict(q, &xt[r * SEQ], yq);
+            for (int k = 0; k < 2; k++)
+                if (fabsf(yf[k] - yq[k]) > mq_worst) mq_worst = fabsf(yf[k] - yq[k]);
+        }
+        printf("\t  masked int8: test accuracy %.2f (float %.2f), probabilities within %.3f\n", mq_acc, m_acc, mq_worst);
+        TESTEX("A masked network (conv, batch norm, pool, average pool) quantizes as closely",
+               q && mq_acc >= m_acc - 0.02f && mq_worst < 0.05f);
+        ann_free_quantized(q);
+        ann_free_network(mq);
         tensor_free(tx);
         tensor_free(ty);
         tensor_free(txt);
@@ -792,8 +871,11 @@ void test_main(int argc, char *argv[])
         }
         printf("\t  conv1d/global max pool: %.2f steps\n", worst);
         TESTEX("Conv1d and global max pool quantize within 3 steps", q && worst <= 3.0);
+        int some_ids[24] = { 0 };
+        signed char some_out[3];
+        TESTEX("A model without an embedding takes no ids", q && ann_quantized_predict_ids(q, some_ids, some_out) == ERR_INVALID);
         TESTEX("and export a header that uses it", q && ann_export_c_header(NULL, q, "test_gmp.h", "gmp_q") == ERR_OK &&
-               file_contains("test_gmp.h", "ANN_RT_GLOBAL_MAXPOOL2D") && file_contains("test_gmp.h", "ANN_RT_VERSION < 6"));
+               file_contains("test_gmp.h", "ANN_RT_GLOBAL_MAXPOOL2D") && file_contains("test_gmp.h", "ANN_RT_VERSION < 7"));
         remove("test_gmp.h");
         ann_free_quantized(q);
         ann_free_network(net);

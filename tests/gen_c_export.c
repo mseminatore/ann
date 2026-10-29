@@ -3,8 +3,8 @@
 //
 // Trains a small dense network and a small CNN, quantizes them, and writes
 // into the output directory:
-//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h, bn_q.h, dw_q.h, ts_q.h   int8 headers (ann_export_c_header with the int8 model)
-//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h, bn_f.h, dw_f.h, ts_f.h   float32 headers (ann_export_c_header without it)
+//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h, bn_q.h, dw_q.h, ts_q.h, txt_q.h   int8 headers (ann_export_c_header with the int8 model)
+//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h, bn_f.h, dw_f.h, ts_f.h, txt_f.h   float32 headers (ann_export_c_header without it)
 //   expected.h           test inputs and libann's outputs for them:
 //                        ann_quantized_predict_int8, ann_quantized_predict and
 //                        ann_predict
@@ -47,6 +47,18 @@ static void write_reals(FILE *f, const char *name, const real *v, int rows, int 
 	fprintf(f, "};\n");
 }
 
+static void write_ids(FILE *f, const char *name, const real *v, int rows, int cols)
+{
+	fprintf(f, "static const int32_t %s[%d][%d] = {\n", name, rows, cols);
+	for (int r = 0; r < rows; r++)
+	{
+		fprintf(f, "\t{ ");
+		for (int c = 0; c < cols; c++)
+			fprintf(f, "%d%s", (int)v[r * cols + c], c + 1 < cols ? ", " : " },\n");
+	}
+	fprintf(f, "};\n");
+}
+
 static void write_int8s(FILE *f, const char *name, const signed char *v, int rows, int cols)
 {
 	fprintf(f, "static const int8_t %s[%d][%d] = {\n", name, rows, cols);
@@ -78,6 +90,84 @@ static void make_data(real *x, real *y, int rows, int in, int out, int seed)
 		}
 		y[r * out + cls] = 1.0f;
 	}
+}
+
+// token ids for a text model: texts of 2 to `in` ids from 1..vocab-1, padded
+// with 0 at the end, class 1 when id 3 appears
+static void make_texts(real *x, real *y, int rows, int in, int vocab, int seed)
+{
+	unsigned r = 2654435761u * (unsigned)(seed + 1);
+	for (int n = 0; n < rows; n++)
+	{
+		int len = 2 + (int)((r >> 7) % (unsigned)(in - 1)), has = 0;
+		for (int t = 0; t < in; t++)
+		{
+			r = r * 1103515245u + 12345u;
+			int id = t < len ? 1 + (int)((r >> 16) % (unsigned)(vocab - 1)) : 0;
+			x[n * in + t] = (real)id;
+			has |= id == 3;
+		}
+		y[n * 2] = (real)!has;
+		y[n * 2 + 1] = (real)has;
+	}
+}
+
+// train, quantize and export a text model (it reads token ids), and write
+// its expected outputs: libann's int8 results through ann_quantized_predict
+// and its float ones
+static int export_text_model(PNetwork net, const char *dir, const char *name, FILE *expected, int vocab, int seed)
+{
+	int in = ann_get_layer_nodes(net, 0), out = ann_get_layer_nodes(net, ann_get_layer_count(net) - 1);
+	real *x = malloc(TRAIN * in * sizeof(real)), *y = malloc(TRAIN * out * sizeof(real));
+	real *yq = malloc(ROWS * out * sizeof(real)), *yf = malloc(ROWS * out * sizeof(real));
+	signed char *yi = malloc(ROWS * out);
+	int *ids = malloc(in * sizeof(int));
+	char path[1024], prefix[64], array[64];
+	int err = ERR_OK;
+
+	make_texts(x, y, TRAIN, in, vocab, seed);
+	PTensor tx = tensor_create_from_array(TRAIN, in, x);
+	PTensor ty = tensor_create_from_array(TRAIN, out, y);
+
+	net->print_func = quiet;
+	ann_set_convergence(net, 0.0f);
+	ann_set_epoch_limit(net, 20);
+	ann_train_network(net, tx, ty, TRAIN);
+
+	PQuantizedNetwork q = ann_quantize(net, tx);
+	if (!q)
+		return ERR_FAIL;
+
+	snprintf(prefix, sizeof(prefix), "%s_q", name);
+	snprintf(path, sizeof(path), "%s/%s.h", dir, prefix);
+	err |= ann_export_c_header(NULL, q, path, prefix);
+	snprintf(prefix, sizeof(prefix), "%s_f", name);
+	snprintf(path, sizeof(path), "%s/%s.h", dir, prefix);
+	err |= ann_export_c_header(net, NULL, path, prefix);
+
+	for (int r = 0; r < ROWS; r++)
+	{
+		for (int t = 0; t < in; t++)
+			ids[t] = (int)x[r * in + t];
+		err |= ann_quantized_predict_ids(q, ids, &yi[r * out]);
+		err |= ann_quantized_predict(q, &x[r * in], &yq[r * out]);
+		err |= ann_predict(net, &x[r * in], &yf[r * out]);
+	}
+
+	snprintf(array, sizeof(array), "%s_ids", name);
+	write_ids(expected, array, x, ROWS, in);
+	snprintf(array, sizeof(array), "%s_y_int8", name);
+	write_int8s(expected, array, yi, ROWS, out);
+	snprintf(array, sizeof(array), "%s_y_q", name);
+	write_reals(expected, array, yq, ROWS, out);
+	snprintf(array, sizeof(array), "%s_y_float", name);
+	write_reals(expected, array, yf, ROWS, out);
+
+	ann_free_quantized(q);
+	tensor_free(tx);
+	tensor_free(ty);
+	free(x); free(y); free(yq); free(yf); free(yi); free(ids);
+	return err;
 }
 
 // train, quantize and export one model, and write its expected outputs
@@ -245,6 +335,20 @@ int main(int argc, char *argv[])
 	ann_add_layer(ts, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 	err |= export_model(ts, argv[1], "ts", expected, 7);
 	ann_free_network(ts);
+
+	// text: a masked embedding, a 1-D conv with batch norm, a strided pool, a
+	// second conv and global average pooling, which all leave the padding out
+	PNetwork txt = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+	ann_add_layer(txt, 12, LAYER_INPUT, ACTIVATION_NULL);
+	ann_add_embedding_masked(txt, 20, 4, 0);                           // 4x1x12
+	ann_add_conv1d(txt, 6, 3, 1, 1, ACTIVATION_NULL);                  // 6x1x12
+	ann_add_batchnorm(txt, ACTIVATION_RELU);
+	ann_add_maxpool1d(txt, 2, 2);                                      // 6x1x6
+	ann_add_conv1d(txt, 5, 3, 1, 1, ACTIVATION_TANH);                  // 5x1x6
+	ann_add_global_avgpool2d(txt);                                     // 5
+	ann_add_layer(txt, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+	err |= export_text_model(txt, argv[1], "txt", expected, 20, 8);
+	ann_free_network(txt);
 
 	if (fclose(expected) != 0 || err != ERR_OK)
 	{

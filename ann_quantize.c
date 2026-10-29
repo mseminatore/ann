@@ -55,8 +55,9 @@ struct QuantizedNetwork
 {
 	ann_rt_model model;
 	ann_rt_layer *layers;		// owns every array the layers point to
-	int8_t *workspace;			// 2 * max_size + input_size + output_size
+	int8_t *workspace;			// 2 * max_size + input_size + output_size + the masks
 	float *in_f, *out_f;		// float copies of one sample's inputs and outputs
+	int32_t *ids;				// one sample's token ids, for a model that starts with an embedding
 };
 
 //------------------------------
@@ -111,6 +112,8 @@ static int is_weighted(const ann_rt_layer *l)
 
 static int weight_count(const ann_rt_layer *l)
 {
+	if (l->kind == ANN_RT_EMBEDDING)
+		return l->size * l->out_c;
 	if (l->kind == ANN_RT_DENSE)
 		return l->out_c * l->in_c * l->in_h * l->in_w;
 	if (l->kind == ANN_RT_CONV2D)
@@ -208,7 +211,7 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 				free_float_layers(layers, count);
 				return ERR_INVALID;
 			}
-			continue;
+			continue;		// a mask is the folded layer's too
 		}
 
 		ann_rt_layer *l = &layers[n++];
@@ -239,6 +242,16 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 		case LAYER_KIND_UPSAMPLE2D:	l->kind = ANN_RT_UPSAMPLE2D; break;
 		case LAYER_KIND_GLOBAL_AVGPOOL2D: l->kind = ANN_RT_GLOBAL_AVGPOOL2D; break;
 		case LAYER_KIND_GLOBAL_MAXPOOL2D: l->kind = ANN_RT_GLOBAL_MAXPOOL2D; break;
+		case LAYER_KIND_EMBEDDING:
+			// it reads the token ids, so only as the first layer
+			if (k != 1)
+			{
+				free_float_layers(layers, count);
+				return ERR_INVALID;
+			}
+			l->kind = ANN_RT_EMBEDDING;
+			ann_get_layer_settings(pnet, k, &l->size, &l->stride, &l->pad);	// vocabulary, 0, padding id
+			break;
 		default:
 			free_float_layers(layers, count);
 			return ERR_INVALID;
@@ -246,6 +259,29 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 
 		if (src->node_count > model->max_size)
 			model->max_size = src->node_count;
+		l->masked = ann_get_layer_masked(pnet, k);
+		if (l->masked && l->out_w > model->mask_steps)
+			model->mask_steps = l->out_w;
+
+		if (l->kind == ANN_RT_EMBEDDING)
+		{
+			const PTensor W = src->params[0].value;		// [vocab x dim]
+			float *w_f = malloc((size_t)W->rows * W->cols * sizeof(float));
+			int finite = w_f != NULL;
+
+			l->w_f = w_f;
+			for (int i = 0; finite && i < W->rows * W->cols; i++)
+			{
+				w_f[i] = (float)W->values[i];
+				finite = isfinite(w_f[i]) != 0;
+			}
+			if (!finite)
+			{
+				free_float_layers(layers, count);
+				return w_f ? ERR_INVALID : ERR_ALLOC;
+			}
+			continue;
+		}
 
 		if (!is_weighted(l))
 			continue;
@@ -377,9 +413,14 @@ static int calibrate(const ann_rt_model *model, const PTensor inputs, Range *in_
 {
 	float *buf = malloc((2 * model->max_size + model->input_size) * sizeof(float));
 	float *x = buf ? buf + 2 * model->max_size : NULL;
+	uint8_t *masks = malloc(2 * model->mask_steps + 1);
 
-	if (!buf)
+	if (!buf || !masks)
+	{
+		free(buf);
+		free(masks);
 		return ERR_ALLOC;
+	}
 
 	in_range->lo = in_range->hi = 0.0f;
 	for (int n = 0; n < model->layer_count; n++)
@@ -391,6 +432,7 @@ static int calibrate(const ann_rt_model *model, const PTensor inputs, Range *in_
 	for (int r = 0; r < inputs->rows; r++)
 	{
 		const float *src = x;
+		const uint8_t *in_mask = NULL;		// as in ann_rt_run_f
 
 		for (int i = 0; i < model->input_size; i++)
 			x[i] = (float)inputs->values[(size_t)r * inputs->cols + i];
@@ -401,17 +443,23 @@ static int calibrate(const ann_rt_model *model, const PTensor inputs, Range *in_
 			const ann_rt_layer *l = &model->layers[n];
 			float *dst = (src == buf) ? buf + model->max_size : buf;
 			int count = l->out_c * l->out_h * l->out_w;
+			uint8_t *mask = in_mask == masks ? masks + model->mask_steps : masks;
 
 			if (l->kind == ANN_RT_FLATTEN)
+			{
+				in_mask = NULL;
 				continue;
-			if (l->kind == ANN_RT_MAXPOOL2D)
+			}
+			if (l->kind == ANN_RT_EMBEDDING)
+				ann_rt_embedding_f(l, NULL, x, dst);
+			else if (l->kind == ANN_RT_MAXPOOL2D)
 				ann_rt_maxpool_f(l, src, dst);
 			else if (l->kind == ANN_RT_UPSAMPLE2D)
 				ann_rt_upsample_f(l, src, dst);
 			else if (l->kind == ANN_RT_GLOBAL_AVGPOOL2D)
-				ann_rt_global_avgpool_f(l, src, dst);
+				ann_rt_global_avgpool_f(l, src, dst, in_mask);
 			else if (l->kind == ANN_RT_GLOBAL_MAXPOOL2D)
-				ann_rt_global_maxpool_f(l, src, dst);
+				ann_rt_global_maxpool_f(l, src, dst, in_mask);
 			else
 			{
 				ann_rt_linear_f(l, src, dst);
@@ -419,13 +467,21 @@ static int calibrate(const ann_rt_model *model, const PTensor inputs, Range *in_
 				if (l->act != ANN_RT_ACT_SOFTMAX)
 					for (int i = 0; i < count; i++)
 						dst[i] = ann_rt_activate_f(l->act, dst[i]);
-				range_add(&y[n], dst, count);
 			}
+			if (l->masked)
+			{
+				ann_rt_mask(l, NULL, x, in_mask, mask);
+				ann_rt_mask_zero_f(l, mask, dst);
+			}
+			if (is_weighted(l))
+				range_add(&y[n], dst, count);
+			in_mask = l->masked ? mask : NULL;
 			src = dst;
 		}
 	}
 
 	free(buf);
+	free(masks);
 	return ERR_OK;
 }
 
@@ -452,6 +508,7 @@ void ann_free_quantized(PQuantizedNetwork q)
 	free(q->workspace);
 	free(q->in_f);
 	free(q->out_f);
+	free(q->ids);
 	free(q);
 }
 
@@ -535,6 +592,30 @@ static int quantize_layer(ann_rt_layer *l, const ann_rt_layer *f, float x_scale,
 }
 
 //------------------------------
+// quantize an embedding's table in the quantization of its output: one scale
+// and zero point for the whole table (its range, with 0 for padding), so the
+// runtime copies rows. Sets *y_scale and *y_zp to it.
+//------------------------------
+static int quantize_embedding(ann_rt_layer *l, const ann_rt_layer *f, float *y_scale, int32_t *y_zp)
+{
+	int n = weight_count(f);
+	int8_t *w_q = malloc(n);
+	Range r = { 0.0f, 0.0f };
+
+	l->w_q = w_q;
+	if (!w_q)
+		return ERR_ALLOC;
+	range_add(&r, f->w_f, n);
+	range_params(r, y_scale, y_zp);
+	for (int i = 0; i < n; i++)
+		w_q[i] = quantize_value(f->w_f[i], *y_scale, *y_zp);
+	l->in_zp = 0;
+	l->zp = *y_zp;
+	l->act_min = -128;
+	return ERR_OK;
+}
+
+//------------------------------
 // quantize a trained network to int8, calibrating activation ranges on the
 // rows of calibration_inputs
 //------------------------------
@@ -583,13 +664,17 @@ PQuantizedNetwork ann_quantize(const PNetwork pnet, const PTensor calibration_in
 	q->model = fmodel;
 	q->model.layers = NULL;
 	q->layers = calloc(count, sizeof(ann_rt_layer));
-	q->workspace = malloc(2 * fmodel.max_size + fmodel.input_size + fmodel.output_size);
+	q->workspace = malloc(2 * fmodel.max_size + fmodel.input_size + fmodel.output_size + ann_rt_mask_bytes(&fmodel));
 	q->in_f = malloc(fmodel.input_size * sizeof(float));
 	q->out_f = malloc(fmodel.output_size * sizeof(float));
-	if (!q->layers || !q->workspace || !q->in_f || !q->out_f)
+	q->ids = malloc(fmodel.input_size * sizeof(int32_t));
+	if (!q->layers || !q->workspace || !q->in_f || !q->out_f || !q->ids)
 		goto done;
 	q->model.layers = q->layers;
 
+	// token ids aren't quantized: an embedding model's input quantization is the identity
+	if (flayers[0].kind == ANN_RT_EMBEDDING)
+		in_range.lo = in_range.hi = 0.0f;
 	range_params(in_range, &scale, &zp);
 	q->model.in_scale = scale;
 	q->model.in_zp = zp;
@@ -601,7 +686,13 @@ PQuantizedNetwork ann_quantize(const PNetwork pnet, const PTensor calibration_in
 
 		*l = *f;
 		l->w_f = l->b_f = NULL;
-		if (is_weighted(f))
+		if (f->kind == ANN_RT_EMBEDDING)
+		{
+			err = quantize_embedding(l, f, &scale, &zp);
+			if (err != ERR_OK)
+				goto done;
+		}
+		else if (is_weighted(f))
 		{
 			err = quantize_layer(l, f, scale, zp, z[n], y[n], &scale, &zp);
 			if (err != ERR_OK)
@@ -609,6 +700,7 @@ PQuantizedNetwork ann_quantize(const PNetwork pnet, const PTensor calibration_in
 		}
 		else
 			l->in_zp = l->zp = zp;		// pooling, upsampling and flatten keep the input's quantization
+		l->out_zp = zp;
 	}
 	q->model.out_scale = scale;
 	q->model.out_zp = zp;
@@ -639,6 +731,24 @@ int ann_quantized_predict_int8(const PQuantizedNetwork q, const signed char *inp
 	}
 
 	if (ann_rt_predict_q(&q->model, (const int8_t *)inputs, (int8_t *)outputs, q->workspace) != 0)
+		return ERR_INVALID;
+	return ERR_OK;
+}
+
+//------------------------------
+// int8 inference on token ids (a model that starts with an embedding)
+//------------------------------
+int ann_quantized_predict_ids(const PQuantizedNetwork q, const int *ids, signed char *outputs)
+{
+	if (!q || !ids || !outputs)
+	{
+		report_error(ERR_NULL_PTR, "ann_quantized_predict_ids");
+		return ERR_NULL_PTR;
+	}
+
+	for (int i = 0; i < q->model.input_size; i++)
+		q->ids[i] = (int32_t)ids[i];
+	if (ann_rt_predict_ids_q(&q->model, q->ids, (int8_t *)outputs, q->workspace) != 0)
 		return ERR_INVALID;
 	return ERR_OK;
 }
@@ -753,7 +863,7 @@ static void write_float_array(FILE *f, const char *prefix, const char *name, int
 static const char *kind_name(int32_t kind)
 {
 	static const char *names[] = { "ANN_RT_DENSE", "ANN_RT_CONV2D", "ANN_RT_MAXPOOL2D", "ANN_RT_FLATTEN",
-		"ANN_RT_UPSAMPLE2D", "ANN_RT_GLOBAL_AVGPOOL2D", "ANN_RT_GLOBAL_MAXPOOL2D" };
+		"ANN_RT_UPSAMPLE2D", "ANN_RT_GLOBAL_AVGPOOL2D", "ANN_RT_GLOBAL_MAXPOOL2D", "ANN_RT_EMBEDDING" };
 	return names[kind];
 }
 
@@ -770,11 +880,19 @@ static const char *act_name(int32_t act)
 static int write_header(FILE *f, const ann_rt_model *m, int quantized, const char *prefix, const char *upper)
 {
 	long param_bytes = 0, float_bytes = 0;
-	int ws = quantized ? 2 * m->max_size + m->input_size + m->output_size : 2 * m->max_size;
+	int ws = quantized ? 2 * m->max_size + m->input_size + m->output_size + ann_rt_mask_bytes(m)
+	                   : ann_rt_workspace_f(m);
+	// a model that starts with an embedding takes token ids
+	int ids = m->layer_count > 0 && m->layers[0].kind == ANN_RT_EMBEDDING;
 
 	for (int n = 0; n < m->layer_count; n++)
 	{
 		const ann_rt_layer *l = &m->layers[n];
+		if (l->kind == ANN_RT_EMBEDDING)
+		{
+			param_bytes += quantized ? weight_count(l) : weight_count(l) * 4L;
+			float_bytes += weight_count(l) * 4L;
+		}
 		if (!is_weighted(l))
 			continue;
 		param_bytes += quantized ? weight_count(l) + l->out_c * 9L + (l->lut ? 256 : 0)
@@ -789,11 +907,18 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 		fprintf(f, " (%ld as float32)", float_bytes);
 	fprintf(f, ".\n * Needs ann_rt.h from libann on the include path. See docs/C_EXPORT.md.\n *\n");
 	fprintf(f, " *   static %s ws[%s_WORKSPACE_SIZE];\n", quantized ? "int8_t" : "float", upper);
-	if (quantized)
+	if (quantized && ids)
+	{
+		fprintf(f, " *   %s_predict(ids, output_q, ws);             int32 token ids in, int8 out\n", prefix);
+		fprintf(f, " *   %s_predict_float(ids, output, ws);         float out (not with ANN_RT_NO_FLOAT)\n", prefix);
+	}
+	else if (quantized)
 	{
 		fprintf(f, " *   %s_predict(input_q, output_q, ws);         int8 in and out\n", prefix);
 		fprintf(f, " *   %s_predict_float(input, output, ws);       float in and out (not with ANN_RT_NO_FLOAT)\n", prefix);
 	}
+	else if (ids)
+		fprintf(f, " *   %s_predict(ids, output, ws);               int32 token ids in\n", prefix);
 	else
 		fprintf(f, " *   %s_predict(input, output, ws);\n", prefix);
 	fprintf(f, " *   class = %s_argmax(output);\n */\n\n", prefix);
@@ -820,6 +945,15 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 	for (int n = 0; n < m->layer_count; n++)
 	{
 		const ann_rt_layer *l = &m->layers[n];
+		if (l->kind == ANN_RT_EMBEDDING)
+		{
+			// the table, a row per token id
+			if (quantized)
+				write_int8_array(f, prefix, "w", n, l->w_q, weight_count(l));
+			else
+				write_float_array(f, prefix, "w", n, l->w_f, weight_count(l));
+			fputc('\n', f);
+		}
 		if (!is_weighted(l))
 			continue;
 		if (quantized)
@@ -843,12 +977,15 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 	for (int n = 0; n < m->layer_count; n++)
 	{
 		const ann_rt_layer *l = &m->layers[n];
-		int w = is_weighted(l);
+		int w = is_weighted(l), table = l->kind == ANN_RT_EMBEDDING;
 
 		fprintf(f, "\t{ %s, %s, %d, %d, %d, %d, %d, %d, %d, %d, %d,\n", kind_name(l->kind), act_name(l->act),
 		        (int)l->in_c, (int)l->in_h, (int)l->in_w, (int)l->out_c, (int)l->out_h, (int)l->out_w,
 		        (int)l->size, (int)l->stride, (int)l->pad);
-		if (quantized && w)
+		if (quantized && table)
+			fprintf(f, "\t  %s_w%d, NULL, NULL, NULL, %d, %d, %d, NULL,\n", prefix, n, (int)l->in_zp, (int)l->zp,
+			        (int)l->act_min);
+		else if (quantized && w)
 		{
 			fprintf(f, "\t  %s_w%d, %s_b%d, %s_mult%d, %s_shift%d, %d, %d, %d, ", prefix, n, prefix, n, prefix, n,
 			        prefix, n, (int)l->in_zp, (int)l->zp, (int)l->act_min);
@@ -861,9 +998,12 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 			fprintf(f, "\t  NULL, NULL, NULL, NULL, %d, %d, %d, NULL,\n", (int)l->in_zp, (int)l->zp, (int)l->act_min);
 		if (!quantized && w)
 			fprintf(f, "\t  %s_w%d, %s_b%d,", prefix, n, prefix, n);
+		else if (!quantized && table)
+			fprintf(f, "\t  %s_w%d, NULL,", prefix, n);
 		else
 			fprintf(f, "\t  NULL, NULL,");
-		fprintf(f, " %d, %d, %d, %d },\n", (int)l->groups, (int)l->size_w, (int)l->stride_w, (int)l->pad_w);
+		fprintf(f, " %d, %d, %d, %d, %d, %d },\n", (int)l->groups, (int)l->size_w, (int)l->stride_w, (int)l->pad_w,
+		        (int)l->masked, (int)l->out_zp);
 	}
 	fprintf(f, "};\n\n");
 
@@ -873,9 +1013,20 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 	write_float(f, m->in_scale);
 	fprintf(f, ", %d, ", (int)m->in_zp);
 	write_float(f, m->out_scale);
-	fprintf(f, ", %d\n};\n\n", (int)m->out_zp);
+	fprintf(f, ", %d, %d\n};\n\n", (int)m->out_zp, (int)m->mask_steps);
 
-	if (quantized)
+	if (quantized && ids)
+	{
+		fprintf(f, "ANN_RT_FUNC int %s_predict(const int32_t *ids, int8_t *output, int8_t *workspace)\n"
+		           "{\n\treturn ann_rt_predict_ids_q(&%s_model, ids, output, workspace);\n}\n\n", prefix, prefix);
+		fprintf(f, "#ifndef ANN_RT_NO_FLOAT\n"
+		           "ANN_RT_FUNC int %s_predict_float(const int32_t *ids, float *output, int8_t *workspace)\n"
+		           "{\n\treturn ann_rt_predict_ids_q_float(&%s_model, ids, output, workspace);\n}\n#endif\n\n",
+		        prefix, prefix);
+		fprintf(f, "ANN_RT_FUNC int %s_argmax(const int8_t *output)\n"
+		           "{\n\treturn ann_rt_argmax_q(output, %s_OUTPUT_SIZE);\n}\n\n", prefix, upper);
+	}
+	else if (quantized)
 	{
 		fprintf(f, "ANN_RT_FUNC int %s_predict(const int8_t *input, int8_t *output, int8_t *workspace)\n"
 		           "{\n\treturn ann_rt_predict_q(&%s_model, input, output, workspace);\n}\n\n", prefix, prefix);
@@ -888,8 +1039,12 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 	}
 	else
 	{
-		fprintf(f, "ANN_RT_FUNC int %s_predict(const float *input, float *output, float *workspace)\n"
-		           "{\n\treturn ann_rt_predict_f(&%s_model, input, output, workspace);\n}\n\n", prefix, prefix);
+		if (ids)
+			fprintf(f, "ANN_RT_FUNC int %s_predict(const int32_t *ids, float *output, float *workspace)\n"
+			           "{\n\treturn ann_rt_predict_ids_f(&%s_model, ids, output, workspace);\n}\n\n", prefix, prefix);
+		else
+			fprintf(f, "ANN_RT_FUNC int %s_predict(const float *input, float *output, float *workspace)\n"
+			           "{\n\treturn ann_rt_predict_f(&%s_model, input, output, workspace);\n}\n\n", prefix, prefix);
 		fprintf(f, "ANN_RT_FUNC int %s_argmax(const float *output)\n"
 		           "{\n\treturn ann_rt_argmax_f(output, %s_OUTPUT_SIZE);\n}\n\n", prefix, upper);
 	}

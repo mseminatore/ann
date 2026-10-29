@@ -21,9 +21,9 @@ conv and pool windows non-square, including 1-D convs and pools (`ann_add_conv2d
 
 A generated header initializes every `ann_rt_layer` field, so it builds without
 missing-initializer warnings, and checks that `ann_rt.h` is at least the version that wrote it
-(6: version 2 added upsampling, 3 global average pooling, 4 grouped convolutions, 5 non-square
-windows, 6 global max pooling). Networks with an embedding are rejected (`ERR_INVALID`): the int8
-path quantizes its inputs, and token ids do not fit in 8 bits. Copy `ann_rt.h` from the libann that exported the model. Headers written by older
+(7: version 2 added upsampling, 3 global average pooling, 4 grouped convolutions, 5 non-square
+windows, 6 global max pooling, 7 embeddings with padding masks). Copy `ann_rt.h` from the libann
+that exported the model. Headers written by older
 versions still build with the newer runtime (the fields they leave out read as 0, which means
 one group and a square window), but
 compilers warn about the missing initializers with `-Wextra`. Headers exported by libann 0.7
@@ -90,6 +90,7 @@ make run_exported      # Makefile: expects the headers in the project root
 | `ann_free_quantized(q)` | Free it |
 | `ann_quantized_predict(q, in, out)` | Real in/out; int8 inside (same results as `<prefix>_predict_float`) |
 | `ann_quantized_predict_int8(q, in, out)` | int8 in/out (same results as `<prefix>_predict`) |
+| `ann_quantized_predict_ids(q, ids, out)` | Token ids in, int8 out, for a model that starts with an embedding (same results as its `<prefix>_predict`) |
 | `ann_quantized_get_io_params(q, ...)` | Input/output scale and zero point |
 | `ann_quantized_evaluate_accuracy(q, x, y)` | Classification accuracy of the int8 model |
 | `ann_export_c_header(pnet, q, file, prefix)` | Write the int8 model (`q`), or the float32 network when `q` is `NULL` |
@@ -114,6 +115,27 @@ For prefix `model`, an int8 header defines:
 
 A float32 header defines the sizes and `model_predict(const float *in, float *out, float *ws)` /
 `model_argmax(const float *out)`, with a `float` workspace.
+
+### Text models (embeddings)
+
+A model whose first layer is an embedding reads token ids, which aren't quantized. Its header
+takes them as `int32_t`:
+
+| Symbol | Meaning |
+|--------|---------|
+| `model_predict(const int32_t *ids, int8_t *out, int8_t *ws)` | int8 header: ids in, int8 out |
+| `model_predict_float(const int32_t *ids, float *out, int8_t *ws)` | int8 header: ids in, dequantized (and softmax) out |
+| `model_predict(const int32_t *ids, float *out, float *ws)` | float32 header |
+
+The embedding's table is stored as int8 rows, in the quantization of the embedding's output
+(one scale and zero point for the whole table), so a lookup copies a row and needs no
+arithmetic. Its `INPUT_SCALE` is 1 and `INPUT_ZERO_POINT` 0. For a model built with
+`ann_add_embedding_masked`, the runtime works out the padding mask from the ids at each call,
+as libann does: masked steps of the 1-D convs and pools above the embedding output 0, and
+global pooling leaves them out, so a text padded at the end gives what it would unpadded. The
+workspace then also holds two masks (a byte per step). The table usually dominates such a
+model's size: a 20,000-word vocabulary of 100-value vectors is 2 MB as int8 and 8 MB as
+float32.
 
 All parameters are `static const` arrays, so they go to flash on most MCUs. The header's top
 comment gives the parameter memory, int8 against float32. The workspace holds two copies of the
@@ -156,6 +178,9 @@ TFLite-style post-training quantization:
   built at quantization time.
 - **Max pooling, upsampling, flatten and reshape** work on the int8 values directly, keeping
   their input's scale and zero point.
+- **Embeddings**: the table is asymmetric int8 with one scale and zero point, from its own range
+  (with 0, for padding), which is also the output's quantization; padding and ids outside the
+  vocabulary output the zero point.
 - **Softmax** outputs stay as int8 logits, and `argmax` of the logits is the predicted class.
   The float helpers apply softmax after dequantizing.
 
@@ -187,6 +212,9 @@ lookup tables.
 - Post-training quantization only (no quantization-aware training).
 - Per-tensor activation ranges are plain min/max over the calibration set.
 - The runtime's kernels are plain C loops with no SIMD. The conv kernel works directly on the
-  input, without im2col, to keep memory small.
+  input, without im2col, to keep memory small. Their inner loops use only multiplies, adds and
+  shifts: cores without a divide instruction (Cortex-M0/M0+) divide only once per conv filter or
+  pooled channel.
+- An embedding must be the model's first layer (it reads the inputs).
 - Right shifts of negative values are assumed to be arithmetic, as they are on every mainstream
   compiler.

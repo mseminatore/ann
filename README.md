@@ -173,7 +173,7 @@ ann_get_num_threads | get the CPU thread count
 ann_get_backend_info | report the BLAS library, GPU backend, thread count and number size of this build
 ann_export_onnx | export trained network to ONNX JSON format
 ann_quantize | quantize a trained network to int8 (calibrated on sample inputs)
-ann_quantized_predict | run the int8 model (also `_predict_int8`, `_evaluate_accuracy`)
+ann_quantized_predict | run the int8 model (also `_predict_int8`, `_predict_ids` for text models, `_evaluate_accuracy`)
 ann_export_c_header | export an int8 or float32 model as a standalone C header
 ann_import_onnx | import network from ONNX JSON file
 ann_export_pikchr | export network architecture as PIKCHR diagram
@@ -409,7 +409,8 @@ ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 
 Ids outside the vocabulary also give zeros. Metal and Vulkan train and run
 these networks when the embedding reads the inputs, as here (CUDA keeps them
-on the CPU). They cannot be quantized or exported as C headers yet.
+on the CPU). They quantize to int8 and export as C headers that take token ids
+(`int32_t`), padding masks included; the int8 table is a quarter of the float one.
 
 The padding vectors are zero, but the layers above still see the padding
 steps: a convolution's bias makes them nonzero, and they count in pooling and

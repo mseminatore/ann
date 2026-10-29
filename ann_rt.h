@@ -53,10 +53,11 @@
 
 // 2 added ANN_RT_UPSAMPLE2D, 3 ANN_RT_GLOBAL_AVGPOOL2D, 4 grouped convolutions
 // (ann_rt_layer.groups), 5 non-square windows (size_w, stride_w, pad_w),
-// 6 ANN_RT_GLOBAL_MAXPOOL2D.
+// 6 ANN_RT_GLOBAL_MAXPOOL2D, 7 ANN_RT_EMBEDDING with padding masks
+// (ann_rt_layer.masked, out_zp; ann_rt_model.mask_steps).
 // Generated headers need at least the version that wrote them (they initialize
 // every field); older headers still build with newer versions.
-#define ANN_RT_VERSION 6
+#define ANN_RT_VERSION 7
 
 #if defined(_MSC_VER) && !defined(__cplusplus)
 #	define ANN_RT_FUNC static __inline
@@ -74,7 +75,8 @@ enum {
 	ANN_RT_FLATTEN,			// no-op: values are already stored flat (also used for reshapes)
 	ANN_RT_UPSAMPLE2D,		// nearest-neighbour upsampling by size, per channel
 	ANN_RT_GLOBAL_AVGPOOL2D,	// each channel's mean: (C, H, W) to (C, 1, 1)
-	ANN_RT_GLOBAL_MAXPOOL2D	// each channel's largest value: (C, H, W) to (C, 1, 1)
+	ANN_RT_GLOBAL_MAXPOOL2D,	// each channel's largest value: (C, H, W) to (C, 1, 1)
+	ANN_RT_EMBEDDING		// token ids to vectors: in_w ids to (out_c, 1, out_w); first layer only
 };
 
 enum {
@@ -92,6 +94,13 @@ enum {
 // One layer. Dense weights are [out_c][in_c * in_h * in_w]; conv weights are
 // [out_c][in_c / groups][size][size_w], output channel f reading input channels
 // [g * in_c / groups, (g + 1) * in_c / groups) for g = f / (out_c / groups). Activations are stored channel by channel, row by row.
+// An embedding's table is [size][out_c] (size ids, the vocabulary): id i's vector is row i,
+// and the padding id pad (-1 for none) and ids outside the table give zeros; its int8 table is
+// in the output's quantization (zp), so a lookup is a copy.
+// A masked layer's output steps (along the width; such layers are one row high) are left out
+// where they hold padding: an embedding masks the padding id's steps, and a 1-D conv or pool
+// step is kept when every input step in its window, less the padding at each end, is (as
+// libann's ann_add_embedding_masked). Masked steps output 0, and global pools skip them.
 //------------------------------
 typedef struct {
 	int32_t kind;				// ANN_RT_DENSE, ...
@@ -118,6 +127,8 @@ typedef struct {
 	int32_t groups;				// conv groups; 0 (left out, as headers before version 4 do) means 1
 	int32_t size_w, stride_w, pad_w;	// the window's width settings; size_w 0 (left out, as headers
 								// before version 5 do) means the same as the height's
+	int32_t masked;				// 1 if the output steps carry a padding mask (left out before version 7: none)
+	int32_t out_zp;				// int8 model: the output's zero point (the value of 0), for masked steps
 } ann_rt_layer;
 
 //------------------------------
@@ -153,7 +164,70 @@ typedef struct {
 	int32_t in_zp;
 	float out_scale;
 	int32_t out_zp;
+
+	int32_t mask_steps;			// steps of the longest padding mask, 0 without masks; the workspace
+								// also holds two masks (see ann_rt_mask_bytes)
 } ann_rt_model;
+
+//------------------------------
+// bytes of workspace for padding masks (after the activations and, in int8
+// models, the float I/O buffers)
+//------------------------------
+ANN_RT_FUNC int32_t ann_rt_mask_bytes(const ann_rt_model *m)
+{
+	return 2 * m->mask_steps;
+}
+
+//------------------------------
+// the token id at step t, from int32 ids or from float ones (rounded, as
+// libann reads them); -1 for one outside the vocabulary
+//------------------------------
+ANN_RT_FUNC int32_t ann_rt_id(const ann_rt_layer *l, const int32_t *ids, const float *fids, int32_t t)
+{
+#ifndef ANN_RT_NO_FLOAT
+	if (!ids)
+	{
+		float v = fids[t];
+		return v >= -0.5f && v < (float)l->size - 0.5f ? (int32_t)(v + 0.5f) : -1;	// floor(v + 0.5)
+	}
+#else
+	(void)fids;
+#endif
+	return ids[t] >= 0 && ids[t] < l->size ? ids[t] : -1;
+}
+
+//------------------------------
+// a masked layer's mask (1 kept, 0 padding, a byte per output step): an
+// embedding's from its ids, a 1-D conv's or pool's from the layer below's
+//------------------------------
+ANN_RT_FUNC void ann_rt_mask(const ann_rt_layer *l, const int32_t *ids, const float *fids, const uint8_t *in_mask,
+                             uint8_t *mask)
+{
+	int32_t j, i, k = ann_rt_size_w(l), s = ann_rt_stride_w(l), p = ann_rt_pad_w(l);
+
+	if (l->kind == ANN_RT_EMBEDDING)
+	{
+		for (j = 0; j < l->out_w; j++)
+			mask[j] = ann_rt_id(l, ids, fids, j) != l->pad;
+		return;
+	}
+	for (j = 0; j < l->out_w; j++)
+	{
+		int32_t lo = j * s, hi = j * s + k - 1 - 2 * p;
+		uint8_t keep = 1;
+
+		if (hi < lo)		// a window narrower than its padding: its centre input
+			lo = hi = j * s - p + (k - 1) / 2;
+		if (lo < 0)
+			lo = 0;
+		if (hi >= l->in_w)
+			hi = l->in_w - 1;
+		for (i = lo; i <= hi; i++)
+			if (!in_mask[i])
+				keep = 0;
+		mask[j] = keep;
+	}
+}
 
 //================================================================================================
 // int8 model
@@ -210,6 +284,10 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 	int32_t f, oh, ow, c, i, j;
 
 	for (f = 0; f < l->out_c; f++)
+	{
+		// the filter's input channels (worked out here: it divides, and M0 cores have no divider)
+		const int8_t *xf = x + ann_rt_first_channel(l, f) * l->in_h * l->in_w;
+
 		for (oh = 0; oh < l->out_h; oh++)
 			for (ow = 0; ow < l->out_w; ow++)
 			{
@@ -218,7 +296,7 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 				for (c = 0; c < cg; c++)
 				{
 					const int8_t *w = l->w_q + (f * cg + c) * k * kw;
-					const int8_t *xc = x + (ann_rt_first_channel(l, f) + c) * l->in_h * l->in_w;
+					const int8_t *xc = xf + c * l->in_h * l->in_w;
 
 					for (i = 0; i < k; i++)
 					{
@@ -236,6 +314,7 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 				}
 				y[(f * l->out_h + oh) * l->out_w + ow] = ann_rt_finish_q(l, acc, f);
 			}
+	}
 }
 
 ANN_RT_FUNC void ann_rt_maxpool_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
@@ -263,28 +342,39 @@ ANN_RT_FUNC void ann_rt_maxpool_q(const ann_rt_layer *l, const int8_t *x, int8_t
 //------------------------------
 ANN_RT_FUNC void ann_rt_upsample_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
 {
-	int32_t c, oh, ow;
+	int32_t row, iw, r, k;
 
-	for (c = 0; c < l->out_c; c++)
-		for (oh = 0; oh < l->out_h; oh++)
-			for (ow = 0; ow < l->out_w; ow++)
-				y[(c * l->out_h + oh) * l->out_w + ow] = x[(c * l->in_h + oh / l->size) * l->in_w + ow / l->size];
+	// each input row becomes size output rows of each value size times
+	// (counted, not divided: M0 cores have no divider)
+	for (row = 0; row < l->in_c * l->in_h; row++)
+	{
+		const int8_t *src = x + row * l->in_w;
+		for (r = 0; r < l->size; r++)
+			for (iw = 0; iw < l->in_w; iw++)
+				for (k = 0; k < l->size; k++)
+					*y++ = src[iw];
+	}
 }
 
 //------------------------------
 // global average pooling: each channel's mean, rounded half away from the
 // zero point (int8 values keep their quantization)
 //------------------------------
-ANN_RT_FUNC void ann_rt_global_avgpool_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
+ANN_RT_FUNC void ann_rt_global_avgpool_q(const ann_rt_layer *l, const int8_t *x, int8_t *y, const uint8_t *mask)
 {
 	int32_t c, i, area = l->in_h * l->in_w;
 
 	for (c = 0; c < l->out_c; c++)
 	{
-		int32_t sum = 0;
+		int32_t sum = 0, n = 0;
 		for (i = 0; i < area; i++)
-			sum += (int32_t)x[c * area + i] - l->in_zp;
-		sum = sum >= 0 ? (sum + area / 2) / area : -((-sum + area / 2) / area);
+			if (!mask || mask[i])	// masked steps are left out (mask: one row)
+			{
+				sum += (int32_t)x[c * area + i] - l->in_zp;
+				n++;
+			}
+		if (n)
+			sum = sum >= 0 ? (sum + n / 2) / n : -((-sum + n / 2) / n);
 		y[c] = (int8_t)(sum + l->in_zp);
 	}
 }
@@ -292,27 +382,60 @@ ANN_RT_FUNC void ann_rt_global_avgpool_q(const ann_rt_layer *l, const int8_t *x,
 //------------------------------
 // global max pooling: each channel's largest value (int8 values keep their quantization)
 //------------------------------
-ANN_RT_FUNC void ann_rt_global_maxpool_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
+ANN_RT_FUNC void ann_rt_global_maxpool_q(const ann_rt_layer *l, const int8_t *x, int8_t *y, const uint8_t *mask)
 {
 	int32_t c, i, area = l->in_h * l->in_w;
 
 	for (c = 0; c < l->out_c; c++)
 	{
-		int8_t best = x[c * area];
-		for (i = 1; i < area; i++)
-			if (x[c * area + i] > best)
+		int32_t best = -129;
+		for (i = 0; i < area; i++)
+			if ((!mask || mask[i]) && x[c * area + i] > best)
 				best = x[c * area + i];
-		y[c] = best;
+		y[c] = (int8_t)(best == -129 ? l->in_zp : best);	// all padding: 0
 	}
 }
 
 //------------------------------
-// int8 inference: input_size int8 values in, output_size int8 values out.
-// workspace holds 2 * max_size int8 values. Returns 0, or -1 for a bad layer.
+// an embedding lookup (the table is in the output's quantization)
 //------------------------------
-ANN_RT_FUNC int ann_rt_predict_q(const ann_rt_model *m, const int8_t *input, int8_t *output, int8_t *workspace)
+ANN_RT_FUNC void ann_rt_embedding_q(const ann_rt_layer *l, const int32_t *ids, const float *fids, int8_t *y)
+{
+	int32_t t, d, steps = l->out_w;
+
+	for (t = 0; t < steps; t++)
+	{
+		int32_t id = ann_rt_id(l, ids, fids, t);
+		const int8_t *row = id >= 0 && id != l->pad ? l->w_q + id * l->out_c : (const int8_t *)0;
+
+		for (d = 0; d < l->out_c; d++)
+			y[d * steps + t] = row ? row[d] : (int8_t)l->zp;
+	}
+}
+
+//------------------------------
+// set a masked layer's masked steps to 0 (its output zero point)
+//------------------------------
+ANN_RT_FUNC void ann_rt_mask_zero_q(const ann_rt_layer *l, const uint8_t *mask, int8_t *y)
+{
+	int32_t c, t;
+
+	for (t = 0; t < l->out_w; t++)
+		if (!mask[t])
+			for (c = 0; c < l->out_c; c++)
+				y[c * l->out_w + t] = (int8_t)l->out_zp;
+}
+
+//------------------------------
+// int8 inference from int8 inputs, or from token ids (int32 or float) for a
+// model that starts with an embedding. workspace: see ann_rt_predict_q.
+//------------------------------
+ANN_RT_FUNC int ann_rt_run_q(const ann_rt_model *m, const int8_t *input, const int32_t *ids, const float *fids,
+                             int8_t *output, int8_t *workspace)
 {
 	const int8_t *src = input;
+	uint8_t *masks = (uint8_t *)(workspace + 2 * m->max_size + m->input_size + m->output_size);
+	const uint8_t *in_mask = (const uint8_t *)0;	// the layer below's mask, if it has one
 	int32_t n;
 
 	for (n = 0; n < m->layer_count; n++)
@@ -320,23 +443,55 @@ ANN_RT_FUNC int ann_rt_predict_q(const ann_rt_model *m, const int8_t *input, int
 		const ann_rt_layer *l = &m->layers[n];
 		int8_t *dst = (src == workspace) ? workspace + m->max_size : workspace;
 
+		if ((l->kind == ANN_RT_EMBEDDING) != (n == 0 && !input))
+			return -1;		// ids go to an embedding as the first layer, int8 inputs to anything else
 		switch (l->kind)
 		{
 		case ANN_RT_DENSE:		ann_rt_dense_q(l, src, dst); break;
 		case ANN_RT_CONV2D:		ann_rt_conv_q(l, src, dst); break;
 		case ANN_RT_MAXPOOL2D:	ann_rt_maxpool_q(l, src, dst); break;
 		case ANN_RT_UPSAMPLE2D:	ann_rt_upsample_q(l, src, dst); break;
-		case ANN_RT_GLOBAL_AVGPOOL2D: ann_rt_global_avgpool_q(l, src, dst); break;
-		case ANN_RT_GLOBAL_MAXPOOL2D: ann_rt_global_maxpool_q(l, src, dst); break;
-		case ANN_RT_FLATTEN:	continue;
+		case ANN_RT_GLOBAL_AVGPOOL2D: ann_rt_global_avgpool_q(l, src, dst, in_mask); break;
+		case ANN_RT_GLOBAL_MAXPOOL2D: ann_rt_global_maxpool_q(l, src, dst, in_mask); break;
+		case ANN_RT_EMBEDDING:	ann_rt_embedding_q(l, ids, fids, dst); break;
+		case ANN_RT_FLATTEN:	in_mask = (const uint8_t *)0; continue;
 		default:				return -1;
 		}
+		if (l->masked)
+		{
+			uint8_t *mask = in_mask == masks ? masks + m->mask_steps : masks;
+			ann_rt_mask(l, ids, fids, in_mask, mask);
+			ann_rt_mask_zero_q(l, mask, dst);
+			in_mask = mask;
+		}
+		else
+			in_mask = (const uint8_t *)0;
 		src = dst;
 	}
 
 	for (n = 0; n < m->output_size; n++)
 		output[n] = src[n];
 	return 0;
+}
+
+//------------------------------
+// int8 inference: input_size int8 values in, output_size int8 values out.
+// workspace holds 2 * max_size + input_size + output_size + ann_rt_mask_bytes
+// int8 values. Returns 0, or -1 for a bad layer or a model that starts with an
+// embedding (see ann_rt_predict_ids_q).
+//------------------------------
+ANN_RT_FUNC int ann_rt_predict_q(const ann_rt_model *m, const int8_t *input, int8_t *output, int8_t *workspace)
+{
+	return input ? ann_rt_run_q(m, input, (const int32_t *)0, (const float *)0, output, workspace) : -1;
+}
+
+//------------------------------
+// int8 inference for a model that starts with an embedding: input_size token
+// ids in, output_size int8 values out. workspace as for ann_rt_predict_q.
+//------------------------------
+ANN_RT_FUNC int ann_rt_predict_ids_q(const ann_rt_model *m, const int32_t *ids, int8_t *output, int8_t *workspace)
+{
+	return ids ? ann_rt_run_q(m, (const int8_t *)0, ids, (const float *)0, output, workspace) : -1;
 }
 
 //------------------------------
@@ -389,27 +544,51 @@ ANN_RT_FUNC void ann_rt_softmax_f(float *y, int32_t n)
 		y[i] /= sum;
 }
 
-//------------------------------
-// int8 inference with float input and output: quantizes the input, runs the
-// int8 model and dequantizes the output (applying softmax if the model has it).
-// workspace holds 2 * max_size + input_size + output_size int8 values.
-//------------------------------
-ANN_RT_FUNC int ann_rt_predict_q_float(const ann_rt_model *m, const float *input, float *output, int8_t *workspace)
+// the int8 model's outputs dequantized, with softmax if the model has it
+ANN_RT_FUNC void ann_rt_output_float(const ann_rt_model *m, const int8_t *out_q, float *output)
 {
-	int8_t *in_q = workspace + 2 * m->max_size;
-	int8_t *out_q = in_q + m->input_size;
 	int32_t i;
-
-	for (i = 0; i < m->input_size; i++)
-		in_q[i] = ann_rt_quantize(input[i], m->in_scale, m->in_zp);
-
-	if (ann_rt_predict_q(m, in_q, out_q, workspace) != 0)
-		return -1;
 
 	for (i = 0; i < m->output_size; i++)
 		output[i] = ann_rt_dequantize(out_q[i], m->out_scale, m->out_zp);
 	if (m->softmax)
 		ann_rt_softmax_f(output, m->output_size);
+}
+
+//------------------------------
+// int8 inference with float input and output: quantizes the input, runs the
+// int8 model and dequantizes the output (applying softmax if the model has it).
+// A model that starts with an embedding reads the inputs as token ids
+// (rounded). workspace as for ann_rt_predict_q.
+//------------------------------
+ANN_RT_FUNC int ann_rt_predict_q_float(const ann_rt_model *m, const float *input, float *output, int8_t *workspace)
+{
+	int8_t *in_q = workspace + 2 * m->max_size;
+	int8_t *out_q = in_q + m->input_size;
+	int32_t i, ids = m->layer_count > 0 && m->layers[0].kind == ANN_RT_EMBEDDING;
+
+	if (!ids)
+		for (i = 0; i < m->input_size; i++)
+			in_q[i] = ann_rt_quantize(input[i], m->in_scale, m->in_zp);
+
+	if (ann_rt_run_q(m, ids ? (const int8_t *)0 : in_q, (const int32_t *)0, ids ? input : (const float *)0, out_q,
+	                 workspace) != 0)
+		return -1;
+	ann_rt_output_float(m, out_q, output);
+	return 0;
+}
+
+//------------------------------
+// int8 inference from token ids with float output (dequantized, with softmax
+// if the model has it). workspace as for ann_rt_predict_q.
+//------------------------------
+ANN_RT_FUNC int ann_rt_predict_ids_q_float(const ann_rt_model *m, const int32_t *ids, float *output, int8_t *workspace)
+{
+	int8_t *out_q = workspace + 2 * m->max_size + m->input_size;
+
+	if (ann_rt_predict_ids_q(m, ids, out_q, workspace) != 0)
+		return -1;
+	ann_rt_output_float(m, out_q, output);
 	return 0;
 }
 
@@ -456,6 +635,9 @@ ANN_RT_FUNC void ann_rt_linear_f(const ann_rt_layer *l, const float *x, float *z
 	}
 
 	for (f = 0; f < l->out_c; f++)
+	{
+		const float *xf = x + ann_rt_first_channel(l, f) * l->in_h * l->in_w;
+
 		for (oh = 0; oh < l->out_h; oh++)
 			for (ow = 0; ow < l->out_w; ow++)
 			{
@@ -463,7 +645,7 @@ ANN_RT_FUNC void ann_rt_linear_f(const ann_rt_layer *l, const float *x, float *z
 				for (c = 0; c < cg; c++)
 				{
 					const float *w = l->w_f + (f * cg + c) * k * kw;
-					const float *xc = x + (ann_rt_first_channel(l, f) + c) * l->in_h * l->in_w;
+					const float *xc = xf + c * l->in_h * l->in_w;
 					for (i = 0; i < k; i++)
 					{
 						int32_t ih = oh * s - p + i;
@@ -479,6 +661,7 @@ ANN_RT_FUNC void ann_rt_linear_f(const ann_rt_layer *l, const float *x, float *z
 				}
 				z[(f * l->out_h + oh) * l->out_w + ow] = acc;
 			}
+	}
 }
 
 ANN_RT_FUNC void ann_rt_maxpool_f(const ann_rt_layer *l, const float *x, float *y)
@@ -501,47 +684,95 @@ ANN_RT_FUNC void ann_rt_maxpool_f(const ann_rt_layer *l, const float *x, float *
 
 ANN_RT_FUNC void ann_rt_upsample_f(const ann_rt_layer *l, const float *x, float *y)
 {
-	int32_t c, oh, ow;
+	int32_t row, iw, r, k;
 
-	for (c = 0; c < l->out_c; c++)
-		for (oh = 0; oh < l->out_h; oh++)
-			for (ow = 0; ow < l->out_w; ow++)
-				y[(c * l->out_h + oh) * l->out_w + ow] = x[(c * l->in_h + oh / l->size) * l->in_w + ow / l->size];
+	for (row = 0; row < l->in_c * l->in_h; row++)
+	{
+		const float *src = x + row * l->in_w;
+		for (r = 0; r < l->size; r++)
+			for (iw = 0; iw < l->in_w; iw++)
+				for (k = 0; k < l->size; k++)
+					*y++ = src[iw];
+	}
 }
 
-ANN_RT_FUNC void ann_rt_global_avgpool_f(const ann_rt_layer *l, const float *x, float *y)
+ANN_RT_FUNC void ann_rt_global_avgpool_f(const ann_rt_layer *l, const float *x, float *y, const uint8_t *mask)
 {
-	int32_t c, i, area = l->in_h * l->in_w;
+	int32_t c, i, n, area = l->in_h * l->in_w;
 
 	for (c = 0; c < l->out_c; c++)
 	{
 		float sum = 0.0f;
-		for (i = 0; i < area; i++)
-			sum += x[c * area + i];
-		y[c] = sum / (float)area;
+		for (i = n = 0; i < area; i++)
+			if (!mask || mask[i])
+			{
+				sum += x[c * area + i];
+				n++;
+			}
+		y[c] = n ? sum / (float)n : 0.0f;
 	}
 }
 
-ANN_RT_FUNC void ann_rt_global_maxpool_f(const ann_rt_layer *l, const float *x, float *y)
+ANN_RT_FUNC void ann_rt_global_maxpool_f(const ann_rt_layer *l, const float *x, float *y, const uint8_t *mask)
 {
 	int32_t c, i, area = l->in_h * l->in_w;
 
 	for (c = 0; c < l->out_c; c++)
 	{
-		float best = x[c * area];
-		for (i = 1; i < area; i++)
-			if (x[c * area + i] > best)
+		float best = 0.0f;
+		int32_t any = 0;
+		for (i = 0; i < area; i++)
+			if ((!mask || mask[i]) && (!any || x[c * area + i] > best))
+			{
 				best = x[c * area + i];
+				any = 1;
+			}
 		y[c] = best;
 	}
 }
 
+ANN_RT_FUNC void ann_rt_embedding_f(const ann_rt_layer *l, const int32_t *ids, const float *fids, float *y)
+{
+	int32_t t, d, steps = l->out_w;
+
+	for (t = 0; t < steps; t++)
+	{
+		int32_t id = ann_rt_id(l, ids, fids, t);
+		const float *row = id >= 0 && id != l->pad ? l->w_f + id * l->out_c : (const float *)0;
+
+		for (d = 0; d < l->out_c; d++)
+			y[d * steps + t] = row ? row[d] : 0.0f;
+	}
+}
+
+ANN_RT_FUNC void ann_rt_mask_zero_f(const ann_rt_layer *l, const uint8_t *mask, float *y)
+{
+	int32_t c, t;
+
+	for (t = 0; t < l->out_w; t++)
+		if (!mask[t])
+			for (c = 0; c < l->out_c; c++)
+				y[c * l->out_w + t] = 0.0f;
+}
+
 //------------------------------
-// float inference: workspace holds 2 * max_size floats. Returns 0, or -1 for a bad layer.
+// floats of workspace a float model needs: 2 * max_size, then the padding masks
 //------------------------------
-ANN_RT_FUNC int ann_rt_predict_f(const ann_rt_model *m, const float *input, float *output, float *workspace)
+ANN_RT_FUNC int32_t ann_rt_workspace_f(const ann_rt_model *m)
+{
+	return 2 * m->max_size + (ann_rt_mask_bytes(m) + (int32_t)sizeof(float) - 1) / (int32_t)sizeof(float);
+}
+
+//------------------------------
+// float inference from float inputs, or from token ids (int32, or the float
+// inputs rounded) for a model that starts with an embedding
+//------------------------------
+ANN_RT_FUNC int ann_rt_run_f(const ann_rt_model *m, const float *input, const int32_t *ids, float *output,
+                             float *workspace)
 {
 	const float *src = input;
+	uint8_t *masks = (uint8_t *)(workspace + 2 * m->max_size);
+	const uint8_t *in_mask = (const uint8_t *)0;
 	int32_t n, i, count;
 
 	for (n = 0; n < m->layer_count; n++)
@@ -549,6 +780,8 @@ ANN_RT_FUNC int ann_rt_predict_f(const ann_rt_model *m, const float *input, floa
 		const ann_rt_layer *l = &m->layers[n];
 		float *dst = (src == workspace) ? workspace + m->max_size : workspace;
 
+		if ((l->kind == ANN_RT_EMBEDDING) != (n == 0 && (ids || m->layers[0].kind == ANN_RT_EMBEDDING)))
+			return -1;
 		switch (l->kind)
 		{
 		case ANN_RT_DENSE:
@@ -561,11 +794,21 @@ ANN_RT_FUNC int ann_rt_predict_f(const ann_rt_model *m, const float *input, floa
 			break;
 		case ANN_RT_MAXPOOL2D:	ann_rt_maxpool_f(l, src, dst); break;
 		case ANN_RT_UPSAMPLE2D:	ann_rt_upsample_f(l, src, dst); break;
-		case ANN_RT_GLOBAL_AVGPOOL2D: ann_rt_global_avgpool_f(l, src, dst); break;
-		case ANN_RT_GLOBAL_MAXPOOL2D: ann_rt_global_maxpool_f(l, src, dst); break;
-		case ANN_RT_FLATTEN:	continue;
+		case ANN_RT_GLOBAL_AVGPOOL2D: ann_rt_global_avgpool_f(l, src, dst, in_mask); break;
+		case ANN_RT_GLOBAL_MAXPOOL2D: ann_rt_global_maxpool_f(l, src, dst, in_mask); break;
+		case ANN_RT_EMBEDDING:	ann_rt_embedding_f(l, ids, ids ? (const float *)0 : input, dst); break;
+		case ANN_RT_FLATTEN:	in_mask = (const uint8_t *)0; continue;
 		default:				return -1;
 		}
+		if (l->masked)
+		{
+			uint8_t *mask = in_mask == masks ? masks + m->mask_steps : masks;
+			ann_rt_mask(l, ids, ids ? (const float *)0 : input, in_mask, mask);
+			ann_rt_mask_zero_f(l, mask, dst);
+			in_mask = mask;
+		}
+		else
+			in_mask = (const uint8_t *)0;
 		src = dst;
 	}
 
@@ -574,6 +817,24 @@ ANN_RT_FUNC int ann_rt_predict_f(const ann_rt_model *m, const float *input, floa
 	if (m->softmax)
 		ann_rt_softmax_f(output, m->output_size);
 	return 0;
+}
+
+//------------------------------
+// float inference: workspace holds ann_rt_workspace_f(m) floats (2 * max_size
+// without padding masks). A model that starts with an embedding reads the
+// inputs as token ids (rounded). Returns 0, or -1 for a bad layer.
+//------------------------------
+ANN_RT_FUNC int ann_rt_predict_f(const ann_rt_model *m, const float *input, float *output, float *workspace)
+{
+	return ann_rt_run_f(m, input, (const int32_t *)0, output, workspace);
+}
+
+//------------------------------
+// float inference from token ids, for a model that starts with an embedding
+//------------------------------
+ANN_RT_FUNC int ann_rt_predict_ids_f(const ann_rt_model *m, const int32_t *ids, float *output, float *workspace)
+{
+	return ids ? ann_rt_run_f(m, (const float *)0, ids, output, workspace) : -1;
 }
 
 ANN_RT_FUNC int ann_rt_argmax_f(const float *values, int32_t count)

@@ -150,6 +150,7 @@ ann_get_epochs_trained | get the number of epochs the last training run trained
 ann_set_lr_scheduler | set learning rate scheduler callback
 ann_set_gradient_clip | set gradient clipping threshold
 ann_set_weight_decay | set L2 regularization (weight decay) coefficient
+ann_set_seed | seed libann's random numbers (initialization, shuffling, dropout, noise) so training repeats exactly
 ann_set_l1_regularization | set L1 regularization (LASSO) coefficient
 ann_set_dropout | set default dropout rate for hidden layers
 ann_set_layer_dropout | set dropout rate for a specific layer

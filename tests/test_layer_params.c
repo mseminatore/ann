@@ -282,6 +282,30 @@ void test_main(int argc, char *argv[])
         ann_free_network(net);
     }
 
+    SUITE("Seeds");
+    {
+        static real x[N * 36], y[N * 2];
+        make_images(x, y, N);
+        PTensor tx = tensor_create_from_array(N, 36, x), ty = tensor_create_from_array(N, 2, y);
+        real *weights[3];
+        int counts[3];
+        for (int run = 0; run < 3; run++) {
+            ann_set_seed(run < 2 ? 7u : 8u);
+            PNetwork net = make_cnn(OPT_ADAM);
+            ann_set_layer_dropout(net, 5, 0.2f);      // dropout masks are drawn too
+            ann_train_network(net, tx, ty, N);
+            weights[run] = all_params(net, &counts[run]);
+            ann_free_network(net);
+        }
+        TESTEX("The same seed trains the same weights (initialization, shuffling, dropout)",
+               counts[0] == counts[1] && same_values(weights[0], weights[1], counts[0]));
+        TESTEX("and another seed different ones", !same_values(weights[0], weights[2], counts[0]));
+        for (int run = 0; run < 3; run++)
+            free(weights[run]);
+        tensor_free(tx);
+        tensor_free(ty);
+    }
+
     SUITE("Before Training");
     {
         static real x[N * 36], y[N * 2];

@@ -641,8 +641,9 @@ ANN_API int ann_add_batchnorm(PNetwork pnet, Activation_type activation);
  * (embed_dim, 1, L): channel d at step t is row id_t of the weights
  * [vocab_size x embed_dim], so ann_add_conv1d and the pooling layers follow
  * directly. Ids outside [0, vocab_size) and padding_idx give zero vectors and
- * train nothing; padding_idx's row stays zero. Weights start N(0, 1), as
- * PyTorch's nn.Embedding. No gradient reaches the layer below. Maps to ONNX
+ * train nothing; padding_idx's row stays zero. Weights start
+ * uniform(-0.05, 0.05), as Keras's Embedding (PyTorch's N(0, 1) trains far
+ * slower with Adam; set pre-trained vectors with ann_set_layer_param). No gradient reaches the layer below. Maps to ONNX
  * Cast, Gather, Transpose and Unsqueeze nodes (PyTorch's nn.Embedding imports).
  * As the first layer, it quantizes to int8 and exports as a C header that
  * takes token ids (see ann_quantize and docs/C_EXPORT.md).
@@ -1367,6 +1368,27 @@ ANN_API void ann_set_l1_regularization(PNetwork pnet, real lambda);
  * @param init_type Weight initialization strategy
  */
 ANN_API void ann_set_weight_init(PNetwork pnet, Weight_init_type init_type);
+
+/**
+ * Seed libann's random numbers, so training can be repeated exactly.
+ *
+ * Seeds everything libann draws at random: weight initialization, the order
+ * samples are shuffled in each epoch, dropout masks, input noise and the
+ * hyperparameter searches. With the same seed, data and settings, a CPU run
+ * trains the same weights every time, with any thread count (a threaded BLAS
+ * library or a GPU may still round differently).
+ * Call it before the network's weights are initialized (before the first
+ * training, ann_get_layer_param or ann_set_layer_param).
+ *
+ * libann draws from the C library's rand(), so this calls srand(): it also
+ * reseeds rand() for the rest of the program, and code that calls srand()
+ * itself changes libann's sequence too. Without a seed, rand() starts the
+ * same way in every process, so a program's first network is repeatable but
+ * later ones depend on what ran before them.
+ *
+ * @param seed Any value
+ */
+ANN_API void ann_set_seed(unsigned seed);
 
 /**
  * Set the mini-batch size for training.

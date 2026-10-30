@@ -842,6 +842,47 @@ void test_main(int argc, char *argv[])
         remove(onnx);
     }
 
+    SUITE("Initialization");
+    {
+        // Keras's start: small vectors (N(0, 1) trains far slower with Adam), the padding row zero
+        PNetwork net = make_text_net(1);
+        real w[VOCAB * 8];
+        int in_range = ann_get_layer_param(net, 1, 0, w, VOCAB * 8) == ERR_OK, pad_zero = 1;
+        double sq = 0.0;
+        for (int i = 0; i < VOCAB * 8; i++) {
+            in_range &= w[i] >= -0.05f && w[i] <= 0.05f;
+            if (i < 8) pad_zero &= w[i] == 0.0f;
+            else sq += (double)w[i] * w[i];
+        }
+        double std = sqrt(sq / ((VOCAB - 1) * 8));
+        TESTEX("Embedding vectors start in [-0.05, 0.05]", in_range && std > 0.02 && std < 0.04);
+        TESTEX("and the padding id's row at zero", pad_zero);
+
+        // so an untrained text classifier (shaped like examples/imdb_glove.py's,
+        // smaller) starts near chance (ln 2), not confidently wrong
+        enum { N = 128 };
+        static real x[N * SEQ], y[N * 2];
+        make_texts(x, y, N, 5u);
+        PTensor tx = tensor_create_from_array(N, SEQ, x), ty = tensor_create_from_array(N, 2, y);
+        PNetwork wide = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+        wide->print_func = quiet;
+        ann_add_layer(wide, SEQ, LAYER_INPUT, ACTIVATION_NULL);
+        ann_add_embedding_masked(wide, VOCAB, 64, 0);
+        ann_add_conv1d(wide, 64, 5, 1, 2, ACTIVATION_RELU);
+        ann_add_global_maxpool2d(wide);
+        ann_add_layer(wide, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+        ann_set_seed(3);
+        ann_train_begin(wide);      // initializes every layer (evaluating alone leaves them zero)
+        ann_train_end(wide);
+        real start = ann_evaluate_loss(wide, tx, ty);
+        ann_free_network(wide);
+        printf("\t  starting loss %.3f (chance %.3f)\n", start, log(2.0));
+        TESTEX("An untrained text classifier starts near chance loss", fabs(start - log(2.0)) < 0.1);
+        tensor_free(tx);
+        tensor_free(ty);
+        ann_free_network(net);
+    }
+
     SUITE("Quantization");
     {
         // global max pooling keeps its input's int8 quantization

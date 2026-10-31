@@ -188,6 +188,16 @@ int ann_embedding_index(const Layer *layer, const real *ids, int rows, unsigned 
 int ann_lowest_trained_layer(const PNetwork pnet);
 
 /**
+ * The factor the output delta T - Y of a batch of batch_size rows is
+ * multiplied by (see ann_set_loss_reduction): 1 for LOSS_REDUCTION_SUM; for
+ * LOSS_REDUCTION_MEAN, 2 / (batch_size * outputs) with LOSS_MSE and
+ * 1 / batch_size with cross-entropy. Every backend applies it where it
+ * computes the delta, before the activation derivative, so the reported loss
+ * is unchanged. Implemented in ann.c and shared with the GPU backends.
+ */
+real ann_output_delta_scale(const PNetwork pnet, int batch_size);
+
+/**
  * Active GPU backend.  NULL means no GPU is available or initialized.
  * Set by ann_gpu_init(); read by ann.c dispatch logic and ann_gpu_* public API.
  */

@@ -485,6 +485,7 @@ int tensor_metal_init(void)
         "    device float *row_loss [[buffer(3)]],\n"
         "    constant uint &cols [[buffer(4)]],\n"
         "    constant uint &mode [[buffer(5)]],\n"
+        "    constant float &scale [[buffer(6)]],\n"
         "    uint row [[threadgroup_position_in_grid]],\n"
         "    uint tid [[thread_position_in_threadgroup]],\n"
         "    uint tn [[threads_per_threadgroup]]) {\n"
@@ -493,7 +494,7 @@ int tensor_metal_init(void)
         "    for (uint n = tid; n < cols; n += tn) {\n"
         "        uint i = row * cols + n;\n"
         "        float yi = y[i], ti = t[i];\n"
-        "        delta[i] = ti - yi;\n"
+        "        delta[i] = scale * (ti - yi);\n"
         "        if (mode == 0) { float d = yi - ti; s += d * d; }\n"
         "        else {\n"
         "            float c = clamp(yi, 1e-7f, 1.0f - 1e-7f);\n"
@@ -2799,8 +2800,9 @@ static int conv_fuses_derivative(PLayer l)
 }
 
 //-----------------------------------------------------------
-// Encode the output layer's delta (t - y, then the activation derivative for
-// MSE; cross-entropy with softmax/sigmoid needs none) and each row's loss
+// Encode the output layer's delta (t - y times ann_output_delta_scale, then the
+// activation derivative for MSE; cross-entropy with softmax/sigmoid needs none)
+// and each row's loss
 //-----------------------------------------------------------
 static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, int batch_size,
                                      id<MTLBuffer> targets, id<MTLBuffer> row_loss)
@@ -2808,6 +2810,7 @@ static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, in
     PLayer out = &pnet->layers[pnet->layer_count - 1];
     uint32_t cols = (uint32_t)out->node_count;
     uint32_t mode = pnet->loss_type == LOSS_MSE ? 0 : (out->activation == ACTIVATION_SIGMOID ? 2 : 1);
+    float scale = (float)ann_output_delta_scale(pnet, batch_size);
 
     id<MTLComputeCommandEncoder> enc = compute_encoder(cmd);
     [enc setComputePipelineState:g_metal.pso_output_delta_loss];
@@ -2817,6 +2820,7 @@ static void encode_output_delta_loss(id<MTLCommandBuffer> cmd, PNetwork pnet, in
     [enc setBuffer:row_loss offset:0 atIndex:3];
     [enc setBytes:&cols length:sizeof(cols) atIndex:4];
     [enc setBytes:&mode length:sizeof(mode) atIndex:5];
+    [enc setBytes:&scale length:sizeof(scale) atIndex:6];
     // a threadgroup per row: the smallest power of two covering the row, at most 256
     NSUInteger tg = 1;
     while (tg < cols && tg < 256 && tg * 2 <= g_metal.pso_output_delta_loss.maxTotalThreadsPerThreadgroup)

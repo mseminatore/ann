@@ -100,6 +100,15 @@ Regression (unbounded targets) | `LOSS_MSE` | `ACTIVATION_NULL` (linear)
 `LOSS_BINARY_CROSS_ENTROPY` is an alias of `LOSS_CATEGORICAL_CROSS_ENTROPY`:
 with a sigmoid output the library computes binary cross-entropy per output.
 
+The reported loss is a mean over the batch (and over the outputs for MSE), but
+by default training steps on the gradient summed over the batch, and for MSE on
+½ of the summed squared errors: SGD steps grow with the batch size and, for
+MSE, the number of outputs. `ann_set_loss_reduction(net, LOSS_REDUCTION_MEAN)`
+trains on the gradient of the reported loss instead, as Keras and PyTorch do,
+so SGD learning rates, regularization and gradient clipping carry over between
+batch sizes, output sizes and those frameworks. Adam, RMSProp and AdaGrad
+mostly cancel the scale out.
+
 For training, the module provides **Stochastic Gradient Descent**,
 **Momentum**, **AdaGrad**, **RMSProp**, and **Adam** optimizers. This option 
 is set when a network is created via `ann_make_network()`. **Adam is 
@@ -141,6 +150,7 @@ ann_evaluate_accuracy | evaluate accuracy of trained network using test data
 ann_evaluate_loss | evaluate the network's loss on a dataset
 ann_set_learning_rate | override the default learning rate
 ann_set_loss_function | set the loss function
+ann_set_loss_reduction | train on the summed (default) or the mean gradient
 ann_set_batch_size | set the mini-batch size
 ann_set_epoch_limit | set the maximum number of epochs
 ann_set_validation_data | set a validation set evaluated after each epoch

@@ -47,6 +47,88 @@ static int ce_trainable(Activation_type output_act)
     return ok;
 }
 
+// 3 inputs -> 4 tanh -> 5 linear outputs, MSE with the given reduction, SGD
+static PNetwork make_regression_net(Loss_reduction reduction)
+{
+    ann_set_seed(7);
+    PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+    ann_add_layer(net, 3, LAYER_INPUT,  ACTIVATION_NULL);
+    ann_add_layer(net, 4, LAYER_HIDDEN, ACTIVATION_TANH);
+    ann_add_layer(net, 5, LAYER_OUTPUT, ACTIVATION_NULL);
+    ann_set_loss_reduction(net, reduction);
+    return net;
+}
+
+// Does one SGD step move every parameter by -rate * factor * dL/dp, where L
+// is the loss ann_evaluate_loss reports (the mean squared error over the
+// batch and the outputs) and dL/dp its central-difference gradient?
+// ROWS = 6 samples of OUTS = 5 outputs
+static int step_matches_gradient(Loss_reduction reduction, real factor)
+{
+    enum { ROWS = 6, INS = 3, OUTS = 5, MAXP = 32 };
+    real x[ROWS * INS], t[ROWS * OUTS];
+    for (int i = 0; i < ROWS * INS; i++)
+        x[i] = (real)sin(0.7 * i + 0.3);
+    for (int i = 0; i < ROWS * OUTS; i++)
+        t[i] = (real)cos(1.3 * i);
+    PTensor inputs = tensor_create_from_array(ROWS, INS, x);
+    PTensor targets = tensor_create_from_array(ROWS, OUTS, t);
+
+    PNetwork net = make_regression_net(reduction);
+    const real rate = (real)0.01, h = (real)1e-3;
+    ann_set_learning_rate(net, rate);
+    ann_train_begin(net);
+
+    int ok = 1;
+    real before[2][2][MAXP], grad[2][2][MAXP];
+    int counts[2][2];
+    for (int layer = 1; layer <= 2; layer++)
+        for (int k = 0; k < 2; k++)
+        {
+            int rows, cols;
+            ann_get_layer_param_shape(net, layer, k, &rows, &cols);
+            int n = counts[layer - 1][k] = rows * cols;
+            real *p = before[layer - 1][k], *g = grad[layer - 1][k];
+            ann_get_layer_param(net, layer, k, p, n);
+            for (int j = 0; j < n; j++)
+            {
+                real keep = p[j];
+                p[j] = keep + h;
+                ann_set_layer_param(net, layer, k, p, n);
+                real up = ann_evaluate_loss(net, inputs, targets);
+                p[j] = keep - h;
+                ann_set_layer_param(net, layer, k, p, n);
+                real down = ann_evaluate_loss(net, inputs, targets);
+                p[j] = keep;
+                ann_set_layer_param(net, layer, k, p, n);
+                g[j] = (up - down) / (2 * h);
+            }
+        }
+
+    ann_train_step(net, x, t, ROWS);
+    for (int layer = 1; layer <= 2; layer++)
+        for (int k = 0; k < 2; k++)
+        {
+            real after[MAXP];
+            int n = counts[layer - 1][k];
+            ann_get_layer_param(net, layer, k, after, n);
+            for (int j = 0; j < n; j++)
+            {
+                real expected = -rate * factor * grad[layer - 1][k][j];
+                real step = after[j] - before[layer - 1][k][j];
+                // float central differences carry noise of a few 1e-7 per unit of rate * factor
+                if (fabs(step - expected) > 5e-3 * fabs(expected) + 2e-6 * factor)
+                    ok = 0;
+            }
+        }
+
+    ann_train_end(net);
+    ann_free_network(net);
+    tensor_free(inputs);
+    tensor_free(targets);
+    return ok;
+}
+
 void test_main(int argc, char* argv[])
 {
     (void)argc;
@@ -195,6 +277,30 @@ void test_main(int argc, char* argv[])
         tensor_free(in1);
         tensor_free(out1);
         ann_free_network(lin);
+    }
+
+    SUITE("MSE loss reduction");
+    {
+        PNetwork net = make_regression_net(LOSS_REDUCTION_SUM);
+        TESTEX("A new network sums the outputs", ann_get_loss_reduction(net) == LOSS_REDUCTION_SUM);
+        TESTEX("Setting the mean works", ann_set_loss_reduction(net, LOSS_REDUCTION_MEAN) == ERR_OK);
+        TESTEX("and reads back", ann_get_loss_reduction(net) == LOSS_REDUCTION_MEAN);
+        ann_set_error_log_callback(count_errors);
+        g_errors = 0;
+        TESTEX("An unknown reduction is rejected", ann_set_loss_reduction(net, (Loss_reduction)7) == ERR_INVALID);
+        TESTEX("and reported", g_errors == 1);
+        TESTEX("and leaves the setting alone", ann_get_loss_reduction(net) == LOSS_REDUCTION_MEAN);
+        TESTEX("A NULL network is rejected", ann_set_loss_reduction(NULL, LOSS_REDUCTION_MEAN) == ERR_NULL_PTR);
+        ann_clear_error_log_callback();
+        ann_free_network(net);
+
+        // the reported loss is the mean over the batch and the outputs; its
+        // gradient is what the mean reduction trains on, and the sum
+        // reduction's step is batch_size * outputs / 2 = 6 * 5 / 2 times larger
+        TESTEX("Mean: an SGD step is -rate * the reported loss's gradient",
+               step_matches_gradient(LOSS_REDUCTION_MEAN, (real)1.0));
+        TESTEX("Sum: an SGD step is batch_size * outputs / 2 times that",
+               step_matches_gradient(LOSS_REDUCTION_SUM, (real)15.0));
     }
 
     TESTEX("Loss function tests completed", 1);

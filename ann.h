@@ -177,6 +177,14 @@ typedef enum {
 } Loss_type;
 
 //------------------------------
+// How the training gradient combines a batch's errors (see ann_set_loss_reduction)
+//------------------------------
+typedef enum {
+	LOSS_REDUCTION_SUM,					// summed over the batch (and 1/2 * sum of squares for MSE): libann's classic default
+	LOSS_REDUCTION_MEAN					// the gradient of the reported loss, a mean, as Keras and PyTorch
+} Loss_reduction;
+
+//------------------------------
 // Noise added to the inputs of training batches (e.g. for denoising
 // autoencoders); see ann_set_input_noise()
 //------------------------------
@@ -310,6 +318,7 @@ struct Network
 	unsigned mseCounter;
 	unsigned epochLimit;				// convergence epoch limit
 	Loss_type loss_type;				// type of loss function used
+	Loss_reduction loss_reduction;		// how the training gradient combines a batch's errors
 	Optimizer_type optimizer;
 	unsigned train_iteration;
 
@@ -1297,6 +1306,38 @@ ANN_API void ann_set_learning_rate(PNetwork pnet, real rate);
  * any other output activation with it fails with ERR_INVALID.
  */
 ANN_API void ann_set_loss_function(PNetwork pnet, Loss_type loss_type);
+
+/**
+ * Set how the training gradient combines a batch's errors.
+ *
+ * The reported loss is always a mean: the squared error averaged over the
+ * batch and the outputs for LOSS_MSE, the cross-entropy summed over a sample's
+ * outputs and averaged over the batch.
+ *
+ * LOSS_REDUCTION_SUM (the default, libann's classic behavior) trains on the
+ * gradient summed over the batch, and for LOSS_MSE on 1/2 * sum((y - t)^2)
+ * over a sample's outputs: the step is batch_size times larger than the
+ * reported loss's gradient for cross-entropy, batch_size * outputs / 2 times
+ * for MSE. LOSS_REDUCTION_MEAN trains on the gradient of the reported loss
+ * itself, as Keras and PyTorch do, so SGD learning rates, regularization and
+ * gradient clipping carry over between batch sizes, models of any output size
+ * and those frameworks. Adam, RMSProp and AdaGrad mostly cancel the scale out
+ * (apart from their epsilon and the regularization added to the gradient).
+ * Not saved in model files, like the optimizer settings.
+ *
+ * @param pnet Network to configure
+ * @param reduction LOSS_REDUCTION_SUM or LOSS_REDUCTION_MEAN
+ * @return ERR_OK, ERR_NULL_PTR, or ERR_INVALID for an unknown reduction
+ */
+ANN_API int ann_set_loss_reduction(PNetwork pnet, Loss_reduction reduction);
+
+/**
+ * Get how the training gradient combines a batch's errors (see ann_set_loss_reduction).
+ *
+ * @param pnet Network to query
+ * @return The reduction; LOSS_REDUCTION_SUM for a NULL network
+ */
+ANN_API Loss_reduction ann_get_loss_reduction(const PNetwork pnet);
 
 /**
  * Set the convergence criterion for training.

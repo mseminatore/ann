@@ -2948,8 +2948,10 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 	PTensor A_prev = prev_layer->t_batch_values; // [batch × in] previous activations
 	PTensor delta = layer->t_batch_dl_dz;        // [batch × out] output delta
 	
-	// Compute delta = T - Y (same convention as original: gradient direction for descent)
+	// Compute delta = T - Y (same convention as original: gradient direction for descent),
+	// scaled for the loss reduction
 	real total_loss = (real)0.0;
+	real scale = ann_output_delta_scale(pnet, batch_size);
 	
 	for (int b = 0; b < batch_size; b++)
 	{
@@ -2959,7 +2961,7 @@ static real back_propagate_output_batched(PNetwork pnet, int batch_size, PTensor
 		for (int n = 0; n < out_nodes; n++)
 		{
 			// delta = t - y (matches original convention for gradient descent)
-			delta->values[out_offset + n] = targets->values[target_offset + n] - Y->values[out_offset + n];
+			delta->values[out_offset + n] = scale * (targets->values[target_offset + n] - Y->values[out_offset + n]);
 		}
 
 		// Accumulate loss (cross-entropy or MSE based on loss function)
@@ -3909,6 +3911,7 @@ PNetwork ann_make_network(Optimizer_type opt, Loss_type loss_type)
 	}
 
 	ann_set_loss_function(pnet, loss_type);
+	pnet->loss_reduction	= LOSS_REDUCTION_SUM;
 
 	pnet->epochLimit		= 10000;
 	pnet->train_iteration 	= 0;
@@ -5377,6 +5380,44 @@ void ann_set_loss_function(PNetwork pnet, Loss_type loss_type)
 
 	// The loss is computed during batched backprop, which reads loss_type
 	pnet->loss_type = loss_type;
+}
+
+//------------------------------
+// set how the training gradient combines a batch's errors
+//------------------------------
+int ann_set_loss_reduction(PNetwork pnet, Loss_reduction reduction)
+{
+	CHECK_NULL(pnet);
+	if (reduction != LOSS_REDUCTION_SUM && reduction != LOSS_REDUCTION_MEAN)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_set_loss_reduction");
+		return ERR_INVALID;
+	}
+	pnet->loss_reduction = reduction;
+	return ERR_OK;
+}
+
+//------------------------------
+// get how the training gradient combines a batch's errors
+//------------------------------
+Loss_reduction ann_get_loss_reduction(const PNetwork pnet)
+{
+	return pnet ? pnet->loss_reduction : LOSS_REDUCTION_SUM;
+}
+
+//------------------------------
+// the factor every backend multiplies the output delta T - Y by. The gradients
+// sum the batch's rows; the mean reduction divides by the batch size, and for
+// MSE turns 1/2 * sum((y - t)^2) over n outputs into mean((y - t)^2), 2 / n
+// times smaller
+//------------------------------
+real ann_output_delta_scale(const PNetwork pnet, int batch_size)
+{
+	if (pnet->loss_reduction != LOSS_REDUCTION_MEAN || batch_size < 1)
+		return (real)1.0;
+	if (pnet->loss_type == LOSS_MSE)
+		return (real)2.0 / ((real)batch_size * (real)pnet->layers[pnet->layer_count - 1].node_count);
+	return (real)1.0 / (real)batch_size;
 }
 
 //------------------------------

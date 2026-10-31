@@ -151,6 +151,49 @@ static int gc_regularized_matches_cpu(real l2, real l1)
     return ok;
 }
 
+// XOR with SGD, which follows the gradient's scale, for a loss and reduction
+static PNetwork gc_make_sgd_net(Loss_type loss, Loss_reduction reduction)
+{
+    PNetwork net = ann_make_network(OPT_SGD, loss);
+    if (!net) return NULL;
+
+    ann_add_layer(net, 2, LAYER_INPUT,  ACTIVATION_NULL);
+    ann_add_layer(net, 8, LAYER_HIDDEN, ACTIVATION_TANH);
+    ann_add_layer(net, 1, LAYER_OUTPUT, ACTIVATION_SIGMOID);
+    ann_set_loss_reduction(net, reduction);
+    ann_set_learning_rate(net, 0.5f);
+    ann_set_convergence(net, 1e-6f);  // run every epoch
+    ann_set_epoch_limit(net, 20);
+    return net;
+}
+
+// Train the same SGD network on the CPU and the GPU with a loss reduction and
+// compare the weights; with the mean reduction, also check that the GPU's
+// steps were scaled (its weights differ from the sum reduction's)
+static int gc_reduction_matches_cpu(Loss_type loss, Loss_reduction reduction)
+{
+    PNetwork cpu_net = gc_make_sgd_net(loss, reduction), gpu_net = gc_make_sgd_net(loss, reduction);
+    ann_gpu_upload_network(gpu_net);
+    srand(41);
+    gc_train(cpu_net);
+    srand(41);
+    gc_train(gpu_net);
+    int ok = gpu_net->layers[1].t_weights->gpu_buf != NULL && gc_nets_close(cpu_net, gpu_net, 1e-3f, 0);
+
+    if (reduction == LOSS_REDUCTION_MEAN)
+    {
+        PNetwork sum_net = gc_make_sgd_net(loss, LOSS_REDUCTION_SUM);
+        ann_gpu_upload_network(sum_net);
+        srand(41);
+        gc_train(sum_net);
+        ok = ok && !gc_nets_close(sum_net, gpu_net, 1e-3f, 0);
+        ann_free_network(sum_net);
+    }
+    ann_free_network(cpu_net);
+    ann_free_network(gpu_net);
+    return ok;
+}
+
 static void gc_online_steps(PNetwork net)
 {
     srand(99);
@@ -243,6 +286,17 @@ static void run_gpu_consistency_tests(void)
     TESTEX("GPU L2 training matches the CPU", gc_regularized_matches_cpu(1e-3f, 0.0f));
     TESTEX("GPU L1 training matches the CPU", gc_regularized_matches_cpu(0.0f, 1e-4f));
     TESTEX("GPU L2 + L1 training matches the CPU", gc_regularized_matches_cpu(1e-3f, 1e-4f));
+
+    // ========================================================================
+    SUITE("GPU Loss Reduction");
+    // ========================================================================
+
+    // the mean reduction scales the output delta by 2 / (batch * outputs) for
+    // MSE and 1 / batch for cross-entropy, on the GPU as on the CPU
+    TESTEX("GPU MSE (sum) SGD training matches the CPU", gc_reduction_matches_cpu(LOSS_MSE, LOSS_REDUCTION_SUM));
+    TESTEX("GPU MSE (mean) SGD training matches the CPU", gc_reduction_matches_cpu(LOSS_MSE, LOSS_REDUCTION_MEAN));
+    TESTEX("GPU binary cross-entropy (mean) SGD training matches the CPU",
+           gc_reduction_matches_cpu(LOSS_BINARY_CROSS_ENTROPY, LOSS_REDUCTION_MEAN));
 
     // Validation on flipped targets gets worse as training fits XOR, so
     // early stopping triggers and restores an earlier epoch's weights

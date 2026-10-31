@@ -2696,13 +2696,14 @@ static int vk_train_batch(PNetwork pnet, PTensor batch_targets, int batch_size)
                              (VkBuf *)dst->t_batch_z->gpu_buf, masked ? slot->masks[layer] : NULL, 1);
     }
 
-    // Output delta = t - y and each row's loss; MSE then applies the output activation's
+    // Output delta = (t - y) * ann_output_delta_scale and each row's loss; MSE then applies the output activation's
     // derivative (cross-entropy with softmax or sigmoid needs none; a Conv2D output applies
     // it in its backward pass)
     {
-        struct { uint32_t rows, cols, mode; } p = {
+        struct { uint32_t rows, cols, mode; float scale; } p = {
             (uint32_t)batch_size, (uint32_t)output_nodes,
-            pnet->loss_type == LOSS_MSE ? 0u : (out->activation == ACTIVATION_SIGMOID ? 2u : 1u)
+            pnet->loss_type == LOSS_MSE ? 0u : (out->activation == ACTIVATION_SIGMOID ? 2u : 1u),
+            (float)ann_output_delta_scale(pnet, batch_size)
         };
         VkBuf *bufs[4] = { (VkBuf *)out->t_batch_values->gpu_buf, slot->targets,
                            (VkBuf *)out->t_batch_dl_dz->gpu_buf, slot->row_loss };

@@ -288,28 +288,28 @@ extern "C" __global__ void cuda_l1_regularize(float *weights, float l1_scale, in
 // binary cross-entropy -(t*log(y) + (1-t)*log(1-y)) when binary is set
 // (sigmoid outputs). y is clamped to [1e-7, 1 - 1e-7].
 extern "C" __global__ void cuda_xent_delta_loss(
-    const float *Y, const float *T, float *delta, float *loss, int n, int binary)
+    const float *Y, const float *T, float *delta, float *loss, int n, int binary, float scale)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n)
     {
         float y = Y[i], t = T[i];
-        delta[i] = t - y;
+        delta[i] = scale * (t - y);
         float yc = fminf(fmaxf(y, 1e-7f), 1.0f - 1e-7f);
         loss[i] = binary ? -(t * logf(yc) + (1.0f - t) * logf(1.0f - yc))
                          : -t * logf(yc);
     }
 }
 
-// MSE variant: loss[i] = (Y[i] - T[i])^2.
+// MSE variant: delta = scale * (T - Y) (ann_output_delta_scale), loss[i] = (Y[i] - T[i])^2.
 extern "C" __global__ void cuda_mse_delta_loss(
-    const float *Y, const float *T, float *delta, float *loss, int n)
+    const float *Y, const float *T, float *delta, float *loss, int n, float scale)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n)
     {
         float y = Y[i], t = T[i];
-        delta[i] = t - y;
+        delta[i] = scale * (t - y);
         float d = y - t;
         loss[i] = d * d;
     }

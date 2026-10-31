@@ -1,6 +1,7 @@
 #version 450
 #include "common.glsl"
-// Output layer: delta = t - y and each row's loss, one invocation per row.
+// Output layer: delta = scale * (t - y) and each row's loss, one invocation per row;
+// scale is ann_output_delta_scale() (the loss reduction).
 // mode 0 = MSE (squared error), 1 = categorical cross-entropy, 2 = binary
 // cross-entropy (sigmoid outputs); y is clamped like ann_cross_entropy_term().
 
@@ -15,6 +16,7 @@ layout(push_constant) uniform Params {
     uint rows;
     uint cols;
     uint mode;
+    float scale;
 } pc;
 
 void main()
@@ -26,7 +28,7 @@ void main()
         {
             uint i = row * pc.cols + n;
             float yi = y[i], ti = t[i];
-            delta[i] = ti - yi;
+            delta[i] = pc.scale * (ti - yi);
             if (pc.mode == 0)
             {
                 float d = yi - ti;

@@ -443,13 +443,17 @@ set(C_EXPORT_FILES ${C_EXPORT_DIR}/ann_rt.h ${C_EXPORT_DIR}/expected.h
     ${C_EXPORT_DIR}/dense_q.h ${C_EXPORT_DIR}/dense_f.h ${C_EXPORT_DIR}/cnn_q.h ${C_EXPORT_DIR}/cnn_f.h
     ${C_EXPORT_DIR}/ae_q.h ${C_EXPORT_DIR}/ae_f.h ${C_EXPORT_DIR}/gap_q.h ${C_EXPORT_DIR}/gap_f.h
     ${C_EXPORT_DIR}/bn_q.h ${C_EXPORT_DIR}/bn_f.h ${C_EXPORT_DIR}/dw_q.h ${C_EXPORT_DIR}/dw_f.h
-    ${C_EXPORT_DIR}/ts_q.h ${C_EXPORT_DIR}/ts_f.h ${C_EXPORT_DIR}/txt_q.h ${C_EXPORT_DIR}/txt_f.h)
+    ${C_EXPORT_DIR}/ts_q.h ${C_EXPORT_DIR}/ts_f.h ${C_EXPORT_DIR}/txt_q.h ${C_EXPORT_DIR}/txt_f.h
+    ${C_EXPORT_DIR}/ann_rt.js ${C_EXPORT_DIR}/expected.json
+    ${C_EXPORT_DIR}/dense.js ${C_EXPORT_DIR}/cnn.js ${C_EXPORT_DIR}/ae.js ${C_EXPORT_DIR}/gap.js
+    ${C_EXPORT_DIR}/bn.js ${C_EXPORT_DIR}/dw.js ${C_EXPORT_DIR}/ts.js ${C_EXPORT_DIR}/txt.js)
 add_custom_command(OUTPUT ${C_EXPORT_FILES}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${C_EXPORT_DIR}
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/ann_rt.h ${C_EXPORT_DIR}/ann_rt.h
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/ann_rt.js ${C_EXPORT_DIR}/ann_rt.js
     COMMAND gen_c_export ${C_EXPORT_DIR}
-    DEPENDS gen_c_export ${CMAKE_SOURCE_DIR}/ann_rt.h
-    COMMENT "Exporting test models as C headers")
+    DEPENDS gen_c_export ${CMAKE_SOURCE_DIR}/ann_rt.h ${CMAKE_SOURCE_DIR}/ann_rt.js
+    COMMENT "Exporting test models as C headers and JavaScript modules")
 # one target owns the headers: listing them in both tests' sources would run
 # the export once per test, and in a parallel build the two runs overwrite
 # each other's files
@@ -464,4 +468,13 @@ foreach(target test_c_export test_c_export_int8)
     add_test(NAME ${target} COMMAND ${target})
 endforeach()
 target_link_libraries(test_c_export ${MATH_LIB})
+# JavaScript export: the same models' modules run with ann_rt.js in Node and
+# must give libann's float results (skipped when Node is not installed)
+find_program(NODE_EXECUTABLE node)
+if(NODE_EXECUTABLE)
+    add_test(NAME test_js_export
+             COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_js_export.mjs ${C_EXPORT_DIR})
+else()
+    message(STATUS "Node not found: test_js_export skipped")
+endif()
 target_compile_definitions(test_c_export_int8 PRIVATE ANN_RT_NO_FLOAT)

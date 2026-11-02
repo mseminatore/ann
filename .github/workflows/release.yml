@@ -21,6 +21,15 @@ jobs:
       id: version
       run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+    # the tag must name the version in ann.h, the one place it is set
+    - name: Check the tag matches ann.h
+      run: |
+        header=$(sed -n 's/^#define ANN_VERSION_STRING[[:space:]]*"\(.*\)"/\1/p' ann.h)
+        if [ "$header" != "${{ steps.version.outputs.VERSION }}" ]; then
+          echo "::error::tag ${GITHUB_REF_NAME} does not match ANN_VERSION_STRING \"$header\" in ann.h"
+          exit 1
+        fi
+
     - name: Create source archives
       run: |
         git archive --format=tar.gz --prefix=libann-${{ steps.version.outputs.VERSION }}/ -o libann-${{ steps.version.outputs.VERSION }}-source.tar.gz HEAD

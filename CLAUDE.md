@@ -75,6 +75,8 @@ Test files define `void test_main(int argc, char *argv[])` and use the `MODULE(.
 
 ## Conventions
 
+- **Version**: set only in `ann.h` (`ANN_VERSION_MAJOR`/`_MINOR`/`_PATCH`, `ANN_VERSION_STRING`, `ANN_VERSION` via `ANN_MAKE_VERSION`); `CMakeLists.txt` parses `ANN_VERSION_STRING` for `project(VERSION)` and the shared library's `VERSION`/`SOVERSION`, and `ann_get_version()` returns it (tested in `tests/test_network.c`). Releases: push tag `vX.Y.Z` matching `ann.h`; `.github/workflows/release.yml` fails on a mismatch, else publishes a GitHub release with source archives.
+
 - ANSI C for portability (Windows/macOS/Linux). Platform-specific code is guarded by `#ifdef _WIN32`.
 - `real` typedef is the scalar type — `float` by default; switch to `double` in `tensor.h`.
 - Public functions are prefixed `ann_*` (runtime) or `tensor_*` (math). The headers wrap their declarations in `extern "C"` for C++ (the CUDA backend is compiled as C++, so a function it calls from `ann.c` must be declared in such a block, e.g. in `ann_gpu_backend.h`); `tests/test_cxx.cpp` links a C++ program against libann. Mark every public declaration with `ANN_API`: the shared library is built with hidden visibility, so unmarked functions are not exported (and the `../pyann` CFFI bindings rely on that surface). New enum values go at the end of their enum, since saved models and pyann store the integer values.

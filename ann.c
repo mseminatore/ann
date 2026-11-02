@@ -6155,6 +6155,14 @@ PNetwork ann_load_network(const char *filename)
 // display the network properties
 //-----------------------------------------------
 //------------------------------
+// the version of this build
+//------------------------------
+const char *ann_get_version(void)
+{
+	return ANN_VERSION_STRING;
+}
+
+//------------------------------
 // report how this build computes
 //------------------------------
 int ann_get_backend_info(Backend_info *info)

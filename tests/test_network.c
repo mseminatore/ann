@@ -527,5 +527,16 @@ void test_main(int argc, char *argv[]) {
     tensor_free(xor_out);
     ann_free_network(net_curve);
 
+    SUITE("Version");
+    {
+        char parts[32];
+        snprintf(parts, sizeof(parts), "%d.%d.%d", ANN_VERSION_MAJOR, ANN_VERSION_MINOR, ANN_VERSION_PATCH);
+        TESTEX("The running library is the version of ann.h", strcmp(ann_get_version(), ANN_VERSION_STRING) == 0);
+        TESTEX("ANN_VERSION_STRING matches the major, minor and patch numbers", strcmp(parts, ANN_VERSION_STRING) == 0);
+        TESTEX("ANN_VERSION orders versions",
+               ANN_VERSION == ANN_MAKE_VERSION(ANN_VERSION_MAJOR, ANN_VERSION_MINOR, ANN_VERSION_PATCH) &&
+               ANN_MAKE_VERSION(0, 10, 0) > ANN_MAKE_VERSION(0, 9, 99));
+    }
+
     TESTEX("Network creation and configuration tests completed", 1);
 }

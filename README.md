@@ -182,6 +182,7 @@ ann_get_layer_trainable | check whether a layer is frozen
 ann_set_num_threads | set how many CPU threads libann uses (0 = default)
 ann_get_num_threads | get the CPU thread count
 ann_get_backend_info | report the BLAS library, GPU backend, thread count and number size of this build
+ann_get_version | the version of the running libann, e.g. "0.10.0"
 ann_export_onnx | export trained network to ONNX JSON format
 ann_quantize | quantize a trained network to int8 (calibrated on sample inputs)
 ann_quantized_predict | run the int8 model (also `_predict_int8`, `_predict_ids` for text models, `_evaluate_accuracy`)
@@ -933,6 +934,26 @@ for details. `examples/bench_gpu_training.c` compares CPU and GPU training speed
 # Error Handling
 
 All public API functions return error codes to indicate success or failure. The library provides a callback mechanism for custom error logging and monitoring.
+
+## Versioning and Releases
+
+`ann.h` is the one place libann's version is set: `ANN_VERSION_MAJOR`,
+`ANN_VERSION_MINOR`, `ANN_VERSION_PATCH` and `ANN_VERSION_STRING`, plus
+`ANN_VERSION` for compile-time checks
+(`#if ANN_VERSION >= ANN_MAKE_VERSION(0, 10, 0)`). CMake reads it for the
+project and the shared library's version, and `ann_get_version()` returns the
+running library's, so a program can compare it with the header it was built
+with:
+
+```c
+if (strcmp(ann_get_version(), ANN_VERSION_STRING) != 0)
+    fprintf(stderr, "built with libann %s but running %s\n", ANN_VERSION_STRING, ann_get_version());
+```
+
+To release, set the version in `ann.h`, merge it, and push a tag `vMAJOR.MINOR.PATCH`
+with the same numbers. The Release workflow checks that the tag matches `ann.h`
+(and fails if not), then publishes a GitHub release with source archives and
+generated notes.
 
 ## Error Codes
 

@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.10)
 
-# set the project name and version
-project(ann VERSION 1.0)
+# the project's version comes from ann.h, the one place it is set
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/ann.h ANN_VERSION_LINE REGEX "^#define ANN_VERSION_STRING")
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" ANN_VERSION "${ANN_VERSION_LINE}")
+if(NOT ANN_VERSION)
+    message(FATAL_ERROR "ANN_VERSION_STRING not found in ann.h")
+endif()
+project(ann VERSION ${ANN_VERSION})
 
 # options
 option(BUILD_SHARED "Build shared library (DLL/so/dylib)" OFF)
@@ -246,6 +251,10 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(libann ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB} ${CUDA_LIBS} ${VULKAN_LIBS} Threads::Threads)
 set_target_properties(libann PROPERTIES PREFIX "")  # avoid liblibann on Unix
+if(BUILD_SHARED)
+    # libann.so.0.10.0 / libann.0.10.0.dylib, from the version in ann.h
+    set_target_properties(libann PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+endif()
 
 # install rules
 install(TARGETS libann ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)

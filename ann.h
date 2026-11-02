@@ -42,6 +42,18 @@ extern "C" {
 // ANN_API is defined in tensor.h
 
 //------------------------------
+// libann's version: the one place it is set. CMake reads it from here, and a
+// release tag must match it (vMAJOR.MINOR.PATCH; see .github/workflows/release.yml)
+//------------------------------
+#define ANN_VERSION_MAJOR	0
+#define ANN_VERSION_MINOR	10
+#define ANN_VERSION_PATCH	0
+#define ANN_VERSION_STRING	"0.10.0"
+// one number for compile-time checks: #if ANN_VERSION >= ANN_MAKE_VERSION(0, 10, 0)
+#define ANN_MAKE_VERSION(major, minor, patch)	((major) * 10000 + (minor) * 100 + (patch))
+#define ANN_VERSION	ANN_MAKE_VERSION(ANN_VERSION_MAJOR, ANN_VERSION_MINOR, ANN_VERSION_PATCH)
+
+//------------------------------
 // Configurable parameters
 //------------------------------
 #define DEFAULT_LAYERS			4		// we pre-alloc this many layers
@@ -1946,6 +1958,15 @@ typedef struct {
  * @return ERR_OK, or ERR_NULL_PTR
  */
 ANN_API int ann_get_backend_info(Backend_info *info);
+
+/**
+ * The version of the libann build that is running, "MAJOR.MINOR.PATCH". A
+ * program can compare it with ANN_VERSION_STRING, the version of the ann.h it
+ * was compiled with, to catch a mismatched shared library.
+ *
+ * @return A static string, e.g. "0.10.0"
+ */
+ANN_API const char *ann_get_version(void);
 
 /**
  * Set where a network's progress output goes (training progress, loading

@@ -18,6 +18,11 @@ jobs:
             name: macOS (ARM)
           - os: windows-latest
             name: Windows (x64)
+          # a shared libann exports only ANN_API functions (hidden visibility),
+          # so this catches a test or program relying on an internal one
+          - os: ubuntu-latest
+            name: Linux (x64, shared library)
+            cmake_args: -DBUILD_SHARED=1
 
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -28,7 +33,7 @@ jobs:
         submodules: recursive
 
     - name: Configure CMake
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_args }}
 
     - name: Build
       run: cmake --build build --config Release

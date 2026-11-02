@@ -3,6 +3,10 @@
 // (or the CUDA backend, which nvcc compiles as C++) links against the C
 // library. Without the extern "C" blocks this fails to link with undefined
 // references to C++-mangled names.
+//
+// A shared libann exports only its ANN_API functions, so with ANN_TEST_SHARED
+// (set by CMake for BUILD_SHARED) the internal helpers ann_gpu_backend.h
+// declares are compiled but not called; the static build checks they link.
 //-----------------------------------------------------------
 
 #include <cstdio>
@@ -20,11 +24,13 @@ int main()
     ann_add_layer(net, 3, LAYER_HIDDEN, ACTIVATION_RELU);
     ann_add_layer(net, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 
-    // the helpers ann.c shares with the GPU backends
+#ifndef ANN_TEST_SHARED
+    // the helpers ann.c shares with the GPU backends (internal: not exported by a shared libann)
     failed |= ann_lowest_trained_layer(net) != 1;
     ann_set_layer_trainable(net, 1, 0);
     failed |= ann_lowest_trained_layer(net) != 2;
     failed |= ann_cross_entropy_term(ACTIVATION_SOFTMAX, 1.0f, 1.0f) > 1e-6f;
+#endif
 
     real x[4] = { 0.1f, 0.2f, 0.3f, 0.4f }, y[2];
     failed |= ann_predict(net, x, y) != ERR_OK;

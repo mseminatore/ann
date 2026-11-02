@@ -932,6 +932,21 @@ ANN_API int ann_export_c_header(const PNetwork pnet, const PQuantizedNetwork q, 
                                 const char *prefix);
 
 /**
+ * Export a network as a JavaScript module for the browser or Node.
+ *
+ * Writes an ES module holding the float32 model (the same layer description
+ * as ann_export_c_header() writes, with batch norm folded in) and exporting
+ * predict(input) and argmax(output). It imports ann_rt.js, libann's
+ * JavaScript runtime: copy that file next to the module. Weights are stored
+ * as base64 of their float32 bytes, about 5.3 bytes per parameter.
+ *
+ * @param pnet Network to export, as float32
+ * @param filename Output file, e.g. "model.js"
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (unsupported network) or ERR_IO
+ */
+ANN_API int ann_export_js(const PNetwork pnet, const char *filename);
+
+/**
  * Export network architecture as PIKCHR diagram.
  * 
  * Generates a PIKCHR text file that can be rendered to SVG using

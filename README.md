@@ -186,6 +186,7 @@ ann_export_onnx | export trained network to ONNX JSON format
 ann_quantize | quantize a trained network to int8 (calibrated on sample inputs)
 ann_quantized_predict | run the int8 model (also `_predict_int8`, `_predict_ids` for text models, `_evaluate_accuracy`)
 ann_export_c_header | export an int8 or float32 model as a standalone C header
+ann_export_js | export a float32 model as a JavaScript module for the browser or Node
 ann_import_onnx | import network from ONNX JSON file
 ann_export_pikchr | export network architecture as PIKCHR diagram
 ann_export_learning_curve | export training history as CSV
@@ -528,6 +529,28 @@ printf("int8 accuracy %g\n", ann_quantized_evaluate_accuracy(q, x_test, y_test))
 ann_export_c_header(NULL, q, "model.h", "model");    // then: model_predict(in, out, workspace)
 ann_free_quantized(q);
 ```
+
+## JavaScript Export
+
+`ann_export_js()` writes a float32 network as an ES module for the browser or
+Node. It holds the same layer description as the C header (batch norm folded
+in, weights as base64) and runs with `ann_rt.js`, a dependency-free port of
+`ann_rt.h`'s float path: copy it next to the module. Results match
+`ann_predict()` to float32 rounding (`tests/test_js_export.mjs` checks every
+layer kind in Node).
+
+```c
+ann_export_js(pnet, "model.js");
+```
+
+```js
+import { predict, argmax } from "./model.js";
+const output = predict(input);    // a Float32Array, with softmax applied
+```
+
+Plain JavaScript runs about 0.5 to 1 billion multiply-adds a second on one
+core: a small keyword-spotting CNN takes about 3 ms per second of audio,
+while full-resolution image models take seconds.
 
 ## Saved Model Formats
 

@@ -411,12 +411,16 @@ target_link_libraries(test_layer_params libann ${BLAS_LIB} ${MATH_LIB})
 add_executable(test_csv tests/test_csv.c testy/test_main.c)
 target_link_libraries(test_csv libann ${BLAS_LIB} ${MATH_LIB})
 
-# libann from C++ (the CUDA backend is C++ too): checks the headers' extern "C" blocks
 add_executable(test_gpu_select tests/test_gpu_select.c)
 target_link_libraries(test_gpu_select libann ${BLAS_LIB} ${MATH_LIB})
 
+# libann from C++ (the CUDA backend is C++ too): checks the headers' extern "C" blocks
 add_executable(test_cxx tests/test_cxx.cpp)
 target_link_libraries(test_cxx libann ${BLAS_LIB} ${MATH_LIB})
+if(BUILD_SHARED)
+    # a shared libann exports only ANN_API functions, not ann_gpu_backend.h's internal helpers
+    target_compile_definitions(test_cxx PRIVATE ANN_TEST_SHARED)
+endif()
 
 add_executable(test_threads tests/test_threads.c testy/test_main.c)
 target_link_libraries(test_threads libann ${BLAS_LIB} ${MATH_LIB} Threads::Threads)

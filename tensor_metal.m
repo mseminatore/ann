@@ -829,19 +829,24 @@ int tensor_metal_init(void)
         "    dx[(gid.z * d.H + gid.y) * d.W + gid.x] = s; }\n"
         // Each output takes its window's largest input (the first on ties,
         // scanning as the CPU does) and records its index within the sample;
-        // grid (OW, OH, batch*C)
+        // grid (OW, OH, batch*C). Over a masked sequence (masked = 1, mask
+        // [batch][W] the layer below's, one row high) only kept inputs count;
+        // with none the output is the first input (the step is masked).
         "kernel void maxpool_forward(\n"
         "    device const float *x [[buffer(0)]],\n"
         "    device float *y [[buffer(1)]],\n"
         "    device uint *arg [[buffer(2)]],\n"
-        "    constant WindowDims &d [[buffer(3)]],\n"
+        "    device const float *mask [[buffer(3)]],\n"
+        "    constant WindowDims &d [[buffer(4)]],\n"
+        "    constant uint &masked [[buffer(5)]],\n"
         "    uint3 gid [[thread_position_in_grid]]) {\n"
-        "    device const float *xs = x + gid.z * d.H * d.W;\n"
-        "    uint row0 = gid.y * d.S * d.W + gid.x * d.SW, best = row0;\n"
+        "    device const float *xs = x + gid.z * d.H * d.W, *m = mask + (gid.z / d.C) * d.W + gid.x * d.SW;\n"
+        "    uint row0 = gid.y * d.S * d.W + gid.x * d.SW, best = ~0u;\n"
         "    for (uint i = 0; i < d.K; i++)\n"
         "        for (uint j = 0; j < d.KW; j++) {\n"
         "            uint idx = row0 + i * d.W + j;\n"
-        "            if (xs[idx] > xs[best]) best = idx; }\n"
+        "            if ((!masked || m[j] != 0.0f) && (best == ~0u || xs[idx] > xs[best])) best = idx; }\n"
+        "    if (best == ~0u) best = row0;\n"
         "    uint out = (gid.z * d.OH + gid.y) * d.OW + gid.x;\n"
         "    y[out] = xs[best];\n"
         "    arg[out] = (gid.z % d.C) * d.H * d.W + best; }\n"
@@ -1970,6 +1975,9 @@ static int encode_conv_backward(id<MTLCommandBuffer> cmd, PNetwork pnet, int lay
 //-----------------------------------------------------------
 // MaxPool2D forward; each output's argmax goes to the layer's scratch
 //-----------------------------------------------------------
+static void encode_pooled(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pso, id<MTLBuffer> __strong *bufs,
+                          int n_bufs, const WindowDims *d, uint32_t masked, MTLSize grid);
+
 static int encode_maxpool_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int layer, int batch_size,
                                   id<MTLBuffer> X, id<MTLBuffer> Y)
 {
@@ -1978,8 +1986,10 @@ static int encode_maxpool_forward(id<MTLCommandBuffer> cmd, PNetwork pnet, int l
                                       (size_t)batch_size * pnet->layers[layer].node_count * sizeof(uint32_t));
     if (!arg)
         return 0;
-    id<MTLBuffer> bufs[3] = { X, Y, arg };
-    encode_grid(cmd, g_metal.pso_maxpool_forward, bufs, 3, &d, sizeof(d), MTLSizeMake(d.OW, d.OH, (NSUInteger)batch_size * d.C));
+    id<MTLBuffer> mask = pnet->layers[layer].masked ? g_metal.pad[@(layer - 1)] : nil;
+    id<MTLBuffer> bufs[4] = { X, Y, arg, mask ? mask : X };
+    encode_pooled(cmd, g_metal.pso_maxpool_forward, bufs, 4, &d, mask != nil,
+                  MTLSizeMake(d.OW, d.OH, (NSUInteger)batch_size * d.C));
     return 1;
 }
 

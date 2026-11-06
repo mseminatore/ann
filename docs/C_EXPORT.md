@@ -21,8 +21,10 @@ conv and pool windows non-square, including 1-D convs and pools (`ann_add_conv2d
 
 A generated header initializes every `ann_rt_layer` field, so it builds without
 missing-initializer warnings, and checks that `ann_rt.h` is at least the version that wrote it
-(7: version 2 added upsampling, 3 global average pooling, 4 grouped convolutions, 5 non-square
-windows, 6 global max pooling, 7 embeddings with padding masks). Copy `ann_rt.h` from the libann
+(8: version 2 added upsampling, 3 global average pooling, 4 grouped convolutions, 5 non-square
+windows, 6 global max pooling, 7 embeddings with padding masks, 8 masked max pools that keep a
+window with any kept step; a version 7 header built with it pools that way too, as the libann
+that reads its model does). Copy `ann_rt.h` from the libann
 that exported the model. Headers written by older
 versions still build with the newer runtime (the fields they leave out read as 0, which means
 one group and a square window), but
@@ -131,8 +133,11 @@ The embedding's table is stored as int8 rows, in the quantization of the embeddi
 (one scale and zero point for the whole table), so a lookup copies a row and needs no
 arithmetic. Its `INPUT_SCALE` is 1 and `INPUT_ZERO_POINT` 0. For a model built with
 `ann_add_embedding_masked`, the runtime works out the padding mask from the ids at each call,
-as libann does: masked steps of the 1-D convs and pools above the embedding output 0, and
-global pooling leaves them out, so a text padded at the end gives what it would unpadded. The
+as libann does: masked steps of the 1-D convs and pools above the embedding output 0 (a conv
+step is masked when any input in its window, less its padding, is; a max pool step only when
+every input in its window is, and it takes the largest kept one), and global pooling leaves
+them out, so a text padded at the end gives what it would unpadded (see the README for the
+exact rule). The
 workspace then also holds two masks (a byte per step). The table usually dominates such a
 model's size: a 20,000-word vocabulary of 100-value vectors is 2 MB as int8 and 8 MB as
 float32.

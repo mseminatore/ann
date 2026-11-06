@@ -34,15 +34,19 @@ ann_export_onnx(pnet, "model.onnx.json");
 - A masked embedding (`ann_add_embedding_masked`) also exports its padding
   mask, a float `mask_N [batch, 1, 1, L]` (1 kept, 0 padding):
   `Unsqueeze(Cast(Not(Equal(emb_N_ids, emb_N_pad))))` for the embedding, and
-  for each conv or max pooling layer it follows, `Neg`, `MaxPool` over the
-  window less its padding (`[1, kw - 2*pw]`, stride `[1, sw]`) and `Neg` (a
-  step is kept when all its inputs are). Each masked layer's output is
-  multiplied by its mask (batch norm uses the mask below it). Global average
-  pooling over a masked sequence becomes `ReduceSum(x, [2, 3]) /
-  Max(ReduceSum(mask, [2, 3]), 1)`, and global max pooling
-  `GlobalMaxPool(x + (mask - 1) * 3e38) * ReduceMax(mask)`, both 0 for a text
-  that is all padding. A masked conv or pool needs a window wider than twice
-  its padding (`ERR_INVALID` otherwise).
+  for each conv layer it follows, `Neg`, `MaxPool` over the window less its
+  padding (`[1, kw - 2*pw]`, stride `[1, sw]`) and `Neg` (a step is kept when
+  all its inputs are); for each max pooling layer, `MaxPool` over its window
+  (a step is kept when any input is), and the pool itself reads
+  `x + (mask below - 1) * 3e38`, so masked steps never win. Each masked
+  layer's output is multiplied by its mask (batch norm uses the mask below
+  it). Global average pooling over a masked sequence becomes
+  `ReduceSum(x, [2, 3]) / Max(ReduceSum(mask, [2, 3]), 1)`, and global max
+  pooling `GlobalMaxPool(x + (mask - 1) * 3e38) * ReduceMax(mask)`, both 0 for
+  a text that is all padding. A masked conv needs a window wider than twice
+  its padding (`ERR_INVALID` otherwise). The masks are a libann extension
+  (see the README's text section): PyTorch exports have none, and Keras
+  drops the mask at `Conv1D` and `MaxPooling1D`.
 - `weight_N` has dims `[in_nodes, out_nodes]`, the layout ONNX `MatMul` expects
   (libann stores weights as `[out, in]` internally and transposes them on export)
 - Input shape: `[batch, input_size]` with dynamic batch dimension

@@ -32,7 +32,7 @@
 //================================================================================================
 
 // the ann_rt.h version whose layer description this runtime reads
-export const VERSION = 7;
+export const VERSION = 8;
 
 // layer kinds and activations: the values of ann_rt.h's enums
 export const DENSE = 0, CONV2D = 1, MAXPOOL2D = 2, FLATTEN = 3, UPSAMPLE2D = 4,
@@ -78,7 +78,9 @@ function tokenId(l, ids, t) {
 
 //------------------------------
 // a masked layer's mask (1 kept, 0 padding, a byte per output step): an
-// embedding's from its ids, a 1-D conv's or pool's from the layer below's
+// embedding's from its ids, a 1-D conv's (every input in its window less its
+// padding kept) or max pool's (any input in its window kept) from the layer
+// below's
 //------------------------------
 function makeMask(l, ids, inMask, mask) {
 	const k = sizeW(l), s = strideW(l), p = padW(l);
@@ -86,6 +88,15 @@ function makeMask(l, ids, inMask, mask) {
 	if (l.kind === EMBEDDING) {
 		for (let j = 0; j < l.out_w; j++)
 			mask[j] = tokenId(l, ids, j) !== l.pad ? 1 : 0;
+		return;
+	}
+	if (l.kind === MAXPOOL2D) {
+		for (let j = 0; j < l.out_w; j++) {
+			mask[j] = 0;
+			for (let i = j * s; i < j * s + k; i++)
+				if (inMask[i])
+					mask[j] = 1;
+		}
 		return;
 	}
 	for (let j = 0; j < l.out_w; j++) {
@@ -186,17 +197,22 @@ function linear(l, x, z) {
 	}
 }
 
-function maxpool(l, x, y) {
+// max pooling: each output is its window's largest value. Over a masked
+// sequence (mask: the layer below's, one row), the largest of the kept steps;
+// a window with none is masked, so its value does not matter.
+function maxpool(l, x, y, mask) {
 	const kw = sizeW(l), sw = strideW(l);
 	for (let c = 0; c < l.out_c; c++)
 		for (let oh = 0; oh < l.out_h; oh++)
 			for (let ow = 0; ow < l.out_w; ow++) {
-				const xc = (c * l.in_h + oh * l.stride) * l.in_w + ow * sw;
-				let best = x[xc];
+				const w0 = ow * sw, xc = (c * l.in_h + oh * l.stride) * l.in_w + w0;
+				let best = x[xc], any = false;
 				for (let i = 0; i < l.size; i++)
 					for (let j = 0; j < kw; j++)
-						if (x[xc + i * l.in_w + j] > best)
+						if ((!mask || mask[w0 + j]) && (!any || x[xc + i * l.in_w + j] > best)) {
 							best = x[xc + i * l.in_w + j];
+							any = true;
+						}
 				y[(c * l.out_h + oh) * l.out_w + ow] = best;
 			}
 }
@@ -287,7 +303,7 @@ export function predict(model, input) {
 			}
 			break;
 		}
-		case MAXPOOL2D:			maxpool(l, src, dst); break;
+		case MAXPOOL2D:			maxpool(l, src, dst, inMask); break;
 		case UPSAMPLE2D:		upsample(l, src, dst); break;
 		case GLOBAL_AVGPOOL2D:	globalAvgpool(l, src, dst, inMask); break;
 		case GLOBAL_MAXPOOL2D:	globalMaxpool(l, src, dst, inMask); break;

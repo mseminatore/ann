@@ -256,7 +256,8 @@ static void make_text_data(PTensor *ids, PTensor *targets)
 
 // 0: embedding -> conv1d -> global max pool; 1: masked embedding -> conv1d
 // -> batch norm -> conv1d (whose windows read masked steps, which must be
-// zero) -> max pool -> conv1d -> global average pool; 2: as 1 with global
+// zero; tanh, so a masked pool must skip its windows' padding) -> max pool
+// -> conv1d -> global average pool; 2: as 1 with global
 // max pooling and dropout after the first conv
 static PNetwork make_text_net(int variant)
 {
@@ -269,7 +270,7 @@ static PNetwork make_text_net(int variant)
     ann_add_conv1d(net, 6, 3, 1, 1, ACTIVATION_RELU);      // 6x1x12
     if (variant > 0) {
         ann_add_batchnorm(net, ACTIVATION_RELU);
-        ann_add_conv1d(net, 6, 3, 1, 1, ACTIVATION_RELU);  // 6x1x12
+        ann_add_conv1d(net, 6, 3, 1, 1, ACTIVATION_TANH);  // 6x1x12
         ann_add_maxpool1d(net, 2, 2);                       // 6x1x6
         ann_add_conv1d(net, 4, 3, 1, 0, ACTIVATION_TANH);  // 4x1x4
     }

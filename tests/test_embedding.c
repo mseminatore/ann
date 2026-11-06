@@ -511,6 +511,86 @@ void test_main(int argc, char *argv[])
         ann_free_network(net);
     }
     {
+        // a masked max pool keeps a window with any kept step and takes the
+        // largest of those: 8 ids (id i is the value i - 10, padding 0) ->
+        // max pool 4 (stride 4, or 2) -> flatten -> dense (identity)
+        enum { CASES = 6 };
+        static const real ids[CASES * 8] = {
+            1, 2, 3, 4,  5, 4, 3, 2,
+            1, 2, 3, 0,  5, 4, 3, 2,    // padding inside a window
+            5, 0, 0, 0,  3, 0, 0, 0,    // one kept step per window
+            1, 2, 3, 4,  5, 4, 0, 0,    // padding at the end
+            1, 2, 3, 4,  0, 0, 0, 0,    // a window of nothing but padding
+            0, 0, 0, 1,  0, 0, 0, 0 };
+        static const real want4[CASES * 2] = { -6, -5,  -7, -5,  -5, -7,  -6, -5,  -6, 0,  -9, 0 };
+        static const real keep4[CASES * 2] = { 1, 1,  1, 1,  1, 1,  1, 1,  1, 0,  1, 0 };
+        static const real want2[CASES * 3] = { -6, -5, -5,  -7, -5, -5,  -5, -7, -7,  -6, -5, -5,
+                                               -6, -6, 0,  -9, -9, 0 };
+        int ok[2] = { 1, 1 }, mask_ok[2] = { 1, 1 }, onnx_ok = 0, quant_ok = 0;
+        for (int strided = 0; strided < 2; strided++) {
+            int stride = strided ? 2 : 4, out = strided ? 3 : 2;
+            const real *want = strided ? want2 : want4;
+            PNetwork net = ann_make_network(OPT_SGD, LOSS_MSE);
+            net->print_func = quiet;
+            ann_add_layer(net, 8, LAYER_INPUT, ACTIVATION_NULL);
+            ann_add_embedding_masked(net, 6, 1, 0);
+            ann_add_maxpool1d(net, 4, stride);
+            ann_add_flatten(net);
+            ann_add_layer(net, out, LAYER_OUTPUT, ACTIVATION_NULL);
+            ann_train_begin(net);
+            real *table = net->layers[1].params[0].value->values;
+            for (int i = 0; i < 6; i++) table[i] = i ? (real)(i - 10) : 0.0f;
+            real *w = net->layers[4].params[0].value->values, *b = net->layers[4].params[1].value->values;
+            for (int i = 0; i < out * out; i++) w[i] = (real)(i / out == i % out);
+            for (int i = 0; i < out; i++) b[i] = 0.0f;
+            ann_train_end(net);
+            for (int c = 0; c < CASES; c++) {
+                real y[3];
+                ann_predict(net, &ids[c * 8], y);
+                for (int k = 0; k < out; k++) {
+                    ok[strided] &= y[k] == want[c * out + k];
+                    if (!strided)
+                        mask_ok[0] &= net->layers[2].t_mask->values[k] == keep4[c * out + k];
+                    else
+                        mask_ok[1] &= net->layers[2].t_mask->values[k] == (real)(want[c * out + k] != 0.0f);
+                }
+            }
+            if (strided) {
+                // the ONNX graph and the int8 runtime pool the same way
+                ann_export_onnx(net, "test_mask_pool.onnx.json");
+                PNetwork back = ann_import_onnx("test_mask_pool.onnx.json");
+                PTensor cal = tensor_create_from_array(CASES, 8, (real *)ids);
+                PQuantizedNetwork q = ann_quantize(net, cal);
+                real scale = 1.0f;
+                onnx_ok = back != NULL && ann_get_layer_masked(back, 2);
+                quant_ok = q != NULL && ann_quantized_get_io_params(q, NULL, NULL, &scale, NULL) == ERR_OK;
+                for (int c = 0; c < CASES; c++) {
+                    real yb[3], yq[3];
+                    if (back) {
+                        ann_predict(back, &ids[c * 8], yb);
+                        for (int k = 0; k < out; k++)
+                            onnx_ok &= yb[k] == want[c * out + k];
+                    }
+                    if (q) {
+                        ann_quantized_predict(q, &ids[c * 8], yq);
+                        for (int k = 0; k < out; k++)
+                            quant_ok &= fabs(yq[k] - want[c * out + k]) <= 1.01 * scale;
+                    }
+                }
+                ann_free_quantized(q);
+                tensor_free(cal);
+                ann_free_network(back);
+                remove("test_mask_pool.onnx.json");
+            }
+            ann_free_network(net);
+        }
+        TESTEX("A masked max pool takes the largest kept step: padding in a window is left out", ok[0]);
+        TESTEX("and a window is masked only when every step in it is padding", mask_ok[0]);
+        TESTEX("The same with overlapping windows (pool 4, stride 2)", ok[1] && mask_ok[1]);
+        TESTEX("A masked max pool exports to ONNX and imports back with the same results", onnx_ok);
+        TESTEX("and quantizes to int8 with them (within a step)", quant_ok);
+    }
+    {
         // the same weights on padded and unpadded texts
         enum { N = 4 };
         static real shorter[N * SHORT_LEN], padded[N * PAD_LEN], pre[N * PAD_LEN];
@@ -727,7 +807,7 @@ void test_main(int argc, char *argv[])
         TESTEX("int ids give int8 outputs that rank the classes as the real-input path", ids_agree);
         TESTEX("Its int8 and float32 headers take token ids", q &&
                ann_export_c_header(NULL, q, "test_emb.h", "emb_q") == ERR_OK &&
-               file_contains("test_emb.h", "ANN_RT_EMBEDDING") && file_contains("test_emb.h", "ANN_RT_VERSION < 7") &&
+               file_contains("test_emb.h", "ANN_RT_EMBEDDING") && file_contains("test_emb.h", "ANN_RT_VERSION < 8") &&
                file_contains("test_emb.h", "emb_q_predict(const int32_t *ids, int8_t *output") &&
                ann_export_c_header(net, NULL, "test_emb.h", "emb_f") == ERR_OK &&
                file_contains("test_emb.h", "emb_f_predict(const int32_t *ids, float *output"));
@@ -916,7 +996,7 @@ void test_main(int argc, char *argv[])
         signed char some_out[3];
         TESTEX("A model without an embedding takes no ids", q && ann_quantized_predict_ids(q, some_ids, some_out) == ERR_INVALID);
         TESTEX("and export a header that uses it", q && ann_export_c_header(NULL, q, "test_gmp.h", "gmp_q") == ERR_OK &&
-               file_contains("test_gmp.h", "ANN_RT_GLOBAL_MAXPOOL2D") && file_contains("test_gmp.h", "ANN_RT_VERSION < 7"));
+               file_contains("test_gmp.h", "ANN_RT_GLOBAL_MAXPOOL2D") && file_contains("test_gmp.h", "ANN_RT_VERSION < 8"));
         remove("test_gmp.h");
         ann_free_quantized(q);
         ann_free_network(net);

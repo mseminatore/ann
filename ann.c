@@ -1367,6 +1367,8 @@ static void maxpool_forward_samples(void *arg, int begin, int end)
 		const real *x = job->x + b * in_nodes;
 		real *y = job->y + b * layer->node_count;
 		real *arg_max = layer->t_scratch[0]->values + (size_t)b * layer->node_count;
+		// over a masked sequence (one row high), the kept inputs
+		const real *m = layer->masked ? layer->t_in_mask->values + (size_t)b * in.w : NULL;
 
 		for (int c = 0; c < layer->shape.c; c++)
 			for (int oh = 0; oh < oh_n; oh++)
@@ -1377,7 +1379,22 @@ static void maxpool_forward_samples(void *arg, int begin, int end)
 				for (int ow = 0; ow < ow_n; ow++, out++)
 				{
 					int best = row0 + ow * w.sw;
-					if (w.k == 2 && w.kw == 2)
+					if (m)
+					{
+						// the largest kept input (the first on ties); with none,
+						// the first input (the output step is masked)
+						int first = best, found = 0;
+						for (int j = 0; j < w.kw; j++)
+						{
+							int idx = first + j;
+							if (m[ow * w.sw + j] != (real)0.0 && (!found || x[idx] > x[best]))
+							{
+								best = idx;
+								found = 1;
+							}
+						}
+					}
+					else if (w.k == 2 && w.kw == 2)
 					{
 						// the common 2x2 window, unrolled in the same scan order
 						int idx = best;
@@ -1404,7 +1421,8 @@ static void maxpool_forward_samples(void *arg, int begin, int end)
 
 //------------------------------
 // MaxPool2D forward: each output is its window's largest input (the first
-// one on ties); its index within the sample is saved for backward
+// one on ties; over a masked sequence, of the kept inputs); its index within
+// the sample is saved for backward
 //------------------------------
 static void maxpool_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 {
@@ -2149,11 +2167,14 @@ static int mask_follows(const Layer *cur, int below_masked)
 
 //------------------------------
 // set the layer's masked and t_in_mask, and compute its mask for rows
-// samples of X (the layer below's output) when it carries one. A conv or
-// pool step j reads inputs [j*s - p, j*s - p + k - 1]; it is kept when the
-// inputs [j*s, j*s + k - 1 - 2p] (the window less its padding at each end)
-// all are, so a text padded at the end keeps the steps its unpadded length
-// would give (a window narrower than its padding uses its centre input).
+// samples of X (the layer below's output) when it carries one. A conv step j
+// reads inputs [j*s - p, j*s - p + k - 1]; it is kept when the inputs
+// [j*s, j*s + k - 1 - 2p] (the window less its padding at each end) all are,
+// so a text padded at the end keeps the steps its unpadded length would give
+// (a window narrower than its padding uses its centre input). A max pool step
+// (pools have no padding) is kept when any input in its window is, and takes
+// the largest of those (maxpool_forward_samples), so padding inside a window
+// is left out rather than losing the window.
 //------------------------------
 static void layer_mask_forward(PNetwork pnet, int layer, const PTensor X, int rows)
 {
@@ -2193,10 +2214,11 @@ static void layer_mask_forward(PNetwork pnet, int layer, const PTensor X, int ro
 					lo = hi = j * w.sw - w.pw + (w.kw - 1) / 2;
 				lo = lo < 0 ? 0 : lo;
 				hi = hi >= in_steps ? in_steps - 1 : hi;
-				real keep = (real)1.0;
+				int any = cur->kind == LAYER_KIND_MAXPOOL2D;	// pools keep a window with any kept input
+				real keep = any ? (real)0.0 : (real)1.0;
 				for (int i = lo; i <= hi; i++)
-					if (in[i] == (real)0.0)
-						keep = (real)0.0;
+					if ((in[i] != (real)0.0) == any)
+						keep = any ? (real)1.0 : (real)0.0;
 				m[(size_t)b * steps + j] = keep;
 			}
 		}
@@ -6539,6 +6561,8 @@ static void no_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, int
 	(void)first;
 }
 
+static void onnx_mask_name(const PNetwork pnet, int layer, char *name, size_t size);
+
 //-----------------------------------------------
 // MaxPool ONNX node with kernel_shape and strides
 //-----------------------------------------------
@@ -6547,12 +6571,34 @@ static void maxpool_onnx_nodes(FILE *fptr, const PNetwork pnet, int layer, const
 {
 	PLayer cur = &pnet->layers[layer];
 	Window w = pool_window(cur);
-	char name[32], attributes[160];
-	snprintf(name, sizeof(name), "maxpool_%d", layer - 1);
-	snprintf(output, output_size, "maxpool_%d_out", layer - 1);
+	char name[32], attributes[160], mask[40], off[40], shift[40], in[40];
+	const char *inputs[2];
+	int index = layer - 1;
+	snprintf(name, sizeof(name), "maxpool_%d", index);
+	snprintf(output, output_size, "maxpool_%d_out", index);
 	snprintf(attributes, sizeof(attributes),
 	         "[{\"name\": \"kernel_shape\", \"type\": 7, \"ints\": [%d, %d]}, "
 	         "{\"name\": \"strides\", \"type\": 7, \"ints\": [%d, %d]}]", w.k, w.kw, w.s, w.sw);
+	if (ann_get_layer_masked(pnet, layer))
+	{
+		// over a masked sequence: MaxPool(x + (mask below - 1) * 3e38), so masked
+		// steps never win; the pool's own mask (onnx_mask_nodes) zeroes windows
+		// with no kept step
+		onnx_mask_name(pnet, layer - 1, mask, sizeof(mask));
+		snprintf(off, sizeof(off), "maxpool_%d_off", index);
+		snprintf(shift, sizeof(shift), "maxpool_%d_shift", index);
+		snprintf(in, sizeof(in), "maxpool_%d_in", index);
+		inputs[0] = mask;
+		inputs[1] = "mask_one";
+		write_onnx_node_inputs(fptr, "Sub", off, inputs, 2, off, NULL, first);
+		inputs[0] = off;
+		inputs[1] = "mask_big";
+		write_onnx_node_inputs(fptr, "Mul", shift, inputs, 2, shift, NULL, first);
+		inputs[0] = input;
+		inputs[1] = shift;
+		write_onnx_node_inputs(fptr, "Add", in, inputs, 2, in, NULL, first);
+		input = in;
+	}
 	write_onnx_node(fptr, "MaxPool", name, input, output, attributes, first);
 }
 
@@ -6654,8 +6700,9 @@ static void onnx_mask_initializers(FILE *fptr, int *first)
 // A masked layer's mask, then its outputs (*output on entry) times the mask:
 //   embedding     Unsqueeze(Cast(Not(Equal(ids, pad)))); its padding vectors
 //                 are already zero, so its outputs are left as they are
-//   conv, pool    -MaxPool(-mask below) over the window less its padding,
+//   conv          -MaxPool(-mask below) over the window less its padding,
 //                 [1, kw - 2*pw] with stride [1, sw]: kept if all inputs are
+//   pool          MaxPool(mask below) over its window: kept if any input is
 //   batch norm    the mask below
 //-----------------------------------------------
 static void onnx_mask_nodes(FILE *fptr, const PNetwork pnet, int layer, char *output, size_t output_size,
@@ -6689,9 +6736,19 @@ static void onnx_mask_nodes(FILE *fptr, const PNetwork pnet, int layer, char *ou
 		write_onnx_node_inputs(fptr, "Unsqueeze", name, inputs, 2, mask, NULL, first);
 		return;
 	}
-	if (cur->kind != LAYER_KIND_BATCHNORM)
+	if (cur->kind == LAYER_KIND_MAXPOOL2D)
 	{
-		Window w = cur->kind == LAYER_KIND_CONV2D ? conv_window(cur) : pool_window(cur);
+		Window w = pool_window(cur);
+		onnx_mask_name(pnet, layer - 1, below, sizeof(below));
+		snprintf(name, sizeof(name), "mask_%d_pool", index);
+		snprintf(attributes, sizeof(attributes),
+		         "[{\"name\": \"kernel_shape\", \"type\": 7, \"ints\": [1, %d]}, "
+		         "{\"name\": \"strides\", \"type\": 7, \"ints\": [1, %d]}]", w.kw, w.sw);
+		write_onnx_node(fptr, "MaxPool", name, below, mask, attributes, first);
+	}
+	else if (cur->kind == LAYER_KIND_CONV2D)
+	{
+		Window w = conv_window(cur);
 		onnx_mask_name(pnet, layer - 1, below, sizeof(below));
 		snprintf(a, sizeof(a), "mask_%d_neg", index);
 		snprintf(name, sizeof(name), "mask_%d_negate", index);
@@ -7007,11 +7064,11 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 		}
 		if (cur->kind != LAYER_KIND_BATCHNORM)	// keeps its input's form
 			image = onnx_makes_image(cur->kind);
-		// a masked conv or pool's mask is a min pool over its window less its
-		// padding, which needs to be at least one step wide
-		if (ann_get_layer_masked(pnet, layer) && (cur->kind == LAYER_KIND_CONV2D || cur->kind == LAYER_KIND_MAXPOOL2D))
+		// a masked conv's mask is a min pool over its window less its padding,
+		// which needs to be at least one step wide
+		if (ann_get_layer_masked(pnet, layer) && cur->kind == LAYER_KIND_CONV2D)
 		{
-			Window w = cur->kind == LAYER_KIND_CONV2D ? conv_window(cur) : pool_window(cur);
+			Window w = conv_window(cur);
 			if (w.kw - 2 * w.pw < 1)
 			{
 				invoke_error_callback(ERR_INVALID, "ann_export_onnx");
@@ -7986,6 +8043,15 @@ PNetwork ann_import_onnx(const char *filename)
 			// and global_maxpool_onnx_nodes):
 			//   ReduceSum(x, [2, 3]) then Div by the kept steps (from the mask)
 			//   Add(x, mask shift), GlobalMaxPool, then Mul by ReduceMax(mask)
+			// or a masked max pool (see maxpool_onnx_nodes): Add(x, mask shift)
+			// then MaxPool, which the cases for MaxPool and Mul by a mask read
+			if (op[0] == 'A' && image && ann_get_layer_masked(pnet, pnet->layer_count - 1) && i + 1 < count &&
+			    onnx_is_mask(&masks, onnx_io(node, "input", 1)) && onnx_op_is(json_at(nodes, i + 1), "MaxPool") &&
+			    strcmp(onnx_io(json_at(nodes, i + 1), "input", 0), output) == 0)
+			{
+				current = output;
+				continue;
+			}
 			int avg = op[0] == 'R', n = avg ? 2 : 3;
 			JsonValue *steps[3];
 			double axes[2] = { 0.0, 0.0 };

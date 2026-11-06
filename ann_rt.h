@@ -54,10 +54,11 @@
 // 2 added ANN_RT_UPSAMPLE2D, 3 ANN_RT_GLOBAL_AVGPOOL2D, 4 grouped convolutions
 // (ann_rt_layer.groups), 5 non-square windows (size_w, stride_w, pad_w),
 // 6 ANN_RT_GLOBAL_MAXPOOL2D, 7 ANN_RT_EMBEDDING with padding masks
-// (ann_rt_layer.masked, out_zp; ann_rt_model.mask_steps).
+// (ann_rt_layer.masked, out_zp; ann_rt_model.mask_steps), 8 masked max pools
+// keep a window with any kept step and take the largest of those.
 // Generated headers need at least the version that wrote them (they initialize
 // every field); older headers still build with newer versions.
-#define ANN_RT_VERSION 7
+#define ANN_RT_VERSION 8
 
 #if defined(_MSC_VER) && !defined(__cplusplus)
 #	define ANN_RT_FUNC static __inline
@@ -98,9 +99,10 @@ enum {
 // and the padding id pad (-1 for none) and ids outside the table give zeros; its int8 table is
 // in the output's quantization (zp), so a lookup is a copy.
 // A masked layer's output steps (along the width; such layers are one row high) are left out
-// where they hold padding: an embedding masks the padding id's steps, and a 1-D conv or pool
-// step is kept when every input step in its window, less the padding at each end, is (as
-// libann's ann_add_embedding_masked). Masked steps output 0, and global pools skip them.
+// where they hold padding: an embedding masks the padding id's steps, a 1-D conv step is kept
+// when every input step in its window, less the padding at each end, is, and a max pool step
+// when any input step in its window is, taking the largest of the kept ones (as libann's
+// ann_add_embedding_masked). Masked steps output 0, and global pools skip them.
 //------------------------------
 typedef struct {
 	int32_t kind;				// ANN_RT_DENSE, ...
@@ -198,7 +200,9 @@ ANN_RT_FUNC int32_t ann_rt_id(const ann_rt_layer *l, const int32_t *ids, const f
 
 //------------------------------
 // a masked layer's mask (1 kept, 0 padding, a byte per output step): an
-// embedding's from its ids, a 1-D conv's or pool's from the layer below's
+// embedding's from its ids, a 1-D conv's (every input in its window less its
+// padding kept) or max pool's (any input in its window kept) from the layer
+// below's
 //------------------------------
 ANN_RT_FUNC void ann_rt_mask(const ann_rt_layer *l, const int32_t *ids, const float *fids, const uint8_t *in_mask,
                              uint8_t *mask)
@@ -209,6 +213,17 @@ ANN_RT_FUNC void ann_rt_mask(const ann_rt_layer *l, const int32_t *ids, const fl
 	{
 		for (j = 0; j < l->out_w; j++)
 			mask[j] = ann_rt_id(l, ids, fids, j) != l->pad;
+		return;
+	}
+	if (l->kind == ANN_RT_MAXPOOL2D)
+	{
+		for (j = 0; j < l->out_w; j++)
+		{
+			mask[j] = 0;
+			for (i = j * s; i < j * s + k; i++)
+				if (in_mask[i])
+					mask[j] = 1;
+		}
 		return;
 	}
 	for (j = 0; j < l->out_w; j++)
@@ -317,7 +332,12 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 	}
 }
 
-ANN_RT_FUNC void ann_rt_maxpool_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
+//------------------------------
+// max pooling: each output is its window's largest value. Over a masked
+// sequence (mask: the layer below's, one row), the largest of the kept steps;
+// a window with none is masked, so its value does not matter.
+//------------------------------
+ANN_RT_FUNC void ann_rt_maxpool_q(const ann_rt_layer *l, const int8_t *x, int8_t *y, const uint8_t *mask)
 {
 	int32_t c, oh, ow, i, j;
 
@@ -325,12 +345,13 @@ ANN_RT_FUNC void ann_rt_maxpool_q(const ann_rt_layer *l, const int8_t *x, int8_t
 		for (oh = 0; oh < l->out_h; oh++)
 			for (ow = 0; ow < l->out_w; ow++)
 			{
-				const int8_t *xc = x + (c * l->in_h + oh * l->stride) * l->in_w + ow * ann_rt_stride_w(l);
+				int32_t w0 = ow * ann_rt_stride_w(l), any = 0;
+				const int8_t *xc = x + (c * l->in_h + oh * l->stride) * l->in_w + w0;
 				int8_t best = xc[0];
 
 				for (i = 0; i < l->size; i++)
 					for (j = 0; j < ann_rt_size_w(l); j++)
-						if (xc[i * l->in_w + j] > best)
+						if ((!mask || mask[w0 + j]) && (!any++ || xc[i * l->in_w + j] > best))
 							best = xc[i * l->in_w + j];
 				y[(c * l->out_h + oh) * l->out_w + ow] = best;
 			}
@@ -449,7 +470,7 @@ ANN_RT_FUNC int ann_rt_run_q(const ann_rt_model *m, const int8_t *input, const i
 		{
 		case ANN_RT_DENSE:		ann_rt_dense_q(l, src, dst); break;
 		case ANN_RT_CONV2D:		ann_rt_conv_q(l, src, dst); break;
-		case ANN_RT_MAXPOOL2D:	ann_rt_maxpool_q(l, src, dst); break;
+		case ANN_RT_MAXPOOL2D:	ann_rt_maxpool_q(l, src, dst, in_mask); break;
 		case ANN_RT_UPSAMPLE2D:	ann_rt_upsample_q(l, src, dst); break;
 		case ANN_RT_GLOBAL_AVGPOOL2D: ann_rt_global_avgpool_q(l, src, dst, in_mask); break;
 		case ANN_RT_GLOBAL_MAXPOOL2D: ann_rt_global_maxpool_q(l, src, dst, in_mask); break;
@@ -664,7 +685,7 @@ ANN_RT_FUNC void ann_rt_linear_f(const ann_rt_layer *l, const float *x, float *z
 	}
 }
 
-ANN_RT_FUNC void ann_rt_maxpool_f(const ann_rt_layer *l, const float *x, float *y)
+ANN_RT_FUNC void ann_rt_maxpool_f(const ann_rt_layer *l, const float *x, float *y, const uint8_t *mask)
 {
 	int32_t c, oh, ow, i, j;
 
@@ -672,11 +693,12 @@ ANN_RT_FUNC void ann_rt_maxpool_f(const ann_rt_layer *l, const float *x, float *
 		for (oh = 0; oh < l->out_h; oh++)
 			for (ow = 0; ow < l->out_w; ow++)
 			{
-				const float *xc = x + (c * l->in_h + oh * l->stride) * l->in_w + ow * ann_rt_stride_w(l);
+				int32_t w0 = ow * ann_rt_stride_w(l), any = 0;
+				const float *xc = x + (c * l->in_h + oh * l->stride) * l->in_w + w0;
 				float best = xc[0];
 				for (i = 0; i < l->size; i++)
 					for (j = 0; j < ann_rt_size_w(l); j++)
-						if (xc[i * l->in_w + j] > best)
+						if ((!mask || mask[w0 + j]) && (!any++ || xc[i * l->in_w + j] > best))
 							best = xc[i * l->in_w + j];
 				y[(c * l->out_h + oh) * l->out_w + ow] = best;
 			}
@@ -792,7 +814,7 @@ ANN_RT_FUNC int ann_rt_run_f(const ann_rt_model *m, const float *input, const in
 				for (i = 0; i < count; i++)
 					dst[i] = ann_rt_activate_f(l->act, dst[i]);
 			break;
-		case ANN_RT_MAXPOOL2D:	ann_rt_maxpool_f(l, src, dst); break;
+		case ANN_RT_MAXPOOL2D:	ann_rt_maxpool_f(l, src, dst, in_mask); break;
 		case ANN_RT_UPSAMPLE2D:	ann_rt_upsample_f(l, src, dst); break;
 		case ANN_RT_GLOBAL_AVGPOOL2D: ann_rt_global_avgpool_f(l, src, dst, in_mask); break;
 		case ANN_RT_GLOBAL_MAXPOOL2D: ann_rt_global_maxpool_f(l, src, dst, in_mask); break;

@@ -526,7 +526,7 @@ void test_main(int argc, char *argv[])
         static const real keep4[CASES * 2] = { 1, 1,  1, 1,  1, 1,  1, 1,  1, 0,  1, 0 };
         static const real want2[CASES * 3] = { -6, -5, -5,  -7, -5, -5,  -5, -7, -7,  -6, -5, -5,
                                                -6, -6, 0,  -9, -9, 0 };
-        int ok[2] = { 1, 1 }, mask_ok[2] = { 1, 1 }, onnx_ok = 0, quant_ok = 0;
+        int ok[2] = { 1, 1 }, mask_ok[2] = { 1, 1 }, onnx_ok = 0, onnx_masked = 0, onnx_same = 0, quant_ok = 0;
         for (int strided = 0; strided < 2; strided++) {
             int stride = strided ? 2 : 4, out = strided ? 3 : 2;
             const real *want = strided ? want2 : want4;
@@ -557,19 +557,25 @@ void test_main(int argc, char *argv[])
             }
             if (strided) {
                 // the ONNX graph and the int8 runtime pool the same way
-                ann_export_onnx(net, "test_mask_pool.onnx.json");
+                int exported = ann_export_onnx(net, "test_mask_pool.onnx.json") == ERR_OK;
                 PNetwork back = ann_import_onnx("test_mask_pool.onnx.json");
                 PTensor cal = tensor_create_from_array(CASES, 8, (real *)ids);
                 PQuantizedNetwork q = ann_quantize(net, cal);
                 real scale = 1.0f;
-                onnx_ok = back != NULL && ann_get_layer_masked(back, 2);
+                onnx_ok = exported && back != NULL;
+                onnx_masked = onnx_ok && back->layer_count == net->layer_count && ann_get_layer_masked(back, 2);
+                onnx_same = onnx_ok;
                 quant_ok = q != NULL && ann_quantized_get_io_params(q, NULL, NULL, &scale, NULL) == ERR_OK;
                 for (int c = 0; c < CASES; c++) {
                     real yb[3], yq[3];
                     if (back) {
-                        ann_predict(back, &ids[c * 8], yb);
+                        int err = ann_predict(back, &ids[c * 8], yb);
                         for (int k = 0; k < out; k++)
-                            onnx_ok &= yb[k] == want[c * out + k];
+                            if (err != ERR_OK || yb[k] != want[c * out + k]) {
+                                printf("\t  ONNX case %d output %d: %g, want %g (ann_predict %d)\n", c, k,
+                                       err == ERR_OK ? (double)yb[k] : 0.0, (double)want[c * out + k], err);
+                                onnx_same = 0;
+                            }
                     }
                     if (q) {
                         ann_quantized_predict(q, &ids[c * 8], yq);
@@ -587,7 +593,9 @@ void test_main(int argc, char *argv[])
         TESTEX("A masked max pool takes the largest kept step: padding in a window is left out", ok[0]);
         TESTEX("and a window is masked only when every step in it is padding", mask_ok[0]);
         TESTEX("The same with overlapping windows (pool 4, stride 2)", ok[1] && mask_ok[1]);
-        TESTEX("A masked max pool exports to ONNX and imports back with the same results", onnx_ok);
+        TESTEX("A masked max pool exports to ONNX and imports back", onnx_ok);
+        TESTEX("with the same layers and masks", onnx_masked);
+        TESTEX("and the same results", onnx_same);
         TESTEX("and quantizes to int8 with them (within a step)", quant_ok);
     }
     {

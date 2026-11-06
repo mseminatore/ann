@@ -687,14 +687,22 @@ ANN_API int ann_add_embedding(PNetwork pnet, int vocab_size, int embed_dim, int 
  *
  * The mask follows the sequence through 1-D convolutions, max pooling and
  * batch norm layers. Their outputs at masked steps are zero, as if the text
- * ended there with zero padding: an output step is kept when every input its
- * window reads, less the window's padding at each end, is kept. Batch norm's
- * statistics and the global pooling layers (average and max) leave masked
- * steps out; a sample that is all padding pools to zeros. The mask ends at
- * global pooling and at any other layer (flatten, dense, ...). So a text
- * padded at the end gives what the same text without padding would; padding
- * at the start also does when every stride is 1. Saved, and exported to ONNX
+ * ended there with zero padding. A convolution's output step is kept when
+ * every input its window reads, less the window's padding at each end, is
+ * kept; a max pooling step is kept when any input in its window is, and takes
+ * the largest of the kept inputs; batch norm keeps the mask below it. Batch
+ * norm's statistics and the global pooling layers (average and max) leave
+ * masked steps out; a sample that is all padding pools to zeros. The mask ends
+ * at global pooling and at any other layer (flatten, dense, ...). So a text
+ * padded at the end gives what the same text without padding would when the
+ * unpadded text fills each max pool's windows (its length at the pool, less
+ * the window, a multiple of the stride); padding at the start also does when
+ * every stride is 1 and there is no max pooling. Saved, and exported to ONNX
  * as the ops that compute the mask (libann reads them back).
+ *
+ * This goes beyond PyTorch, which has no masks (its padding_idx is
+ * ann_add_embedding's), and Keras, whose Conv1D and MaxPooling1D drop the
+ * mask of Embedding(mask_zero=True); use ann_add_embedding to match them.
  *
  * @param pnet Network to add the layer to
  * @param vocab_size Number of token ids (> 0)

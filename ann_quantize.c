@@ -453,7 +453,7 @@ static int calibrate(const ann_rt_model *model, const PTensor inputs, Range *in_
 			if (l->kind == ANN_RT_EMBEDDING)
 				ann_rt_embedding_f(l, NULL, x, dst);
 			else if (l->kind == ANN_RT_MAXPOOL2D)
-				ann_rt_maxpool_f(l, src, dst);
+				ann_rt_maxpool_f(l, src, dst, in_mask);
 			else if (l->kind == ANN_RT_UPSAMPLE2D)
 				ann_rt_upsample_f(l, src, dst);
 			else if (l->kind == ANN_RT_GLOBAL_AVGPOOL2D)

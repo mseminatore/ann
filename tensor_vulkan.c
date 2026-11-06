@@ -1747,12 +1747,16 @@ static void encode_conv_backward(PNetwork pnet, int layer, int batch_size, VkBuf
     cmd_dispatch(K_CONV_COL2IM, col2im_bufs, 2, &d, sizeof(d), groups_for((size_t)batch_size * d.C * d.H * d.W, 256), 1);
 }
 
+static VkBuf *pad_of(const PNetwork pnet, int layer);
+
 // MaxPool2D forward; each output's argmax goes to the layer's scratch
 static void encode_maxpool_forward(PNetwork pnet, int layer, int batch_size, VkBuf *X, VkBuf *Y)
 {
     WindowDims d = window_dims(pnet, layer, batch_size);
-    VkBuf *bufs[3] = { X, Y, scratch_of(layer, SCRATCH_COLS) };
-    cmd_dispatch(K_MAXPOOL_FORWARD, bufs, 3, &d, sizeof(d), groups_for((size_t)batch_size * d.C * d.OH * d.OW, 256), 1);
+    VkBuf *pad = pnet->layers[layer].masked ? pad_of(pnet, layer - 1) : NULL;
+    struct { WindowDims d; uint32_t masked; } p = { d, pad != NULL };
+    VkBuf *bufs[4] = { X, Y, scratch_of(layer, SCRATCH_COLS), pad ? pad : X };
+    cmd_dispatch(K_MAXPOOL_FORWARD, bufs, 4, &p, sizeof(p), groups_for((size_t)batch_size * d.C * d.OH * d.OW, 256), 1);
 }
 
 static void encode_maxpool_backward(PNetwork pnet, int layer, int batch_size, VkBuf *dZ, VkBuf *dX)

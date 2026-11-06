@@ -432,11 +432,45 @@ batch norm statistics, so a text's answer depends on how much padding it has.
 follows the sequence through 1-D convolutions, max pooling and batch norm,
 whose outputs at masked steps are zero (the zero padding a shorter text would
 have); batch norm's statistics and global average and max pooling skip them,
-and a text that is all padding pools to zeros. A text padded at the end then
-gives what the same text unpadded would (padding at the start also does when
-every stride is 1). `ann_get_layer_masked` tells which layers carry the mask.
-Saves keep it, and ONNX exports it as the ops that compute it, which libann
-imports back.
+and a text that is all padding pools to zeros. Each layer works out its own
+mask from the one below:
+
+- a **convolution** step is kept when every input in its window, less the
+  window's padding at each end, is kept, so a conv over a padded text keeps
+  exactly the steps it would give the text unpadded;
+- a **max pooling** step is kept when any input in its window is kept, and
+  takes the largest of the kept inputs, so padding inside a window is left
+  out instead of losing the window; a window of nothing but padding is masked;
+- **batch norm** keeps the mask below it.
+
+A text padded at the end then gives what the same text unpadded would, as
+long as the unpadded text fills each max pool's windows (its length at the
+pool, less the window, a multiple of the stride: an even length before a pool
+of 2). Otherwise the padded text's last window, holding the text's last few
+steps, is kept where the unpadded text would drop those steps. Padding at the
+start also matches when every stride is 1 and there is no max pooling.
+`ann_get_layer_masked` tells which layers carry the mask. Saves keep it, and
+ONNX exports it as the ops that compute it, which libann imports back.
+
+**How libann's masks compare with PyTorch and Keras.** Carrying a mask
+through convolutions and pooling is a libann extension. Neither PyTorch nor
+Keras does it:
+
+- **PyTorch** has no masks. `nn.Embedding(padding_idx=0)` only gives the
+  padding a zero vector and no gradient, which is what `ann_add_embedding`
+  does; `Conv1d` and `MaxPool1d` see padding steps like any others.
+- **Keras** `Embedding(mask_zero=True)` makes a mask that
+  `GlobalAveragePooling1D`, `BatchNormalization`, RNNs and attention use.
+  `Conv1D` and `MaxPooling1D` don't support masks and drop it (Keras warns),
+  so the layers above them see the padding, and `GlobalMaxPooling1D` ignores
+  the mask.
+
+So in those libraries a text's answer depends on how much padding it has as
+soon as there is a convolution, while libann's masked layers keep padding out
+all the way to global pooling. When the padding wouldn't have changed
+anything, the two agree. To reproduce a Keras or PyTorch model's numbers
+exactly (for example after converting one), use `ann_add_embedding`, which
+leaves the mask out.
 
 Global average pooling replaces flatten + a large dense layer at the end of a
 CNN: each channel becomes its mean, so the classifier sees one value per

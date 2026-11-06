@@ -2,15 +2,19 @@
 #include "common.glsl"
 // MaxPool forward: each output takes its window's largest input (the first on
 // ties, scanning as the CPU does) and records the input's index within the
-// sample in arg, for the backward pass. C == F; there is no padding.
+// sample in arg, for the backward pass. C == F; there is no padding. Over a
+// masked sequence (masked = 1; mask [batch][W], the layer below's, one row
+// high) only kept inputs count; with none the output is the first input (the
+// step is masked).
 
 layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) readonly buffer BufX { float x[]; };
 layout(std430, binding = 1) writeonly buffer BufY { float y[]; };
 layout(std430, binding = 2) writeonly buffer BufArg { uint arg[]; };
+layout(std430, binding = 3) readonly buffer BufMask { float mask[]; };
 
-layout(push_constant) uniform Params { WindowDims d; } pc;
+layout(push_constant) uniform Params { WindowDims d; uint masked; } pc;
 
 void main()
 {
@@ -22,14 +26,18 @@ void main()
         uint plane = t / d.OH;      // sample * C + channel
         uint xs = plane * d.H * d.W;
 
-        uint row0 = oh * d.S * d.W + ow * d.SW, best = row0;
+        uint row0 = oh * d.S * d.W + ow * d.SW, best = 0xFFFFFFFFu;
+        uint m0 = (plane / d.C) * d.W + ow * d.SW;
         for (uint i = 0; i < d.K; i++)
             for (uint j = 0; j < d.KW; j++)
             {
                 uint idx = row0 + i * d.W + j;
-                if (x[xs + idx] > x[xs + best])
+                if ((pc.masked == 0u || mask[m0 + j] != 0.0) &&
+                    (best == 0xFFFFFFFFu || x[xs + idx] > x[xs + best]))
                     best = idx;
             }
+        if (best == 0xFFFFFFFFu)
+            best = row0;
         y[out_i] = x[xs + best];
         arg[out_i] = (plane % d.C) * d.H * d.W + best;
     }

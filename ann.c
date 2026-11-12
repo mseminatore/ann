@@ -5853,7 +5853,7 @@ static int write_real(FILE *fptr, int binary, real value)
 {
 	if (binary)
 		return fwrite(&value, sizeof(value), 1, fptr) == 1;
-	return fprintf(fptr, "%f\n", value) > 0;
+	return fprintf(fptr, "%.9g\n", value) > 0;	// 9 significant digits round-trip any float exactly (%f kept only 6 decimals)
 }
 
 static int write_values(FILE *fptr, int binary, const PTensor t)

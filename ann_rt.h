@@ -353,7 +353,9 @@ ANN_RT_FUNC void ann_rt_dense_q(const ann_rt_layer *l, const int8_t *x, int8_t *
 	}
 }
 
-ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
+// a conv layer with packed low-bit weights (w_bits 4, 2 or 1): ann_rt_conv_q's
+// loops, each weight read with ann_rt_weight_q from its filter's row
+ANN_RT_FUNC void ann_rt_conv_packed_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
 {
 	int32_t k = l->size, s = l->stride, p = l->pad, cg = ann_rt_group_channels(l);
 	int32_t kw = ann_rt_size_w(l), sw = ann_rt_stride_w(l), pw = ann_rt_pad_w(l);
@@ -362,7 +364,6 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 
 	for (f = 0; f < l->out_c; f++)
 	{
-		// the filter's input channels (worked out here: it divides, and M0 cores have no divider)
 		const int8_t *xf = x + ann_rt_first_channel(l, f) * l->in_h * l->in_w;
 		const uint8_t *row = (const uint8_t *)l->w_q + f * row_bytes;	// the filter's weights
 
@@ -373,7 +374,6 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 
 				for (c = 0; c < cg; c++)
 				{
-					const int8_t *w = (const int8_t *)row + (bits == 8 ? c * k * kw : 0);	// int8 rows
 					const int8_t *xc = xf + c * l->in_h * l->in_w;
 
 					for (i = 0; i < k; i++)
@@ -387,7 +387,53 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 							if (iw < 0 || iw >= l->in_w)
 								continue;
 							acc += ((int32_t)xc[ih * l->in_w + iw] - l->in_zp) *
-							       (bits == 8 ? (int32_t)w[i * kw + j] : ann_rt_weight_q(row, bits, (c * k + i) * kw + j));
+							       ann_rt_weight_q(row, bits, (c * k + i) * kw + j);
+						}
+					}
+				}
+				y[(f * l->out_h + oh) * l->out_w + ow] = ann_rt_finish_q(l, acc, f);
+			}
+	}
+}
+
+ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
+{
+	int32_t k = l->size, s = l->stride, p = l->pad, cg = ann_rt_group_channels(l);
+	int32_t kw = ann_rt_size_w(l), sw = ann_rt_stride_w(l), pw = ann_rt_pad_w(l);
+	int32_t f, oh, ow, c, i, j;
+
+	if (ann_rt_w_bits(l) != 8)
+	{
+		ann_rt_conv_packed_q(l, x, y);	// kept apart so the int8 loops stay branch-free
+		return;
+	}
+
+	for (f = 0; f < l->out_c; f++)
+	{
+		// the filter's input channels (worked out here: it divides, and M0 cores have no divider)
+		const int8_t *xf = x + ann_rt_first_channel(l, f) * l->in_h * l->in_w;
+
+		for (oh = 0; oh < l->out_h; oh++)
+			for (ow = 0; ow < l->out_w; ow++)
+			{
+				int32_t acc = l->b_q[f];
+
+				for (c = 0; c < cg; c++)
+				{
+					const int8_t *w = l->w_q + (f * cg + c) * k * kw;
+					const int8_t *xc = xf + c * l->in_h * l->in_w;
+
+					for (i = 0; i < k; i++)
+					{
+						int32_t ih = oh * s - p + i;
+						if (ih < 0 || ih >= l->in_h)
+							continue;	// padding is real 0, which adds nothing
+						for (j = 0; j < kw; j++)
+						{
+							int32_t iw = ow * sw - pw + j;
+							if (iw < 0 || iw >= l->in_w)
+								continue;
+							acc += ((int32_t)xc[ih * l->in_w + iw] - l->in_zp) * (int32_t)w[i * kw + j];
 						}
 					}
 				}

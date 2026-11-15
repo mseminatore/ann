@@ -179,13 +179,14 @@ ann_get_layer_param | copy a layer parameter's values out
 ann_set_layer_param | set a layer parameter's values (pre-trained weights, e.g. GloVe vectors)
 ann_set_layer_trainable | freeze a layer (training leaves it alone) or unfreeze it
 ann_get_layer_trainable | check whether a layer is frozen
+ann_set_layer_weight_format | store a dense/conv layer's weights in int4, ternary or binary, trained for it (also `ann_set_weight_format` for every layer but the output, `ann_get_layer_weight_format`)
 ann_set_num_threads | set how many CPU threads libann uses (0 = default)
 ann_get_num_threads | get the CPU thread count
 ann_get_backend_info | report the BLAS library, GPU backend, thread count and number size of this build
-ann_get_version | the version of the running libann, e.g. "0.10.0"
+ann_get_version | the version of the running libann, e.g. "0.11.0"
 ann_export_onnx | export trained network to ONNX JSON format
 ann_quantize | quantize a trained network to int8 (calibrated on sample inputs)
-ann_quantized_predict | run the int8 model (also `_predict_int8`, `_predict_ids` for text models, `_evaluate_accuracy`)
+ann_quantized_predict | run the int8 model (also `_predict_int8`, `_predict_ids` for text models, `_evaluate_accuracy`, `_param_bytes`)
 ann_export_c_header | export an int8 or float32 model as a standalone C header
 ann_export_js | export a float32 model as a JavaScript module for the browser or Node
 ann_import_onnx | import network from ONNX JSON file
@@ -564,6 +565,16 @@ printf("int8 accuracy %g\n", ann_quantized_evaluate_accuracy(q, x_test, y_test))
 ann_export_c_header(NULL, q, "model.h", "model");    // then: model_predict(in, out, workspace)
 ann_free_quantized(q);
 ```
+
+For smaller models still, dense and conv layers can store their weights in 4,
+2 (ternary) or 1 (binary) bits with one scale per output channel:
+`ann_set_weight_format(pnet, WEIGHT_FORMAT_BINARY)`, then fine-tune with the
+online API. Training computes with the rounded weights and updates float ones
+underneath (quantization-aware training), and `ann_quantize()` packs them. On
+Fashion-MNIST a 784-128-10 MLP with a binary hidden layer keeps 87.9% test
+accuracy (float32: 88.5%) in 14.7 KB, against 100.5 KB as int8; ternary keeps
+89.1% in 27 KB. See [Low-bit weights](docs/C_EXPORT.md#low-bit-weights) and
+`examples/lowbit_export.c`.
 
 ## JavaScript Export
 
@@ -974,7 +985,7 @@ All public API functions return error codes to indicate success or failure. The 
 `ann.h` is the one place libann's version is set: `ANN_VERSION_MAJOR`,
 `ANN_VERSION_MINOR`, `ANN_VERSION_PATCH` and `ANN_VERSION_STRING`, plus
 `ANN_VERSION` for compile-time checks
-(`#if ANN_VERSION >= ANN_MAKE_VERSION(0, 10, 0)`). CMake reads it for the
+(`#if ANN_VERSION >= ANN_MAKE_VERSION(0, 11, 0)`). CMake reads it for the
 project and the shared library's version, and `ann_get_version()` returns the
 running library's, so a program can compare it with the header it was built
 with:

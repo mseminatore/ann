@@ -3,9 +3,9 @@
 //
 // Trains a small dense network and a small CNN, quantizes them, and writes
 // into the output directory:
-//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h, bn_q.h, dw_q.h, ts_q.h, txt_q.h   int8 headers (ann_export_c_header with the int8 model)
-//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h, bn_f.h, dw_f.h, ts_f.h, txt_f.h   float32 headers (ann_export_c_header without it)
-//   dense.js, cnn.js, ae.js, gap.js, bn.js, dw.js, ts.js, txt.js           JavaScript modules (ann_export_js)
+//   dense_q.h, cnn_q.h, ae_q.h, gap_q.h, bn_q.h, dw_q.h, ts_q.h, txt_q.h, lb_q.h   int8 headers (ann_export_c_header with the int8 model)
+//   dense_f.h, cnn_f.h, ae_f.h, gap_f.h, bn_f.h, dw_f.h, ts_f.h, txt_f.h, lb_f.h   float32 headers (ann_export_c_header without it)
+//   dense.js, cnn.js, ae.js, gap.js, bn.js, dw.js, ts.js, txt.js, lb.js            JavaScript modules (ann_export_js)
 //   expected.h           test inputs and libann's outputs for them:
 //                        ann_quantized_predict_int8, ann_quantized_predict and
 //                        ann_predict
@@ -396,6 +396,25 @@ int main(int argc, char *argv[])
 	ann_add_layer(txt, 2, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
 	err |= export_text_model(txt, argv[1], "txt", expected, 20, 8);
 	ann_free_network(txt);
+
+	// low-bit weights, trained with them: a ternary conv, a binary grouped conv folded with batch
+	// norm, then int4 and binary dense layers; rows of 18, 18, 36 and 10 weights, so packed rows
+	// end inside a byte
+	PNetwork lb = ann_make_network(OPT_ADAM, LOSS_CATEGORICAL_CROSS_ENTROPY);
+	ann_add_input(lb, 2, 7, 7);
+	ann_add_conv2d(lb, 4, 3, 1, 1, ACTIVATION_RELU);                   // 1: ternary
+	ann_add_conv2d_grouped(lb, 4, 3, 1, 1, 2, ACTIVATION_NULL);        // 2: binary
+	ann_add_batchnorm(lb, ACTIVATION_RELU);
+	ann_add_maxpool2d(lb, 2, 2);                                       // 4x3x3
+	ann_add_layer(lb, 10, LAYER_HIDDEN, ACTIVATION_GELU);              // 5: int4
+	ann_add_layer(lb, 7, LAYER_HIDDEN, ACTIVATION_RELU);               // 6: binary
+	ann_add_layer(lb, 3, LAYER_OUTPUT, ACTIVATION_SOFTMAX);
+	err |= ann_set_layer_weight_format(lb, 1, WEIGHT_FORMAT_TERNARY);
+	err |= ann_set_layer_weight_format(lb, 2, WEIGHT_FORMAT_BINARY);
+	err |= ann_set_layer_weight_format(lb, 5, WEIGHT_FORMAT_INT4);
+	err |= ann_set_layer_weight_format(lb, 6, WEIGHT_FORMAT_BINARY);
+	err |= export_model(lb, argv[1], "lb", expected, 9);
+	ann_free_network(lb);
 
 	fputs("\n}\n", g_json);
 	if (fclose(g_json) != 0)

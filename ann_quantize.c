@@ -25,7 +25,9 @@
 // int8 quantization and C header export
 //
 // ann_quantize() turns a trained network into an int8 model:
-//   weights      symmetric int8, one scale per output channel: s_w = max|W_row| / 127
+//   weights      symmetric int8, one scale per output channel: s_w = max|W_row| / 127; layers
+//                with low-bit weights (ann_set_layer_weight_format) keep the integers and
+//                scales training used (ann_lowbit.h), packed 4, 2 or 1 bits per weight
 //   biases       int32 at scale s_in * s_w
 //   activations  asymmetric int8, one scale and zero point per tensor, from the value ranges
 //                seen on a calibration set (each range is widened to include 0, so ReLU and
@@ -50,6 +52,7 @@
 #include <math.h>
 #include "ann.h"
 #include "ann_rt.h"
+#include "ann_lowbit.h"
 
 struct QuantizedNetwork
 {
@@ -122,6 +125,16 @@ static int weight_count(const ann_rt_layer *l)
 }
 
 //------------------------------
+// bytes of an int8 model layer's w_q: packed rows for low-bit weights
+//------------------------------
+static long weight_bytes(const ann_rt_layer *l)
+{
+	if (!is_weighted(l))
+		return weight_count(l);
+	return (long)l->out_c * ann_rt_row_bytes(l, weight_count(l) / l->out_c);
+}
+
+//------------------------------
 // free the float weights made by make_float_layers()
 //------------------------------
 static void free_float_layers(ann_rt_layer *layers, int count)
@@ -132,6 +145,7 @@ static void free_float_layers(ann_rt_layer *layers, int count)
 	{
 		free((void *)layers[n].w_f);
 		free((void *)layers[n].b_f);
+		free((void *)layers[n].w_q);
 	}
 	free(layers);
 }
@@ -154,6 +168,7 @@ static int fold_batchnorm(ann_rt_layer *l, const Layer *bn)
 
 	int per_channel = weight_count(l) / l->out_c;
 	float *w = (float *)l->w_f, *b = (float *)l->b_f;
+	int8_t *codes = (int8_t *)l->w_q;	// low-bit integers: s scales the row's scale, its sign the integers
 	int finite = 1;
 	for (int c = 0; c < l->out_c; c++)
 	{
@@ -162,6 +177,8 @@ static int fold_batchnorm(ann_rt_layer *l, const Layer *bn)
 		{
 			w[c * per_channel + i] = (float)(s * w[c * per_channel + i]);
 			finite &= isfinite(w[c * per_channel + i]) != 0;
+			if (codes && s < 0.0)
+				codes[c * per_channel + i] = (int8_t)-codes[c * per_channel + i];
 		}
 		b[c] = (float)(s * ((double)b[c] - mean[c]) + beta[c]);
 		finite &= isfinite(b[c]) != 0;
@@ -173,7 +190,10 @@ static int fold_batchnorm(ann_rt_layer *l, const Layer *bn)
 //------------------------------
 // describe the network's layers 1..n-1 for ann_rt.h with float copies of the
 // weights, batch norm layers folded into the layer before them; fills the
-// model's sizes. Returns ERR_OK, ERR_INVALID or ERR_ALLOC.
+// model's sizes. A layer with low-bit weights (ann_set_layer_weight_format)
+// gets the weights it computes with in w_f, and their integers in w_q, one
+// int8 per weight, with w_bits set (for ann_quantize to pack; the float
+// exports ignore them). Returns ERR_OK, ERR_INVALID or ERR_ALLOC.
 //------------------------------
 static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_layer **out)
 {
@@ -304,6 +324,31 @@ static int make_float_layers(const PNetwork pnet, ann_rt_model *model, ann_rt_la
 		{
 			w_f[i] = (float)W->values[i];
 			finite &= isfinite(w_f[i]) != 0;
+		}
+		if (finite && src->weight_format != WEIGHT_FORMAT_FLOAT)
+		{
+			// the integers and scales training computes with (ann_lowbit.h)
+			int8_t *codes = malloc(wn);
+			int n_in = W->cols;
+
+			l->w_q = codes;
+			if (!codes)
+			{
+				free_float_layers(layers, count);
+				return ERR_ALLOC;
+			}
+			l->w_bits = lowbit_bits(src->weight_format);
+			for (int row = 0; row < W->rows; row++)
+			{
+				const real *w = W->values + (size_t)row * n_in;
+				Lowbit_row r = lowbit_row(src->weight_format, w, n_in);
+				for (int i = 0; i < n_in; i++)
+				{
+					int q = lowbit_code(src->weight_format, r, w[i]);
+					codes[row * n_in + i] = (int8_t)q;
+					w_f[row * n_in + i] = (float)(real)(r.scale * q);
+				}
+			}
 		}
 		for (int i = 0; i < l->out_c; i++)
 		{
@@ -521,9 +566,10 @@ static int quantize_layer(ann_rt_layer *l, const ann_rt_layer *f, float x_scale,
                           Range z, Range y, float *y_scale, int32_t *y_zp)
 {
 	int n_in = weight_count(f) / f->out_c;
+	int bits = ann_rt_w_bits(f), row_bytes = ann_rt_row_bytes(f, n_in);
 	float t_scale;				// scale and zero point the sums are rescaled to
 	int32_t t_zp;
-	int8_t *w_q = malloc((size_t)f->out_c * n_in);
+	int8_t *w_q = calloc((size_t)f->out_c, row_bytes);
 	int32_t *b_q = malloc(f->out_c * sizeof(int32_t));
 	int32_t *mult = malloc(f->out_c * sizeof(int32_t));
 	int8_t *shift = malloc(f->out_c);
@@ -571,17 +617,57 @@ static int quantize_layer(ann_rt_layer *l, const ann_rt_layer *f, float x_scale,
 	for (int c = 0; c < f->out_c; c++)
 	{
 		const float *w = f->w_f + (size_t)c * n_in;
-		double max_abs = 0.0;
+		double w_scale;
 
-		for (int i = 0; i < n_in; i++)
-			if (fabs(w[i]) > max_abs)
-				max_abs = fabs(w[i]);
+		if (bits == 8)
+		{
+			double max_abs = 0.0;
 
-		double w_scale = max_abs > 0.0 ? max_abs / 127.0 : 1.0;
+			for (int i = 0; i < n_in; i++)
+				if (fabs(w[i]) > max_abs)
+					max_abs = fabs(w[i]);
+
+			w_scale = max_abs > 0.0 ? max_abs / 127.0 : 1.0;
+			for (int i = 0; i < n_in; i++)
+				w_q[(size_t)c * n_in + i] = (int8_t)floor(w[i] / w_scale + 0.5);
+		}
+		else
+		{
+			// low-bit: f->w_q holds the integers training used and w_f their weights, so the
+			// row's scale is sum |w| / sum |q| (exact up to float rounding, and still right
+			// after batch norm folding scaled the row)
+			const int8_t *codes = f->w_q + (size_t)c * n_in;
+			uint8_t *row = (uint8_t *)w_q + (size_t)c * row_bytes;
+			double sum_w = 0.0, sum_q = 0.0;
+
+			for (int i = 0; i < n_in; i++)
+			{
+				sum_w += fabs(w[i]);
+				sum_q += abs(codes[i]);
+			}
+			w_scale = sum_q > 0.0 ? sum_w / sum_q : 0.0;
+			if (w_scale <= 0.0)
+			{
+				// a row of zeros: binary weights cannot hold one
+				if (bits == 1)
+					return ERR_INVALID;
+				w_scale = 1.0;		// the integers stay 0
+			}
+			else
+			{
+				for (int i = 0; i < n_in; i++)
+				{
+					int q = codes[i];
+					if (bits == 1)
+						row[i >> 3] |= (uint8_t)((q > 0) << (i & 7));
+					else if (bits == 2)
+						row[i >> 2] |= (uint8_t)((q & 3) << ((i & 3) << 1));
+					else
+						row[i >> 1] |= (uint8_t)((q & 15) << ((i & 1) << 2));
+				}
+			}
+		}
 		double acc_scale = (double)x_scale * w_scale;
-
-		for (int i = 0; i < n_in; i++)
-			w_q[(size_t)c * n_in + i] = (int8_t)floor(w[i] / w_scale + 0.5);
 
 		double bq = floor(f->b_f[c] / acc_scale + 0.5);
 		b_q[c] = (int32_t)(bq < -2147483647.0 ? -2147483647.0 : bq > 2147483647.0 ? 2147483647.0 : bq);
@@ -686,6 +772,7 @@ PQuantizedNetwork ann_quantize(const PNetwork pnet, const PTensor calibration_in
 
 		*l = *f;
 		l->w_f = l->b_f = NULL;
+		l->w_q = NULL;		// f's are low-bit integers, quantize_layer packs them
 		if (f->kind == ANN_RT_EMBEDDING)
 		{
 			err = quantize_embedding(l, f, &scale, &zp);
@@ -717,6 +804,26 @@ done:
 		return NULL;
 	}
 	return q;
+}
+
+//------------------------------
+// bytes of parameters in the int8 model
+//------------------------------
+size_t ann_quantized_param_bytes(const PQuantizedNetwork q)
+{
+	size_t bytes = 0;
+
+	if (!q)
+		return 0;
+	for (int n = 0; n < q->model.layer_count; n++)
+	{
+		const ann_rt_layer *l = &q->layers[n];
+		if (l->kind == ANN_RT_EMBEDDING)
+			bytes += (size_t)weight_count(l);
+		else if (is_weighted(l))
+			bytes += (size_t)weight_bytes(l) + (size_t)l->out_c * 9 + (l->lut ? 256 : 0);
+	}
+	return bytes;
 }
 
 //------------------------------
@@ -895,7 +1002,7 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 		}
 		if (!is_weighted(l))
 			continue;
-		param_bytes += quantized ? weight_count(l) + l->out_c * 9L + (l->lut ? 256 : 0)
+		param_bytes += quantized ? weight_bytes(l) + l->out_c * 9L + (l->lut ? 256 : 0)
 		                         : (weight_count(l) + l->out_c) * 4L;
 		float_bytes += (weight_count(l) + l->out_c) * 4L;
 	}
@@ -958,7 +1065,9 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 			continue;
 		if (quantized)
 		{
-			write_int8_array(f, prefix, "w", n, l->w_q, weight_count(l));
+			if (ann_rt_w_bits(l) != 8)
+				fprintf(f, "/* layer %d: %d-bit weights, packed (see ann_rt_weight_q) */\n", n, (int)ann_rt_w_bits(l));
+			write_int8_array(f, prefix, "w", n, l->w_q, (int)weight_bytes(l));
 			write_int32_array(f, prefix, "b", n, l->b_q, l->out_c);
 			write_int32_array(f, prefix, "mult", n, l->mult, l->out_c);
 			write_int8_array(f, prefix, "shift", n, l->shift, l->out_c);
@@ -1002,8 +1111,8 @@ static int write_header(FILE *f, const ann_rt_model *m, int quantized, const cha
 			fprintf(f, "\t  %s_w%d, NULL,", prefix, n);
 		else
 			fprintf(f, "\t  NULL, NULL,");
-		fprintf(f, " %d, %d, %d, %d, %d, %d },\n", (int)l->groups, (int)l->size_w, (int)l->stride_w, (int)l->pad_w,
-		        (int)l->masked, (int)l->out_zp);
+		fprintf(f, " %d, %d, %d, %d, %d, %d, %d },\n", (int)l->groups, (int)l->size_w, (int)l->stride_w, (int)l->pad_w,
+		        (int)l->masked, (int)l->out_zp, quantized ? (int)l->w_bits : 0);
 	}
 	fprintf(f, "};\n\n");
 

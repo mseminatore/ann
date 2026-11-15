@@ -46,10 +46,10 @@ extern "C" {
 // release tag must match it (vMAJOR.MINOR.PATCH; see .github/workflows/release.yml)
 //------------------------------
 #define ANN_VERSION_MAJOR	0
-#define ANN_VERSION_MINOR	10
+#define ANN_VERSION_MINOR	11
 #define ANN_VERSION_PATCH	0
-#define ANN_VERSION_STRING	"0.10.0"
-// one number for compile-time checks: #if ANN_VERSION >= ANN_MAKE_VERSION(0, 10, 0)
+#define ANN_VERSION_STRING	"0.11.0"
+// one number for compile-time checks: #if ANN_VERSION >= ANN_MAKE_VERSION(0, 11, 0)
 #define ANN_MAKE_VERSION(major, minor, patch)	((major) * 10000 + (minor) * 100 + (patch))
 #define ANN_VERSION	ANN_MAKE_VERSION(ANN_VERSION_MAJOR, ANN_VERSION_MINOR, ANN_VERSION_PATCH)
 
@@ -208,6 +208,21 @@ typedef enum {
 } Noise_type;
 
 //------------------------------
+// How a dense or conv layer stores its weights (see ann_set_layer_weight_format).
+// The low-bit formats keep one scale per output channel (row of the weights):
+//   INT4:    integers -7..7 times max|row| / 7
+//   TERNARY: -1, 0 or +1 times the mean |w| of the weights kept; weights with
+//            |w| <= 0.7 * mean |row| become 0
+//   BINARY:  -1 or +1 times mean |row|
+//------------------------------
+typedef enum {
+	WEIGHT_FORMAT_FLOAT,				// real weights (int8 when quantized): the default
+	WEIGHT_FORMAT_INT4,					// 4 bits per weight
+	WEIGHT_FORMAT_TERNARY,				// 2 bits per weight
+	WEIGHT_FORMAT_BINARY				// 1 bit per weight
+} Weight_format;
+
+//------------------------------
 // SGD optimization kernels
 //------------------------------
 typedef enum {
@@ -305,6 +320,12 @@ struct Layer
 	PTensor t_batch_values;				// batch activations for forward pass
 	PTensor t_batch_dl_dz;				// batch gradients for backward pass
 	PTensor t_batch_z;					// batch pre-activation values (for activation derivatives)
+
+	// Low-bit weights (see ann_set_layer_weight_format): params[0] holds the
+	// float weights training updates, t_wq their quantized values, which the
+	// forward and backward passes use
+	Weight_format weight_format;		// WEIGHT_FORMAT_FLOAT unless set
+	PTensor t_wq;						// quantized weights, NULL for WEIGHT_FORMAT_FLOAT
 };
 
 //------------------------------
@@ -372,6 +393,8 @@ struct Network
 	Noise_type noise_type;				// NOISE_NONE when disabled
 	real noise_amount;					// standard deviation, or probability per input
 	real noise_low, noise_high;			// clamp range when low < high; salt-and-pepper values
+
+	int wq_stale;						// 1 = weights changed since the low-bit layers' t_wq was computed
 };
 
 //------------------------------
@@ -874,7 +897,9 @@ typedef struct QuantizedNetwork *PQuantizedNetwork;
  * on the output layer), and an embedding as the first layer, masked or not.
  * An embedding model's inputs are token ids, which stay ids: its table
  * becomes int8 in one scale (a lookup is a copy), and the int8 runtime
- * leaves padding out as libann does. The network is not changed.
+ * leaves padding out as libann does. Layers with low-bit weights (see
+ * ann_set_layer_weight_format) keep the integers training used, packed 4, 2
+ * or 1 bits per weight. The network is not changed.
  *
  * @param pnet Trained network
  * @param calibration_inputs Input rows [samples x input nodes]
@@ -933,6 +958,15 @@ ANN_API int ann_quantized_get_io_params(const PQuantizedNetwork q, real *in_scal
  * @return Accuracy in [0, 1], or -1 on bad arguments
  */
 ANN_API real ann_quantized_evaluate_accuracy(const PQuantizedNetwork q, const PTensor inputs, const PTensor outputs);
+
+/**
+ * The bytes of parameters the int8 model holds: packed weights, biases,
+ * rescaling multipliers and shifts, and activation tables (what an exported
+ * header stores in its arrays, less the layer descriptions).
+ *
+ * @return The size in bytes, or 0 if q is NULL
+ */
+ANN_API size_t ann_quantized_param_bytes(const PQuantizedNetwork q);
 
 /**
  * Export a model as a self-contained C header for embedded targets.
@@ -1916,6 +1950,55 @@ ANN_API int ann_set_layer_trainable(PNetwork pnet, int layer, int trainable);
 ANN_API int ann_get_layer_trainable(const PNetwork pnet, int layer);
 
 /**
+ * Store a dense or conv layer's weights in a low-bit format, for small
+ * exported models (see Weight_format and docs/C_EXPORT.md).
+ *
+ * From then on the layer computes with its weights quantized to the format:
+ * ann_predict, ann_evaluate_accuracy, ONNX export and the float C/JS exports
+ * use the quantized weights, and ann_quantize packs them (8, 4, 2 or 1 bits
+ * per weight in the int8 model). Training is quantization-aware: the forward
+ * and backward passes use the quantized weights, and the optimizer updates
+ * the float weights underneath with their gradient (a straight-through
+ * estimator), which ann_get_layer_param and ann_set_layer_param read and
+ * set. The usual recipe is to train in float, set the formats, then
+ * fine-tune with the online API (ann_train_begin/step/end), which keeps the
+ * weights; training from the start in a low-bit format also works.
+ *
+ * Low-bit layers train on the CPU: a network that has any is not uploaded
+ * to a GPU (setting a format drops a GPU copy). Saves (.nna, .nnb) keep the
+ * formats, in a list after the parameters; older libann cannot load such
+ * files. Call it between training runs.
+ *
+ * @param pnet Network to change (must not be NULL)
+ * @param layer Index of a dense or conv layer (1 .. ann_get_layer_count() - 1)
+ * @param format WEIGHT_FORMAT_FLOAT, _INT4, _TERNARY or _BINARY
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (another kind of layer, a bad
+ *         index or format) or ERR_ALLOC
+ */
+ANN_API int ann_set_layer_weight_format(PNetwork pnet, int layer, Weight_format format);
+
+/**
+ * Set the weight format of every dense and conv layer except the output
+ * layer, which usually stays float (int8 when quantized): it is small, and
+ * the most sensitive to rounding. See ann_set_layer_weight_format.
+ *
+ * @param pnet Network to change (must not be NULL)
+ * @param format WEIGHT_FORMAT_FLOAT, _INT4, _TERNARY or _BINARY
+ * @return ERR_OK, ERR_NULL_PTR, ERR_INVALID (bad format) or ERR_ALLOC
+ */
+ANN_API int ann_set_weight_format(PNetwork pnet, Weight_format format);
+
+/**
+ * Get a layer's weight format.
+ *
+ * @param pnet Network to query
+ * @param layer Layer index (0 = input layer)
+ * @return The format; WEIGHT_FORMAT_FLOAT for layers without one, a NULL
+ *         pnet or a bad index
+ */
+ANN_API Weight_format ann_get_layer_weight_format(const PNetwork pnet, int layer);
+
+/**
  * Set how many CPU threads libann uses for training and batched inference.
  * 
  * libann splits its own loops (element-wise work, convolution and pooling,
@@ -1972,7 +2055,7 @@ ANN_API int ann_get_backend_info(Backend_info *info);
  * program can compare it with ANN_VERSION_STRING, the version of the ann.h it
  * was compiled with, to catch a mismatched shared library.
  *
- * @return A static string, e.g. "0.10.0"
+ * @return A static string, e.g. "0.11.0"
  */
 ANN_API const char *ann_get_version(void);
 

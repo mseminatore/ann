@@ -815,7 +815,7 @@ void test_main(int argc, char *argv[])
         TESTEX("int ids give int8 outputs that rank the classes as the real-input path", ids_agree);
         TESTEX("Its int8 and float32 headers take token ids", q &&
                ann_export_c_header(NULL, q, "test_emb.h", "emb_q") == ERR_OK &&
-               file_contains("test_emb.h", "ANN_RT_EMBEDDING") && file_contains("test_emb.h", "ANN_RT_VERSION < 8") &&
+               file_contains("test_emb.h", "ANN_RT_EMBEDDING") && file_contains("test_emb.h", "ANN_RT_VERSION < 9") &&
                file_contains("test_emb.h", "emb_q_predict(const int32_t *ids, int8_t *output") &&
                ann_export_c_header(net, NULL, "test_emb.h", "emb_f") == ERR_OK &&
                file_contains("test_emb.h", "emb_f_predict(const int32_t *ids, float *output"));
@@ -1004,7 +1004,7 @@ void test_main(int argc, char *argv[])
         signed char some_out[3];
         TESTEX("A model without an embedding takes no ids", q && ann_quantized_predict_ids(q, some_ids, some_out) == ERR_INVALID);
         TESTEX("and export a header that uses it", q && ann_export_c_header(NULL, q, "test_gmp.h", "gmp_q") == ERR_OK &&
-               file_contains("test_gmp.h", "ANN_RT_GLOBAL_MAXPOOL2D") && file_contains("test_gmp.h", "ANN_RT_VERSION < 8"));
+               file_contains("test_gmp.h", "ANN_RT_GLOBAL_MAXPOOL2D") && file_contains("test_gmp.h", "ANN_RT_VERSION < 9"));
         remove("test_gmp.h");
         ann_free_quantized(q);
         ann_free_network(net);

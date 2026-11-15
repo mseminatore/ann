@@ -37,6 +37,7 @@
 #include "ann.h"
 #include "json.h"
 #include "ann_parallel.h"
+#include "ann_lowbit.h"
 
 // Element-wise loops run on several threads once they have at least twice this
 // many elements (see ann_parallel.h). Each element is computed independently,
@@ -133,6 +134,14 @@ ANN_API int ann_gpu_init(void)
 
 static void invoke_error_callback(int error_code, const char *function_name);
 static void apply_input_noise(const PNetwork pnet, real *values, int count);
+static int has_lowbit_layers(const PNetwork pnet);
+
+// Upload a network to the active backend. Low-bit layers (see
+// ann_set_layer_weight_format) train on the CPU only, so such networks stay there.
+static int gpu_upload(PNetwork pnet)
+{
+    return has_lowbit_layers(pnet) ? ERR_INVALID : g_gpu_backend->upload_network(pnet);
+}
 
 ANN_API int ann_gpu_upload_network(PNetwork pnet)
 {
@@ -147,7 +156,7 @@ ANN_API int ann_gpu_upload_network(PNetwork pnet)
 
     // The backend returns ERR_INVALID for layer kinds it does not implement;
     // those networks stay on the CPU
-    int err = g_gpu_backend->upload_network(pnet);
+    int err = gpu_upload(pnet);
     if (err == ERR_OK)
         pnet->gpu_stale = 0;
     else
@@ -193,7 +202,7 @@ static int gpu_ready(const PNetwork pnet)
 static void gpu_refresh(PNetwork pnet)
 {
     if (gpu_uploaded(pnet))
-        pnet->gpu_stale = (g_gpu_backend->upload_network(pnet) != ERR_OK);
+        pnet->gpu_stale = (gpu_upload(pnet) != ERR_OK);
 }
 
 #endif
@@ -285,6 +294,7 @@ static const int ANN_FORMAT_V1 = 1;
 static const int ANN_FORMAT_V2 = 2;
 // starts the optional list of frozen layers after the parameters ("FRZN")
 static const int ANN_FORMAT_FROZEN = 0x46525A4E;
+static const int ANN_FORMAT_WEIGHTS = 0x57464D54;	// 'WFMT': low-bit weight formats
 
 #if defined(_WIN32) && !defined(_WIN64)
 #	define R_MIN -1
@@ -556,6 +566,9 @@ static void free_layer_params(PLayer layer)
 	tensor_free(layer->t_mask);
 	layer->t_mask = NULL;
 	layer->t_in_mask = NULL;
+	tensor_free(layer->t_wq);
+	layer->t_wq = NULL;
+	layer->weight_format = WEIGHT_FORMAT_FLOAT;
 
 	// the dense aliases pointed at the tensors just freed
 	layer->t_weights	= NULL;
@@ -659,6 +672,74 @@ static void dense_init_weights(PNetwork pnet, int layer, Weight_init_type init_t
 }
 
 //------------------------------
+// the weights a dense or conv layer computes with: the quantized copy for a
+// low-bit layer (see ann_set_layer_weight_format), else params[0]
+//------------------------------
+static PTensor layer_weights(const Layer *layer)
+{
+	return layer->t_wq ? layer->t_wq : layer->params[0].value;
+}
+
+typedef struct {
+	const Layer *layer;
+} Lowbit_job;
+
+//------------------------------
+// quantize rows [begin, end) of a low-bit layer's weights into t_wq; each row
+// is computed whole, so results do not depend on the thread count
+//------------------------------
+static void lowbit_rows(void *arg, int begin, int end)
+{
+	const Lowbit_job *job = arg;
+	const Layer *layer = job->layer;
+	const PTensor W = layer->params[0].value;
+	int n = W->cols;
+
+	for (int row = begin; row < end; row++)
+	{
+		const real *w = W->values + (size_t)row * n;
+		real *q = layer->t_wq->values + (size_t)row * n;
+		Lowbit_row r = lowbit_row(layer->weight_format, w, n);
+
+		for (int i = 0; i < n; i++)
+			q[i] = (real)(r.scale * lowbit_code(layer->weight_format, r, w[i]));
+	}
+}
+
+//------------------------------
+// recompute the low-bit layers' quantized weights when the float weights
+// have changed since (pnet->wq_stale, set wherever weights change)
+//------------------------------
+static void lowbit_sync(PNetwork pnet)
+{
+	if (!pnet->wq_stale)
+		return;
+
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+	{
+		Lowbit_job job;
+		job.layer = &pnet->layers[layer];
+		if (job.layer->t_wq)
+		{
+			int rows = job.layer->t_wq->rows, cols = job.layer->t_wq->cols;
+			ann_parallel_for(rows, cols > 0 ? 1 + ANN_ELEMENT_GRAIN / cols : rows, lowbit_rows, &job);
+		}
+	}
+	pnet->wq_stale = 0;
+}
+
+//------------------------------
+// 1 if any layer has low-bit weights
+//------------------------------
+static int has_lowbit_layers(const PNetwork pnet)
+{
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+		if (pnet->layers[layer].weight_format != WEIGHT_FORMAT_FLOAT)
+			return 1;
+	return 0;
+}
+
+//------------------------------
 // Dense forward, linear part: Y = X * W^T + b for X [rows x in_nodes]
 //------------------------------
 static void dense_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
@@ -667,7 +748,7 @@ static void dense_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 
 	// Y = X * W^T (gemm with B transposed)
 	// X is [batch × in], W is [out × in], Y is [batch × out]
-	tensor_gemm_transB((real)1.0, X, layer->t_weights, (real)0.0, Y);
+	tensor_gemm_transB((real)1.0, X, layer_weights(layer), (real)0.0, Y);
 
 	// Add bias to each row
 	for (int b = 0; b < rows; b++)
@@ -685,7 +766,7 @@ static void dense_forward(PLayer layer, const PTensor X, PTensor Y, int rows)
 //------------------------------
 static void dense_forward_single(PLayer layer, const PTensor x, PTensor y)
 {
-	tensor_matvec(Tensor_NoTranspose, (real)1.0, layer->t_weights, (real)0.0, x, y);
+	tensor_matvec(Tensor_NoTranspose, (real)1.0, layer_weights(layer), (real)0.0, x, y);
 	tensor_add(y, layer->t_bias);
 }
 
@@ -703,7 +784,7 @@ static void dense_backward(PLayer layer, const PTensor X, const PTensor dZ, PTen
 
 	// dX = dZ * W: [batch × out] * [out × in] = [batch × in]
 	if (dX)
-		tensor_gemm((real)1.0, dZ, layer->t_weights, (real)0.0, dX);
+		tensor_gemm((real)1.0, dZ, layer_weights(layer), (real)0.0, dX);
 }
 
 //------------------------------
@@ -883,7 +964,7 @@ static Tensor row_block(const Tensor *t, int row0, int rows)
 
 static void conv_group_gemm(const Layer *layer, int product, Tensor *a, Tensor *b, Tensor *c, int f0, int f1)
 {
-	const PTensor W = layer->params[0].value;
+	const PTensor W = layer_weights(layer);
 	int groups = conv_groups(layer), fg = layer->shape.c / groups, patch = W->cols;
 
 	if (product == CONV_WEIGHT_GRAD)
@@ -2424,6 +2505,7 @@ static void init_layer_weights(PNetwork pnet, int layer)
 		ops->init_weights(pnet, layer, init_type);
 
 	pnet->layers[layer].weights_set = 1;
+	pnet->wq_stale = 1;
 }
 
 static void init_weights(PNetwork pnet)
@@ -2570,6 +2652,8 @@ static void eval_network(PNetwork pnet)
 {
 	if (!pnet)
 		return;
+
+	lowbit_sync(pnet);
 
 #ifdef USE_GPU
 	// Dispatch to GPU if a backend is active and the uploaded weights are current
@@ -2767,6 +2851,8 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 {
 	if (!pnet)
 		return;
+
+	lowbit_sync(pnet);
 
 	// Loop over non-input layers (each owns the parameters from the layer below)
 	for (int layer = 1; layer < pnet->layer_count; layer++)
@@ -4056,6 +4142,7 @@ static real train_batch_cpu(PNetwork pnet, int batch_size, PTensor targets)
 
 	// update weights based on batched gradients using the chosen optimizer
 	pnet->optimize_func(pnet);
+	pnet->wq_stale = 1;
 
 	return loss;
 }
@@ -4077,7 +4164,10 @@ static size_t copy_parameters(PNetwork pnet, real *buf, int restore)
 			PTensor t = cur->params[p].value;
 			size_t count = (size_t)t->rows * t->cols;
 			if (buf && restore)
+			{
 				memcpy(t->values, buf + offset, count * sizeof(real));
+				pnet->wq_stale = 1;
+			}
 			else if (buf)
 				memcpy(buf + offset, t->values, count * sizeof(real));
 			offset += count;
@@ -4195,7 +4285,7 @@ real ann_train_network(PNetwork pnet, PTensor inputs, PTensor outputs, int rows)
 	int use_gpu_training = gpu_uploaded(pnet);
 	// init_weights() may have just randomized CPU weights; re-upload once so GPU
 	// training always starts from the same initialized parameters as CPU training.
-	if (use_gpu_training && g_gpu_backend->upload_network(pnet) != ERR_OK)
+	if (use_gpu_training && gpu_upload(pnet) != ERR_OK)
 		use_gpu_training = 0;
 	// Training on the CPU while uploaded leaves the GPU copy behind until the end
 	pnet->gpu_stale = gpu_uploaded(pnet) && !use_gpu_training;
@@ -5354,6 +5444,7 @@ int ann_set_layer_param(PNetwork pnet, int layer, int index, const real *values,
 	if (!pnet->weights_set && !pnet->layers[layer].weights_set)
 		init_layer_weights(pnet, layer);
 	memcpy(t->values, values, count * sizeof(real));
+	pnet->wq_stale = 1;
 
 #ifdef USE_GPU
 	// a stale GPU copy (online training) is re-uploaded when that ends
@@ -5379,6 +5470,86 @@ int ann_get_layer_trainable(const PNetwork pnet, int layer)
 	if (!pnet || layer < 0 || layer >= pnet->layer_count)
 		return 0;
 	return !pnet->layers[layer].frozen;
+}
+
+//------------------------------
+// store a dense or conv layer's weights in a low-bit format: t_wq holds them
+// quantized, recomputed from params[0] before forward passes that follow a change
+//------------------------------
+int ann_set_layer_weight_format(PNetwork pnet, int layer, Weight_format format)
+{
+	if (!pnet)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_set_layer_weight_format");
+		return ERR_NULL_PTR;
+	}
+
+	PLayer cur = layer >= 1 && layer < pnet->layer_count ? &pnet->layers[layer] : NULL;
+	if (!cur || (cur->kind != LAYER_KIND_DENSE && cur->kind != LAYER_KIND_CONV2D) ||
+		format < WEIGHT_FORMAT_FLOAT || format > WEIGHT_FORMAT_BINARY)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_set_layer_weight_format");
+		return ERR_INVALID;
+	}
+
+	if (format == WEIGHT_FORMAT_FLOAT)
+	{
+		tensor_free(cur->t_wq);
+		cur->t_wq = NULL;
+	}
+	else if (!cur->t_wq)
+	{
+		cur->t_wq = tensor_zeros(cur->params[0].value->rows, cur->params[0].value->cols);
+		if (!cur->t_wq)
+		{
+			invoke_error_callback(ERR_ALLOC, "ann_set_layer_weight_format");
+			return ERR_ALLOC;
+		}
+	}
+	cur->weight_format = format;
+	pnet->wq_stale = 1;
+
+#ifdef USE_GPU
+	// low-bit layers train and predict on the CPU
+	if (format != WEIGHT_FORMAT_FLOAT && gpu_uploaded(pnet))
+	{
+		g_gpu_backend->free_network(pnet);
+		pnet->gpu_stale = 0;
+	}
+#endif
+	return ERR_OK;
+}
+
+int ann_set_weight_format(PNetwork pnet, Weight_format format)
+{
+	if (!pnet)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_set_weight_format");
+		return ERR_NULL_PTR;
+	}
+	if (format < WEIGHT_FORMAT_FLOAT || format > WEIGHT_FORMAT_BINARY)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_set_weight_format");
+		return ERR_INVALID;
+	}
+
+	// every dense and conv layer but the output layer
+	for (int layer = 1; layer < pnet->layer_count - 1; layer++)
+	{
+		Layer_kind kind = pnet->layers[layer].kind;
+		int err = (kind == LAYER_KIND_DENSE || kind == LAYER_KIND_CONV2D) ?
+			ann_set_layer_weight_format(pnet, layer, format) : ERR_OK;
+		if (err != ERR_OK)
+			return err;
+	}
+	return ERR_OK;
+}
+
+Weight_format ann_get_layer_weight_format(const PNetwork pnet, int layer)
+{
+	if (!pnet || layer < 0 || layer >= pnet->layer_count)
+		return WEIGHT_FORMAT_FLOAT;
+	return pnet->layers[layer].weight_format;
 }
 
 //------------------------------
@@ -5836,7 +6007,11 @@ int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, in
 //   per layer 1..n-1:     each params[] tensor's values, in order
 // either, when some layers are frozen (ann_set_layer_trainable), then:
 //   ANN_FORMAT_FROZEN count layer...
-// which older libann ignores, as it reads nothing after the parameters.
+// which libann before 0.10 ignores, as it reads nothing after the parameters; then, when some
+// layers have low-bit weights (ann_set_layer_weight_format):
+//   ANN_FORMAT_WEIGHTS count (layer format)...
+// which libann before 0.11 rejects (its weights are the float ones under the low-bit ones, so
+// it would predict differently).
 //================================================================================================
 
 //------------------------------
@@ -6006,6 +6181,19 @@ static int save_network(const PNetwork pnet, const char *filename, int binary, c
 				ok = write_int(fptr, binary, layer);
 	}
 
+	// low-bit weight formats, if any
+	int lowbit = 0;
+	for (int layer = 1; layer < pnet->layer_count; layer++)
+		lowbit += pnet->layers[layer].weight_format != WEIGHT_FORMAT_FLOAT;
+	if (ok && lowbit)
+	{
+		ok = write_int(fptr, binary, ANN_FORMAT_WEIGHTS) && write_int(fptr, binary, lowbit);
+		for (int layer = 1; ok && layer < pnet->layer_count; layer++)
+			if (pnet->layers[layer].weight_format != WEIGHT_FORMAT_FLOAT)
+				ok = write_int(fptr, binary, layer) &&
+				     write_int(fptr, binary, (int)pnet->layers[layer].weight_format);
+	}
+
 	if (fclose(fptr) != 0)
 		ok = 0;
 
@@ -6112,19 +6300,37 @@ static PNetwork load_network(const char *filename, int binary)
 				goto fail;
 		}
 	}
+	pnet->wq_stale = 1;
 
-	// frozen layers, when listed (files without them end here)
-	int mark, frozen;
-	if (read_int(fptr, binary, &mark))
+	// frozen layers, then low-bit weight formats, when listed (files without them end here)
+	int mark, count, last = 0;
+	while (read_int(fptr, binary, &mark))
 	{
-		if (mark != ANN_FORMAT_FROZEN || !read_int(fptr, binary, &frozen) || frozen < 0 || frozen >= layer_count)
+		if (!read_int(fptr, binary, &count) || count < 0 || count >= layer_count)
 			goto fail;
-		for (int i = 0; i < frozen; i++)
+		if (mark == ANN_FORMAT_FROZEN && last == 0)
 		{
-			int layer;
-			if (!read_int(fptr, binary, &layer) || ann_set_layer_trainable(pnet, layer, 0) != ERR_OK)
-				goto fail;
+			for (int i = 0; i < count; i++)
+			{
+				int layer;
+				if (!read_int(fptr, binary, &layer) || ann_set_layer_trainable(pnet, layer, 0) != ERR_OK)
+					goto fail;
+			}
 		}
+		else if (mark == ANN_FORMAT_WEIGHTS && last != ANN_FORMAT_WEIGHTS)
+		{
+			for (int i = 0; i < count; i++)
+			{
+				int layer, format;
+				if (!read_int(fptr, binary, &layer) || !read_int(fptr, binary, &format) ||
+					format == WEIGHT_FORMAT_FLOAT ||
+					ann_set_layer_weight_format(pnet, layer, (Weight_format)format) != ERR_OK)
+					goto fail;
+			}
+		}
+		else
+			goto fail;
+		last = mark;
 	}
 
 	fclose(fptr);
@@ -6355,7 +6561,7 @@ static void dense_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, 
 	write_json_int_array(fptr, w_dims, 2);
 	fprintf(fptr, ",\n");
 	fprintf(fptr, "        \"float_data\": ");
-	write_json_float_array_transposed(fptr, cur->t_weights->values, next_nodes, curr_nodes);
+	write_json_float_array_transposed(fptr, layer_weights(cur)->values, next_nodes, curr_nodes);
 	fprintf(fptr, "\n");
 	fprintf(fptr, "      }");
 
@@ -6505,7 +6711,7 @@ static void conv_onnx_initializers(FILE *fptr, const PNetwork pnet, int layer, i
 	write_json_int_array(fptr, w_dims, 4);
 	fprintf(fptr, ",\n");
 	fprintf(fptr, "        \"float_data\": ");
-	write_json_float_array(fptr, cur->params[0].value->values, w_dims[0] * w_dims[1] * w.k * w.kw);
+	write_json_float_array(fptr, layer_weights(cur)->values, w_dims[0] * w_dims[1] * w.k * w.kw);
 	fprintf(fptr, "\n");
 	fprintf(fptr, "      },\n");
 	fprintf(fptr, "      {\n");
@@ -7039,6 +7245,9 @@ int ann_export_onnx(const PNetwork pnet, const char *filename)
 		invoke_error_callback(ERR_INVALID, "ann_export_onnx");
 		return ERR_INVALID;
 	}
+
+	// low-bit layers export the weights they compute with
+	lowbit_sync(pnet);
 
 	// The ONNX input is an image [batch, C, H, W] when the input layer has a
 	// 2-D shape or conv/pool/upsample layers follow (before any Reshape or

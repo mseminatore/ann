@@ -17,17 +17,19 @@ anywhere else (on the input, after pooling, or after a layer with an activation)
 
 Conv layers may be grouped or depthwise (`ann_add_conv2d_grouped`, `ann_add_depthwise_conv2d`), and
 conv and pool windows non-square, including 1-D convs and pools (`ann_add_conv2d_ex`,
-`ann_add_conv1d`, `ann_add_maxpool2d_ex`, `ann_add_maxpool1d`).
+`ann_add_conv1d`, `ann_add_maxpool2d_ex`, `ann_add_maxpool1d`). Dense and conv layers may store
+their weights in 4, 2 (ternary) or 1 (binary) bits, trained for it (see
+[Low-bit weights](#low-bit-weights)).
 
 A generated header initializes every `ann_rt_layer` field, so it builds without
 missing-initializer warnings, and checks that `ann_rt.h` is at least the version that wrote it
-(8: version 2 added upsampling, 3 global average pooling, 4 grouped convolutions, 5 non-square
+(9: version 2 added upsampling, 3 global average pooling, 4 grouped convolutions, 5 non-square
 windows, 6 global max pooling, 7 embeddings with padding masks, 8 masked max pools that keep a
-window with any kept step; a version 7 header built with it pools that way too, as the libann
-that reads its model does). Copy `ann_rt.h` from the libann
+window with any kept step (a version 7 header built with it pools that way too, as the libann
+that reads its model does), 9 packed low-bit weights). Copy `ann_rt.h` from the libann
 that exported the model. Headers written by older
 versions still build with the newer runtime (the fields they leave out read as 0, which means
-one group and a square window), but
+one group, a square window and int8 weights), but
 compilers warn about the missing initializers with `-Wextra`. Headers exported by libann 0.7
 (pyann 0.7.0) require exactly version 1; re-export them to use the newer runtime.
 
@@ -95,7 +97,11 @@ make run_exported      # Makefile: expects the headers in the project root
 | `ann_quantized_predict_ids(q, ids, out)` | Token ids in, int8 out, for a model that starts with an embedding (same results as its `<prefix>_predict`) |
 | `ann_quantized_get_io_params(q, ...)` | Input/output scale and zero point |
 | `ann_quantized_evaluate_accuracy(q, x, y)` | Classification accuracy of the int8 model |
+| `ann_quantized_param_bytes(q)` | Bytes of parameters the int8 model holds (packed weights, biases, multipliers, shifts, tables) |
 | `ann_export_c_header(pnet, q, file, prefix)` | Write the int8 model (`q`), or the float32 network when `q` is `NULL` |
+| `ann_set_layer_weight_format(pnet, layer, format)` | Store a dense or conv layer's weights in `WEIGHT_FORMAT_INT4`, `_TERNARY` or `_BINARY` (or back to `_FLOAT`); see [Low-bit weights](#low-bit-weights) |
+| `ann_set_weight_format(pnet, format)` | The same for every dense and conv layer except the output layer |
+| `ann_get_layer_weight_format(pnet, layer)` | A layer's format |
 
 libann runs the int8 model with the same `ann_rt.h` code the header uses. The
 `test_c_export` test compiles exported headers without libann and checks that their results
@@ -189,6 +195,72 @@ TFLite-style post-training quantization:
 - **Softmax** outputs stay as int8 logits, and `argmax` of the logits is the predicted class.
   The float helpers apply softmax after dequantizing.
 
+## Low-bit weights
+
+int8 weights take a byte each. Most of a small model's memory is weights, so storing them in fewer
+bits shrinks it further, but simply rounding trained weights to 2 or 1 bits loses a lot of
+accuracy. libann trains for the rounding instead (quantization-aware training): give a dense or
+conv layer a weight format, then train or fine-tune it.
+
+| Format | Bits per weight | Values | Per-row scale `s` |
+|--------|-----------------|--------|-------------------|
+| `WEIGHT_FORMAT_FLOAT` | 8 when quantized | int8 | `max|w| / 127` (the default) |
+| `WEIGHT_FORMAT_INT4` | 4 | `-7..7 × s` | `max|w| / 7` |
+| `WEIGHT_FORMAT_TERNARY` | 2 | `-s, 0, +s` | the mean `|w|` of the weights kept; weights with `|w| <= 0.7 × mean|w|` become 0 |
+| `WEIGHT_FORMAT_BINARY` | 1 | `-s, +s` | `mean|w|` |
+
+Each row of the weights (a dense node's, or a conv filter's) has its own scale. Once a layer has a
+format, it computes with its weights rounded that way: `ann_predict`, `ann_evaluate_accuracy`,
+ONNX export, the float C and JavaScript exports, and training's forward and backward passes all
+use the rounded weights. Training keeps float weights underneath and updates them with the
+rounded weights' gradient (a straight-through estimator), so many small updates can move a weight
+across a rounding step; `ann_get_layer_param`/`ann_set_layer_param` read and set those float
+weights. `ann_quantize` packs the rounded weights' integers, exactly the ones training used, and
+the runtime adds or subtracts inputs for binary weights, with no multiplies.
+
+The usual recipe is to train in float, set the formats, and fine-tune with the online API, which
+keeps the weights (`ann_train_network` also works, from the start):
+
+```c
+// pnet: a trained float network
+ann_set_weight_format(pnet, WEIGHT_FORMAT_TERNARY);   // every dense/conv layer but the output
+ann_set_learning_rate(pnet, 0.0005f);
+ann_train_begin(pnet);
+for (int epoch = 0; epoch < 3; epoch++)
+    for (int b = 0; b + 32 <= rows; b += 32)          // shuffled batches in practice
+        ann_train_step(pnet, &x[b * inputs], &y[b * outputs], 32);
+ann_train_end(pnet);
+
+PQuantizedNetwork q = ann_quantize(pnet, calibration); // packed 2-bit hidden weights
+ann_export_c_header(NULL, q, "model_q.h", "model");
+```
+
+`examples/lowbit_export.c` does this for each format on Fashion-MNIST (784-128-10 MLP, the hidden
+layer low-bit, 3 fine-tuning epochs after 5 in float; test accuracy):
+
+| Hidden layer | Rounded | Fine-tuned | int8 model | Parameters |
+|--------------|---------|------------|------------|------------|
+| int8 | - | - | 88.57% | 100.5 KB |
+| int4 | 87.89% | 89.13% | 89.15% | 51.5 KB |
+| ternary | 85.68% | 89.12% | 89.10% | 27.0 KB |
+| binary | 77.54% | 88.02% | 87.85% | 14.7 KB |
+
+The float model scores 88.51%; fine-tuning's extra epochs account for the low-bit models doing a
+little better. Keep the output layer int8 (as `ann_set_weight_format` does): it is small, and
+the most sensitive to rounding.
+
+Notes:
+
+- Low-bit layers train on the CPU. A network that has any is not uploaded to a GPU, and setting a
+  format drops a GPU copy.
+- Saves (`.nna`, `.nnb`) keep the formats, after the parameters. libann before 0.11 cannot load
+  such a file. ONNX holds the rounded weights as floats, without the formats.
+- A binary row of all-zero weights (all its weights exactly 0, or folded with a batch norm gamma
+  of 0) has no binary form, so `ann_quantize` fails with `ERR_INVALID`.
+- In the header, each packed layer's `w_bits` is 4, 2 or 1, and each row of its weights starts on
+  a byte, filled from its lowest bits up: 4-bit two's complement, ternary `01` = +1, `11` = -1,
+  `00` = 0, binary `1` = +1, `0` = -1 (see `ann_rt_weight_q`).
+
 ### Calibration tips
 
 - Use a few hundred to a few thousand samples that look like real inputs, such as part of the
@@ -214,7 +286,8 @@ lookup tables.
 
 ## Limitations
 
-- Post-training quantization only (no quantization-aware training).
+- Activations are always int8. Low-bit weights are trained for (see above); int8 weights are
+  post-training.
 - Per-tensor activation ranges are plain min/max over the calibration set.
 - The runtime's kernels are plain C loops with no SIMD. The conv kernel works directly on the
   input, without im2col, to keep memory small. Their inner loops use only multiplies, adds and

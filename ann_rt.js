@@ -32,7 +32,7 @@
 //================================================================================================
 
 // the ann_rt.h version whose layer description this runtime reads
-export const VERSION = 8;
+export const VERSION = 9;
 
 // layer kinds and activations: the values of ann_rt.h's enums
 export const DENSE = 0, CONV2D = 1, MAXPOOL2D = 2, FLATTEN = 3, UPSAMPLE2D = 4,

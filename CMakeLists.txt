@@ -279,6 +279,9 @@ target_link_libraries(fashion_dae libann ${BLAS_LIB} ${MATH_LIB})
 add_executable(export_model examples/export_model.c)
 target_link_libraries(export_model libann ${BLAS_LIB} ${MATH_LIB})
 
+add_executable(lowbit_export examples/lowbit_export.c)
+target_link_libraries(lowbit_export libann ${BLAS_LIB} ${MATH_LIB})
+
 # run_exported builds the headers export_model writes, without libann. Not in
 # the default build since the headers exist only after export_model runs:
 #   cmake -DEXPORT_HEADER_DIR=<dir with fashion_q.h, fashion_f.h> ..
@@ -446,6 +449,10 @@ add_executable(test_quantize tests/test_quantize.c testy/test_main.c)
 target_link_libraries(test_quantize libann ${BLAS_LIB} ${MATH_LIB})
 add_test(NAME test_quantize COMMAND test_quantize)
 
+add_executable(test_lowbit tests/test_lowbit.c testy/test_main.c)
+target_link_libraries(test_lowbit libann ${BLAS_LIB} ${MATH_LIB})
+add_test(NAME test_lowbit COMMAND test_lowbit)
+
 # C header export: gen_c_export writes model headers with libann, then
 # test_c_export compiles them with only ann_rt.h (no libann) and checks they
 # give libann's results; test_c_export_int8 does the same with ANN_RT_NO_FLOAT
@@ -457,9 +464,11 @@ set(C_EXPORT_FILES ${C_EXPORT_DIR}/ann_rt.h ${C_EXPORT_DIR}/expected.h
     ${C_EXPORT_DIR}/ae_q.h ${C_EXPORT_DIR}/ae_f.h ${C_EXPORT_DIR}/gap_q.h ${C_EXPORT_DIR}/gap_f.h
     ${C_EXPORT_DIR}/bn_q.h ${C_EXPORT_DIR}/bn_f.h ${C_EXPORT_DIR}/dw_q.h ${C_EXPORT_DIR}/dw_f.h
     ${C_EXPORT_DIR}/ts_q.h ${C_EXPORT_DIR}/ts_f.h ${C_EXPORT_DIR}/txt_q.h ${C_EXPORT_DIR}/txt_f.h
+    ${C_EXPORT_DIR}/lb_q.h ${C_EXPORT_DIR}/lb_f.h
     ${C_EXPORT_DIR}/ann_rt.js ${C_EXPORT_DIR}/expected.json
     ${C_EXPORT_DIR}/dense.js ${C_EXPORT_DIR}/cnn.js ${C_EXPORT_DIR}/ae.js ${C_EXPORT_DIR}/gap.js
-    ${C_EXPORT_DIR}/bn.js ${C_EXPORT_DIR}/dw.js ${C_EXPORT_DIR}/ts.js ${C_EXPORT_DIR}/txt.js)
+    ${C_EXPORT_DIR}/bn.js ${C_EXPORT_DIR}/dw.js ${C_EXPORT_DIR}/ts.js ${C_EXPORT_DIR}/txt.js
+    ${C_EXPORT_DIR}/lb.js)
 add_custom_command(OUTPUT ${C_EXPORT_FILES}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${C_EXPORT_DIR}
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/ann_rt.h ${C_EXPORT_DIR}/ann_rt.h

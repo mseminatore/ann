@@ -31,7 +31,9 @@
 // Two model forms share the layer description:
 //   int8:    weights are int8 with one scale per output channel, activations are int8 with one
 //            scale and zero point per tensor, and sums are int32. Results are rescaled with a
-//            fixed-point multiplier and shift, so the int8 path uses integer math only.
+//            fixed-point multiplier and shift, so the int8 path uses integer math only. Layers
+//            trained with low-bit weights store them packed: 4 bits (-7..7), 2 (ternary: -1, 0,
+//            +1) or 1 (binary: -1, +1) per weight, still with one scale per output channel.
 //   float32: the trained weights as floats, for targets with an FPU.
 //
 // Define ANN_RT_NO_FLOAT to compile out every function that uses float math (the float model,
@@ -55,10 +57,11 @@
 // (ann_rt_layer.groups), 5 non-square windows (size_w, stride_w, pad_w),
 // 6 ANN_RT_GLOBAL_MAXPOOL2D, 7 ANN_RT_EMBEDDING with padding masks
 // (ann_rt_layer.masked, out_zp; ann_rt_model.mask_steps), 8 masked max pools
-// keep a window with any kept step and take the largest of those.
+// keep a window with any kept step and take the largest of those, 9 packed
+// low-bit weights in int8 models (ann_rt_layer.w_bits).
 // Generated headers need at least the version that wrote them (they initialize
 // every field); older headers still build with newer versions.
-#define ANN_RT_VERSION 8
+#define ANN_RT_VERSION 9
 
 #if defined(_MSC_VER) && !defined(__cplusplus)
 #	define ANN_RT_FUNC static __inline
@@ -131,6 +134,8 @@ typedef struct {
 								// before version 5 do) means the same as the height's
 	int32_t masked;				// 1 if the output steps carry a padding mask (left out before version 7: none)
 	int32_t out_zp;				// int8 model: the output's zero point (the value of 0), for masked steps
+	int32_t w_bits;				// int8 model: bits per weight in w_q, 8 (or 0, as headers before
+								// version 9 leave it), 4, 2 or 1; see ann_rt_weight_q
 } ann_rt_layer;
 
 //------------------------------
@@ -151,6 +156,43 @@ ANN_RT_FUNC int32_t ann_rt_group_channels(const ann_rt_layer *l)
 ANN_RT_FUNC int32_t ann_rt_first_channel(const ann_rt_layer *l, int32_t f)
 {
 	return l->groups > 1 ? f / (l->out_c / l->groups) * ann_rt_group_channels(l) : 0;
+}
+
+//------------------------------
+// int8 model weights: w_bits bits each, an output channel's n weights to a
+// row that starts on a byte (int8 rows are plain int8_t arrays). Packed
+// weights fill each byte from its lowest bits up: 4 bits are a two's
+// complement -7..7, 2 bits are ternary (01 = +1, 11 = -1, 00 = 0), and 1 bit
+// is binary (1 = +1, 0 = -1).
+//------------------------------
+ANN_RT_FUNC int32_t ann_rt_w_bits(const ann_rt_layer *l)
+{
+	return l->w_bits > 0 ? l->w_bits : 8;
+}
+
+ANN_RT_FUNC int32_t ann_rt_row_bytes(const ann_rt_layer *l, int32_t n)
+{
+	return (n * ann_rt_w_bits(l) + 7) >> 3;
+}
+
+// weight i of a packed row
+ANN_RT_FUNC int32_t ann_rt_weight_q(const uint8_t *row, int32_t bits, int32_t i)
+{
+	int32_t v;
+
+	switch (bits)
+	{
+	case 1:
+		return (row[i >> 3] >> (i & 7)) & 1 ? 1 : -1;
+	case 2:
+		v = (row[i >> 2] >> ((i & 3) << 1)) & 3;
+		return v & 2 ? v - 4 : v;
+	case 4:
+		v = (row[i >> 1] >> ((i & 1) << 2)) & 15;
+		return v & 8 ? v - 16 : v;
+	default:
+		return (int8_t)row[i];
+	}
 }
 
 typedef struct {
@@ -279,16 +321,78 @@ ANN_RT_FUNC int8_t ann_rt_finish_q(const ann_rt_layer *l, int32_t acc, int ch)
 ANN_RT_FUNC void ann_rt_dense_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
 {
 	int32_t n_in = l->in_c * l->in_h * l->in_w;
+	int32_t bits = ann_rt_w_bits(l), row_bytes = ann_rt_row_bytes(l, n_in);
 	int32_t o, i;
 
 	for (o = 0; o < l->out_c; o++)
 	{
-		const int8_t *w = l->w_q + (int32_t)o * n_in;
+		const uint8_t *row = (const uint8_t *)l->w_q + o * row_bytes;
 		int32_t acc = l->b_q[o];
 
-		for (i = 0; i < n_in; i++)
-			acc += ((int32_t)x[i] - l->in_zp) * (int32_t)w[i];
+		if (bits == 8)
+		{
+			const int8_t *w = (const int8_t *)row;
+			for (i = 0; i < n_in; i++)
+				acc += ((int32_t)x[i] - l->in_zp) * (int32_t)w[i];
+		}
+		else if (bits == 1)
+		{
+			// binary: add or subtract each input, no multiplies
+			for (i = 0; i < n_in; i++)
+			{
+				int32_t v = (int32_t)x[i] - l->in_zp;
+				acc += (row[i >> 3] >> (i & 7)) & 1 ? v : -v;
+			}
+		}
+		else
+		{
+			for (i = 0; i < n_in; i++)
+				acc += ((int32_t)x[i] - l->in_zp) * ann_rt_weight_q(row, bits, i);
+		}
 		y[o] = ann_rt_finish_q(l, acc, o);
+	}
+}
+
+// a conv layer with packed low-bit weights (w_bits 4, 2 or 1): ann_rt_conv_q's
+// loops, each weight read with ann_rt_weight_q from its filter's row
+ANN_RT_FUNC void ann_rt_conv_packed_q(const ann_rt_layer *l, const int8_t *x, int8_t *y)
+{
+	int32_t k = l->size, s = l->stride, p = l->pad, cg = ann_rt_group_channels(l);
+	int32_t kw = ann_rt_size_w(l), sw = ann_rt_stride_w(l), pw = ann_rt_pad_w(l);
+	int32_t bits = ann_rt_w_bits(l), row_bytes = ann_rt_row_bytes(l, cg * k * kw);
+	int32_t f, oh, ow, c, i, j;
+
+	for (f = 0; f < l->out_c; f++)
+	{
+		const int8_t *xf = x + ann_rt_first_channel(l, f) * l->in_h * l->in_w;
+		const uint8_t *row = (const uint8_t *)l->w_q + f * row_bytes;	// the filter's weights
+
+		for (oh = 0; oh < l->out_h; oh++)
+			for (ow = 0; ow < l->out_w; ow++)
+			{
+				int32_t acc = l->b_q[f];
+
+				for (c = 0; c < cg; c++)
+				{
+					const int8_t *xc = xf + c * l->in_h * l->in_w;
+
+					for (i = 0; i < k; i++)
+					{
+						int32_t ih = oh * s - p + i;
+						if (ih < 0 || ih >= l->in_h)
+							continue;	// padding is real 0, which adds nothing
+						for (j = 0; j < kw; j++)
+						{
+							int32_t iw = ow * sw - pw + j;
+							if (iw < 0 || iw >= l->in_w)
+								continue;
+							acc += ((int32_t)xc[ih * l->in_w + iw] - l->in_zp) *
+							       ann_rt_weight_q(row, bits, (c * k + i) * kw + j);
+						}
+					}
+				}
+				y[(f * l->out_h + oh) * l->out_w + ow] = ann_rt_finish_q(l, acc, f);
+			}
 	}
 }
 
@@ -297,6 +401,12 @@ ANN_RT_FUNC void ann_rt_conv_q(const ann_rt_layer *l, const int8_t *x, int8_t *y
 	int32_t k = l->size, s = l->stride, p = l->pad, cg = ann_rt_group_channels(l);
 	int32_t kw = ann_rt_size_w(l), sw = ann_rt_stride_w(l), pw = ann_rt_pad_w(l);
 	int32_t f, oh, ow, c, i, j;
+
+	if (ann_rt_w_bits(l) != 8)
+	{
+		ann_rt_conv_packed_q(l, x, y);	// kept apart so the int8 loops stay branch-free
+		return;
+	}
 
 	for (f = 0; f < l->out_c; f++)
 	{

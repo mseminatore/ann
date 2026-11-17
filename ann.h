@@ -1076,6 +1076,23 @@ ANN_API unsigned ann_get_history(const PNetwork pnet, real *loss, real *lr,
 								 real *val_loss, unsigned max_count);
 
 /**
+ * Append an epoch to the training history, for epochs trained outside
+ * ann_train_network() (with ann_train_begin()/ann_train_step()/ann_train_end()
+ * or a loop of your own), so ann_get_history() and ann_export_learning_curve()
+ * cover them too.
+ *
+ * @param pnet Network to record into
+ * @param loss Training loss of the epoch
+ * @param learning_rate Learning rate the epoch used
+ * @param val_loss Validation loss of the epoch, or -1 (any negative value) if not measured
+ * @return ERR_OK, ERR_NULL_PTR if pnet is NULL, ERR_INVALID if the history
+ *         already holds MAX_HISTORY_SIZE epochs, or ERR_ALLOC
+ *
+ * @see ann_set_training_run(), ann_get_history()
+ */
+ANN_API int ann_record_epoch(PNetwork pnet, real loss, real learning_rate, real val_loss);
+
+/**
  * Load trained network from text file.
  * 
  * @param filename Path to network file (saved with ann_save_network())
@@ -1580,6 +1597,20 @@ ANN_API unsigned ann_get_best_epoch(const PNetwork pnet);
  * @see ann_get_best_epoch(), ann_get_history_count()
  */
 ANN_API unsigned ann_get_epochs_trained(const PNetwork pnet);
+
+/**
+ * Report a training run made outside ann_train_network(), so that
+ * ann_get_epochs_trained() and ann_get_best_epoch() describe it.
+ *
+ * @param pnet Network that was trained
+ * @param epochs_trained Epochs the run trained
+ * @param best_epoch 1-based epoch with the lowest monitored loss, or 0 for none
+ * @return ERR_OK, ERR_NULL_PTR if pnet is NULL, or ERR_INVALID if
+ *         best_epoch > epochs_trained
+ *
+ * @see ann_record_epoch()
+ */
+ANN_API int ann_set_training_run(PNetwork pnet, unsigned epochs_trained, unsigned best_epoch);
 
 // ============================================================================
 // LEARNING RATE SCHEDULERS

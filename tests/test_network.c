@@ -491,6 +491,22 @@ void test_main(int argc, char *argv[]) {
     TESTEX("ann_get_epochs_trained counts only the last run", (ann_get_epochs_trained(net_runs) == 5));
     TESTEX("History spans both runs", (ann_get_history_count(net_runs) == 12));
     TESTEX("ann_get_epochs_trained of NULL is 0", (ann_get_epochs_trained(NULL) == 0));
+
+    // Epochs trained outside ann_train_network() can be recorded and reported
+    TESTEX("ann_record_epoch appends", (ann_record_epoch(net_runs, 0.5f, 0.01f, 0.25f) == ERR_OK
+        && ann_record_epoch(net_runs, 0.4f, 0.02f, -3.0f) == ERR_OK
+        && ann_get_history_count(net_runs) == 14));
+    real rec_loss[14], rec_lr[14], rec_val[14];
+    ann_get_history(net_runs, rec_loss, rec_lr, rec_val, 14);
+    TESTEX("ann_record_epoch stores loss, rate and validation loss",
+        (rec_loss[12] == 0.5f && rec_lr[12] == 0.01f && rec_val[12] == 0.25f && rec_loss[13] == 0.4f && rec_lr[13] == 0.02f));
+    TESTEX("ann_record_epoch stores a negative validation loss as -1", (rec_val[13] == (real)-1.0));
+    TESTEX("ann_record_epoch of NULL fails", (ann_record_epoch(NULL, 0.5f, 0.01f, -1.0f) == ERR_NULL_PTR));
+    TESTEX("ann_set_training_run sets the run", (ann_set_training_run(net_runs, 2, 1) == ERR_OK
+        && ann_get_epochs_trained(net_runs) == 2 && ann_get_best_epoch(net_runs) == 1));
+    TESTEX("ann_set_training_run rejects a best epoch past the run",
+        (ann_set_training_run(net_runs, 2, 3) == ERR_INVALID && ann_get_epochs_trained(net_runs) == 2));
+    TESTEX("ann_set_training_run of NULL fails", (ann_set_training_run(NULL, 2, 1) == ERR_NULL_PTR));
     ann_free_network(net_runs);
     
     // Export learning curve

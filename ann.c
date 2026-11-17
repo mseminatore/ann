@@ -475,7 +475,7 @@ static real gelu_derivative(real z)
 //------------------------------
 // Forward declarations
 //------------------------------
-static void record_history(PNetwork pnet, real loss, real learning_rate, real val_loss);
+static int record_history(PNetwork pnet, real loss, real learning_rate, real val_loss);
 
 //------------------------------
 // compute the softmax
@@ -4960,6 +4960,28 @@ unsigned ann_get_epochs_trained(const PNetwork pnet)
 }
 
 //------------------------------
+// report a training run made outside ann_train_network()
+//------------------------------
+int ann_set_training_run(PNetwork pnet, unsigned epochs_trained, unsigned best_epoch)
+{
+	if (!pnet)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_set_training_run");
+		return ERR_NULL_PTR;
+	}
+
+	if (best_epoch > epochs_trained)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_set_training_run");
+		return ERR_INVALID;
+	}
+
+	pnet->epochs_trained = epochs_trained;
+	pnet->best_epoch = best_epoch;
+	return ERR_OK;
+}
+
+//------------------------------
 // set learning rate scheduler
 //------------------------------
 void ann_set_lr_scheduler(PNetwork pnet, LRSchedulerFunc scheduler, void *user_data)
@@ -8689,7 +8711,7 @@ int ann_export_pikchr(const PNetwork pnet, const char *filename)
 //------------------------------
 // Record epoch in training history
 //------------------------------
-static void record_history(PNetwork pnet, real loss, real learning_rate, real val_loss)
+static int record_history(PNetwork pnet, real loss, real learning_rate, real val_loss)
 {
 	// Check if we need to allocate or expand history
 	if (pnet->history_count >= pnet->history_capacity)
@@ -8699,23 +8721,23 @@ static void record_history(PNetwork pnet, real loss, real learning_rate, real va
 			new_capacity = MAX_HISTORY_SIZE;
 		
 		if (pnet->history_count >= MAX_HISTORY_SIZE)
-			return;  // History full, stop recording
+			return ERR_INVALID;  // History full, stop recording
 		
 		// Store each buffer as soon as it grows: a failed realloc leaves the
 		// old buffer valid, so nothing is lost or freed twice
 		real *new_loss = (real *)realloc(pnet->loss_history, new_capacity * sizeof(real));
 		if (!new_loss)
-			return;  // Allocation failed, skip recording
+			return ERR_ALLOC;  // Allocation failed, skip recording
 		pnet->loss_history = new_loss;
 
 		real *new_lr = (real *)realloc(pnet->lr_history, new_capacity * sizeof(real));
 		if (!new_lr)
-			return;
+			return ERR_ALLOC;
 		pnet->lr_history = new_lr;
 
 		real *new_val = (real *)realloc(pnet->val_loss_history, new_capacity * sizeof(real));
 		if (!new_val)
-			return;
+			return ERR_ALLOC;
 		pnet->val_loss_history = new_val;
 
 		pnet->history_capacity = new_capacity;
@@ -8725,6 +8747,21 @@ static void record_history(PNetwork pnet, real loss, real learning_rate, real va
 	pnet->lr_history[pnet->history_count] = learning_rate;
 	pnet->val_loss_history[pnet->history_count] = val_loss;
 	pnet->history_count++;
+	return ERR_OK;
+}
+
+//------------------------------
+// Record an epoch trained outside ann_train_network()
+//------------------------------
+int ann_record_epoch(PNetwork pnet, real loss, real learning_rate, real val_loss)
+{
+	if (!pnet)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_record_epoch");
+		return ERR_NULL_PTR;
+	}
+
+	return record_history(pnet, loss, learning_rate, val_loss < (real)0.0 ? (real)-1.0 : val_loss);
 }
 
 //------------------------------

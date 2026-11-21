@@ -68,6 +68,37 @@ static int gc_gpu_matches_cpu(PNetwork net)
     return 1;
 }
 
+// ann_predict_layer() on a network uploaded to the GPU: the hidden layer
+// matches sigmoid(W x + b) computed here from the CPU weights, and the output
+// layer matches ann_predict_batch(). Without a backend eval_layer step the
+// hidden layer runs on the CPU, so this checks that its weights are current.
+static int gc_layer_matches(PNetwork net)
+{
+    real hidden[4 * 8], out[4], batch[4];
+    if (ann_predict_layer(net, gc_xor_in, 1, hidden, 4) != ERR_OK ||
+        ann_predict_layer(net, gc_xor_in, 2, out, 4) != ERR_OK)
+        return 0;
+    ann_predict_batch(net, gc_xor_in, batch, 4);
+
+    PTensor w = net->layers[1].t_weights, b = net->layers[1].t_bias;
+    for (int s = 0; s < 4; s++) {
+        for (int r = 0; r < 8; r++) {
+            double z = b->values[r];
+            for (int c = 0; c < 2; c++)
+                z += (double)w->values[r * 2 + c] * gc_xor_in[s * 2 + c];
+            double d = hidden[s * 8 + r] - 1.0 / (1.0 + exp(-z));
+            if (d < 0) d = -d;
+            if (d > GPU_CONSISTENCY_TOL)
+                return 0;
+        }
+        real d = out[s] - batch[s];
+        if (d < 0) d = -d;
+        if (d > GPU_CONSISTENCY_TOL)
+            return 0;
+    }
+    return 1;
+}
+
 // Network with dropout on two hidden layers: sigmoid (derivative uses the
 // activation) and ReLU (derivative uses the pre-activation)
 static PNetwork gc_make_dropout_net(void)
@@ -214,6 +245,8 @@ static void run_gpu_consistency_tests(void)
     gc_train(net);
     TESTEX("After GPU training, CPU weights match the GPU without an explicit sync",
            gc_gpu_matches_cpu(net));
+    TESTEX("ann_predict_layer() after GPU training matches the trained weights",
+           gc_layer_matches(net));
     ann_free_network(net);
 
     // ========================================================================
@@ -372,6 +405,8 @@ static void run_gpu_consistency_tests(void)
         ann_train_step(net, &gc_xor_in[(step % 4) * 2], &gc_xor_out[step % 4], 1);
     TESTEX("Mid-session predictions use the updated weights",
            gc_gpu_matches_cpu(net));
+    TESTEX("Mid-session ann_predict_layer() uses the updated weights",
+           gc_layer_matches(net));
 
     int n_w = net->layers[1].t_weights->rows * net->layers[1].t_weights->cols;
     real *before_sync = (real *)malloc((size_t)n_w * sizeof(real));

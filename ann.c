@@ -2844,10 +2844,11 @@ static void activation_range(void *arg, int begin, int end)
 //---------------------------------------------
 // Batched forward propagation
 // Input: layers[0].t_batch_values has input data [batch_size × input_nodes]
-// Output: all layers have t_batch_values populated
+// Output: layers 1..last have t_batch_values populated (last is the output
+// layer for a full pass; ann_predict_layer stops lower)
 // Also stores pre-activation values in t_batch_z for backprop derivatives
 //---------------------------------------------
-static void eval_network_batched(PNetwork pnet, int batch_size)
+static void eval_network_batched(PNetwork pnet, int batch_size, int last)
 {
 	if (!pnet)
 		return;
@@ -2855,7 +2856,7 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 	lowbit_sync(pnet);
 
 	// Loop over non-input layers (each owns the parameters from the layer below)
-	for (int layer = 1; layer < pnet->layer_count; layer++)
+	for (int layer = 1; layer <= last; layer++)
 	{
 		PLayer cur = &pnet->layers[layer];
 		PTensor X = pnet->layers[layer - 1].t_batch_values;  // [batch × in_nodes]
@@ -2893,7 +2894,7 @@ static void eval_network_batched(PNetwork pnet, int batch_size)
 	}
 
 	// Apply softmax on output if requested
-	if (pnet->layers[pnet->layer_count - 1].activation == ACTIVATION_SOFTMAX)
+	if (last == pnet->layer_count - 1 && pnet->layers[last].activation == ACTIVATION_SOFTMAX)
 		softmax_batched(pnet, batch_size);
 }
 
@@ -4132,7 +4133,7 @@ static void zero_gradients(PNetwork pnet)
 //-----------------------------------------------
 static real train_batch_cpu(PNetwork pnet, int batch_size, PTensor targets)
 {
-	eval_network_batched(pnet, batch_size);
+	eval_network_batched(pnet, batch_size, pnet->layer_count - 1);
 
 	// Batched backward pass (also computes loss)
 	real loss = back_propagate_batched(pnet, batch_size, targets);
@@ -5937,17 +5938,18 @@ static void set_batch_rows(PNetwork pnet, int rows)
 }
 
 //-----------------------------------------------------------
-// CPU batch inference: runs the batched forward pass over chunks of rows.
-// The chunk is the allocated batch size. Outside training the batch tensors
-// grow to PREDICT_CHUNK rows; during training they are left at the training
-// batch size, since the training loop reuses them.
+// CPU batch inference: runs the batched forward pass over chunks of rows, up
+// to layer `last`, whose values are copied to outputs. The chunk is the
+// allocated batch size. Outside training the batch tensors grow to
+// PREDICT_CHUNK rows; during training they are left at the training batch
+// size, since the training loop reuses them.
 //-----------------------------------------------------------
 #define PREDICT_CHUNK 256
 
-static int predict_batch_cpu(PNetwork pnet, const real *inputs, real *outputs, int batch_size)
+static int predict_batch_cpu(PNetwork pnet, const real *inputs, real *outputs, int batch_size, int last)
 {
 	int in_nodes  = pnet->layers[0].node_count;
-	int out_nodes = pnet->layers[pnet->layer_count - 1].node_count;
+	int out_nodes = pnet->layers[last].node_count;
 	unsigned want = batch_size < PREDICT_CHUNK ? (unsigned)batch_size : PREDICT_CHUNK;
 
 	if (pnet->current_batch_size < want && (!pnet->is_training || pnet->current_batch_size == 0))
@@ -5959,7 +5961,7 @@ static int predict_batch_cpu(PNetwork pnet, const real *inputs, real *outputs, i
 
 	int chunk = (int)pnet->current_batch_size;
 	PTensor X = pnet->layers[0].t_batch_values;
-	PTensor Y = pnet->layers[pnet->layer_count - 1].t_batch_values;
+	PTensor Y = pnet->layers[last].t_batch_values;
 
 	// Inference never applies dropout
 	int was_training = pnet->is_training;
@@ -5971,7 +5973,7 @@ static int predict_batch_cpu(PNetwork pnet, const real *inputs, real *outputs, i
 
 		memcpy(X->values, inputs + (size_t)start * in_nodes, (size_t)count * in_nodes * sizeof(real));
 		set_batch_rows(pnet, count);
-		eval_network_batched(pnet, count);
+		eval_network_batched(pnet, count, last);
 		memcpy(outputs + (size_t)start * out_nodes, Y->values, (size_t)count * out_nodes * sizeof(real));
 	}
 
@@ -6012,7 +6014,52 @@ int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, in
 		return g_gpu_backend->eval_batch(pnet, inputs, outputs, batch_size);
 #endif
 
-	return predict_batch_cpu(pnet, inputs, outputs, batch_size);
+	return predict_batch_cpu(pnet, inputs, outputs, batch_size, pnet->layer_count - 1);
+}
+
+//-----------------------------------------------------------
+// The outputs of one layer for a batch of inputs (ann_predict_layer)
+//
+// The output layer is ann_predict_batch. For a lower layer the forward pass
+// stops there: on the GPU if the backend has an eval_layer step, else on the
+// CPU. A GPU copy that gpu_ready() accepts is as new as the CPU weights
+// (training syncs them back when it ends, and the online API and
+// ann_set_layer_param keep both current), so the CPU pass needs no download.
+//-----------------------------------------------------------
+int ann_predict_layer(const PNetwork pnet, const real *inputs, int layer, real *outputs, int batch_size)
+{
+	if (!pnet || !inputs || !outputs || batch_size <= 0)
+	{
+		invoke_error_callback(ERR_NULL_PTR, "ann_predict_layer");
+		return ERR_NULL_PTR;
+	}
+
+	if (pnet->layer_count <= 0 || !pnet->layers || layer < 0 || layer >= pnet->layer_count)
+	{
+		invoke_error_callback(ERR_INVALID, "ann_predict_layer");
+		return ERR_INVALID;
+	}
+
+	if (layer == pnet->layer_count - 1)
+		return ann_predict_batch(pnet, inputs, outputs, batch_size);
+
+	if (layer == 0)
+	{
+		memcpy(outputs, inputs, (size_t)batch_size * pnet->layers[0].node_count * sizeof(real));
+		return ERR_OK;
+	}
+
+#ifdef USE_GPU
+	if (gpu_ready(pnet) && g_gpu_backend->eval_layer)
+	{
+		int err = g_gpu_backend->eval_layer(pnet, inputs, layer, outputs, batch_size);
+		if (err == ERR_OK)
+			return ERR_OK;
+		// fall through to the CPU path if the GPU step fails
+	}
+#endif
+
+	return predict_batch_cpu(pnet, inputs, outputs, batch_size, layer);
 }
 
 //================================================================================================

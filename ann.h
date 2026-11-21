@@ -46,9 +46,9 @@ extern "C" {
 // release tag must match it (vMAJOR.MINOR.PATCH; see .github/workflows/release.yml)
 //------------------------------
 #define ANN_VERSION_MAJOR	0
-#define ANN_VERSION_MINOR	11
+#define ANN_VERSION_MINOR	12
 #define ANN_VERSION_PATCH	0
-#define ANN_VERSION_STRING	"0.11.0"
+#define ANN_VERSION_STRING	"0.12.0"
 // one number for compile-time checks: #if ANN_VERSION >= ANN_MAKE_VERSION(0, 11, 0)
 #define ANN_MAKE_VERSION(major, minor, patch)	((major) * 10000 + (minor) * 100 + (patch))
 #define ANN_VERSION	ANN_MAKE_VERSION(ANN_VERSION_MAJOR, ANN_VERSION_MINOR, ANN_VERSION_PATCH)
@@ -1274,6 +1274,38 @@ ANN_API void ann_gpu_free_network(PNetwork pnet);
  * @return ERR_ALLOC if GPU buffer allocation fails
  */
 ANN_API int ann_predict_batch(const PNetwork pnet, const real *inputs, real *outputs, int batch_size);
+
+/**
+ * Get one layer's outputs (activations) for many samples at once: to look at
+ * what hidden layers compute (feature maps, embeddings), or to use a trained
+ * network's layers as features.
+ *
+ * Runs the forward pass from the inputs up to `layer` and stops there, so it
+ * costs less than a full prediction. Each row of outputs is the layer's
+ * values after its activation, laid out as its shape (ann_get_layer_shape):
+ * channel by channel, each channel row by row; a dense layer's nodes in order.
+ * Layer 0 gives the inputs back, and the output layer gives what
+ * ann_predict_batch() does. Dropout is never applied, and masked layers'
+ * masked steps are 0.
+ *
+ * Normal predictions are unaffected: nothing is kept from the hidden layers
+ * unless this is called. On the CPU it runs the batched forward pass in
+ * chunks of up to 256 rows, like ann_predict_batch(). A network uploaded to a
+ * GPU runs it there if the backend can stop the forward pass at a layer (its
+ * optional eval_layer step), else on the CPU with the same weights, as the CPU
+ * copy is kept current.
+ *
+ * @param pnet       Network to evaluate
+ * @param inputs     Row-major input array [batch_size × input_node_count]
+ * @param layer      Layer index, 0 (the inputs) .. ann_get_layer_count() - 1
+ * @param outputs    Row-major array [batch_size × the layer's channels * height * width] (written)
+ * @param batch_size Number of samples
+ * @return ERR_OK on success
+ * @return ERR_NULL_PTR if any pointer is NULL or batch_size <= 0
+ * @return ERR_INVALID for a bad layer index
+ * @return ERR_ALLOC if the batch buffers cannot be allocated
+ */
+ANN_API int ann_predict_layer(const PNetwork pnet, const real *inputs, int layer, real *outputs, int batch_size);
 
 /**
  * Download updated weights and biases from GPU back to CPU.

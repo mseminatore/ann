@@ -145,6 +145,8 @@ ann_train_begin | begin an online/incremental training session
 ann_train_step | train one mini-batch step (online training)
 ann_train_end | end an online/incremental training session
 ann_predict | predict an output using a previously trained network
+ann_predict_batch | predict the outputs of many samples at once
+ann_predict_layer | get one layer's outputs (activations, feature maps) for many samples
 ann_set_convergence | set the convergence threshold (optional)
 ann_evaluate_accuracy | evaluate accuracy of trained network using test data
 ann_evaluate_loss | evaluate the network's loss on a dataset

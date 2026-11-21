@@ -53,7 +53,8 @@ extern "C" {
 /**
  * GPU backend vtable.
  *
- * All function pointers must be non-NULL when a backend is active.
+ * All function pointers must be non-NULL when a backend is active, except the
+ * optional ones at the end (eval_layer), which may be NULL.
  * If a backend does not support an operation it should return 0/ERR_FAIL gracefully.
  */
 typedef struct {
@@ -133,6 +134,18 @@ typedef struct {
      *         the completed steps' updates).
      */
     int (*train_finish)(PNetwork pnet, real *loss_sum);
+
+    /**
+     * Optional (NULL if the backend lacks it; positional initializers that
+     * stop at train_finish leave it NULL): a batched forward pass that stops
+     * after `layer` (1 .. layer_count - 2) and copies that layer's values,
+     * after its activation, to outputs, for ann_predict_layer(). Without it
+     * ann_predict_layer() runs the CPU forward pass on the CPU weights, which
+     * are current whenever the GPU copy is.
+     * @param outputs Row-major [batch_size x the layer's node_count] (written)
+     * @return ERR_OK on success; anything else falls back to the CPU.
+     */
+    int (*eval_layer)(const PNetwork pnet, const real *inputs, int layer, real *outputs, int batch_size);
 } GpuBackend;
 
 /**

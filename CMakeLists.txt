@@ -229,7 +229,13 @@ if ( USE_VULKAN )
         DEPENDS ${VULKAN_SPV_FILES} cmake/embed_spirv.cmake
         COMMENT "Embedding Vulkan shaders"
         VERBATIM)
-    set(VULKAN_SRC tensor_vulkan.c ${VULKAN_SPV_DIR}/shaders_vk_spv.h)
+    # One target owns the header: listed in the sources of libann and ann_unload, the
+    # Visual Studio and Makefile generators ran the command once per target, and in a
+    # parallel build both wrote the same .tmp file (duplicate definitions)
+    add_custom_target(ann_vk_shaders DEPENDS ${VULKAN_SPV_DIR}/shaders_vk_spv.h)
+    # ... and tensor_vulkan.c, which includes it, still recompiles when it changes
+    set_source_files_properties(tensor_vulkan.c PROPERTIES OBJECT_DEPENDS ${VULKAN_SPV_DIR}/shaders_vk_spv.h)
+    set(VULKAN_SRC tensor_vulkan.c)
     # dlopen() on Linux/macOS
     set(VULKAN_LIBS ${CMAKE_DL_LIBS})
 endif()
@@ -246,6 +252,7 @@ else()
 endif()
 if ( USE_VULKAN )
     target_include_directories(libann PRIVATE ${Vulkan_INCLUDE_DIRS} ${VULKAN_SPV_DIR})
+    add_dependencies(libann ann_vk_shaders)
 endif()
 # ann_parallel_for's worker threads (pthreads; nothing extra on Windows)
 find_package(Threads REQUIRED)
@@ -435,6 +442,7 @@ target_compile_definitions(ann_unload PRIVATE ANN_BUILDING_DLL)
 set_target_properties(ann_unload PROPERTIES C_VISIBILITY_PRESET hidden CUDA_VISIBILITY_PRESET hidden)
 if ( USE_VULKAN )
     target_include_directories(ann_unload PRIVATE ${Vulkan_INCLUDE_DIRS} ${VULKAN_SPV_DIR})
+    add_dependencies(ann_unload ann_vk_shaders)
 endif()
 target_link_libraries(ann_unload ${BLAS_LIB} ${MATH_LIB} ${METAL_LIB} ${CUDA_LIBS} ${VULKAN_LIBS} Threads::Threads)
 
